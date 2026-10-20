@@ -196,16 +196,39 @@ final class Recs {
      */
     private List<Pick> playlist(String kind) {
         Iptv iptv = Iptv.get(context);
+        List<Iptv.Category> cats = kind == null ? iptv.liveCategories()
+                : "movie".equals(kind) ? iptv.movieCategories() : iptv.seriesCategories();
         List<Iptv.Item> all = kind == null ? iptv.live() : "movie".equals(kind) ? iptv.movies() : iptv.series();
+        Map<String, String> names = new HashMap<>();
+        for (Iptv.Category c : cats) names.put(c.id, c.name);
+
+        // The cards come from the French channels (or the first categories), not from the whole catalogue: 8 000
+        // channels rotating at random would show Belgian shopping channels at 17:00.
+        List<String> wanted = new ArrayList<>();
+        for (Iptv.Category c : cats) {
+            String n = c.name.toUpperCase(Locale.ROOT);
+            if (n.contains("FRANCE") || (kind != null && wanted.size() < 2)) wanted.add(c.id);
+            if (wanted.size() >= 3) break;
+        }
+        List<Iptv.Item> pool = new ArrayList<>();
+        for (Iptv.Item i : all) {
+            if (!wanted.isEmpty() && !wanted.contains(i.group)) continue;
+            if (i.url.isEmpty()) continue;
+            // The panel puts decorative titles between sections ("── ✧･ﾟ GENERAL ✧･ﾟ ──"): they are never a channel.
+            if (i.name.startsWith("─") || i.name.startsWith("=") || i.name.contains("✧")) continue;
+            pool.add(i);
+        }
+        if (pool.isEmpty()) pool = all;
+
         List<Pick> out = new ArrayList<>();
-        if (all.isEmpty()) return out;
+        if (pool.isEmpty()) return out;
         long hour = System.currentTimeMillis() / 3600_000L;
-        int at = (int) ((hour * 3) % all.size());
-        for (int i = 0; i < 3 && i < all.size(); i++) {
-            Iptv.Item it = all.get((at + i) % all.size());
+        int at = (int) ((hour * 3) % pool.size());
+        for (int i = 0; i < 3 && i < pool.size(); i++) {
+            Iptv.Item it = pool.get((at + i) % pool.size());
             Pick p = new Pick();
             p.title = it.name;
-            p.meta = it.group;
+            p.meta = names.containsKey(it.group) ? names.get(it.group) : "";
             p.url = it.url;
             p.backdrop = null;
             out.add(p);

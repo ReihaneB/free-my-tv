@@ -70,6 +70,9 @@ final class Config {
     static final boolean DISABLE_ASSISTANT = $ASSIST;
     static final boolean SHOW_CRYPTO = $CRYPTO;
     static final String IPTV_URL = "$(prop iptv_url '')";
+    static final String IPTV_HOST = "$(prop iptv_host '')";
+    static final String IPTV_USER = "$(prop iptv_user '')";
+    static final String IPTV_PASS = "$(prop iptv_pass '')";
 }
 EOF
 

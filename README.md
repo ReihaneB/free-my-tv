@@ -89,6 +89,11 @@ The first values come from `config.properties`, created by the first build. Most
 
 Changed something? Run `./build.sh` and install again. Keep `freemytv.keystore`: updates are signed with it.
 
+On a TV you keep working on, `./deploy.sh` does the whole loop and keeps a way back: `./deploy.sh save "what changed"`
+commits, tags (`v<date>`), builds and installs; `./deploy.sh rollback <tag>` rebuilds an older tag and installs it
+(`adb install -d`, so the older version code is accepted); `./deploy.sh status` says what the TV runs now. The APK's
+version comes from git (`git describe`), so whatever is installed on the TV names its commit.
+
 ### The TMDB key
 
 Free, and it takes two minutes: create an account at [themoviedb.org](https://www.themoviedb.org/signup), then open [Settings → API](https://www.themoviedb.org/settings/api) and request a developer key. Paste the *API Read Access Token* (or the *API Key*) after `tmdb_key=`. It's your key: `config.properties` stays out of git.

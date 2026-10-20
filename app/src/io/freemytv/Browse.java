@@ -53,7 +53,7 @@ public final class Browse extends Activity implements Iptv.Listener {
     private FrameLayout holder;
     private LinearLayout header;
     private TextView empty;
-    private View firstFocus, firstCard;
+    private View firstFocus, firstCard, heroButton;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -310,10 +310,11 @@ public final class Browse extends Activity implements Iptv.Listener {
 
     private void hero(Iptv iptv) {
         List<Iptv.Item> feature = new ArrayList<>();
-        feature.addAll(Prefs.resume("vod"));
-        feature.addAll(Prefs.resume("series"));
+        feature.addAll(enrich(Prefs.resume("vod"), iptv));
+        feature.addAll(enrich(Prefs.resume("series"), iptv));
+        boolean resuming = !feature.isEmpty();
         if (feature.isEmpty()) feature.addAll(iptv.fresh("vod", 21, 1));
-        if (feature.isEmpty()) feature.addAll(iptv.fresh("live", 3650, 1));
+        if (feature.isEmpty()) feature.addAll(iptv.best("vod", 1));
         if (feature.isEmpty()) return;
         final Iptv.Item item = feature.get(0);
 
@@ -340,7 +341,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         words.setPadding(dp(34), dp(24), dp(34), dp(26));
 
         TextView meta = new TextView(this);
-        meta.setText("À REPRENDRE");
+        meta.setText(resuming ? "À REPRENDRE" : "À LA UNE");
         meta.setTextSize(11);
         meta.setTextColor(0xCCFFFFFF);
         meta.setLetterSpacing(0.12f);
@@ -367,6 +368,28 @@ public final class Browse extends Activity implements Iptv.Listener {
             words.addView(bar, bp);
         }
 
+        TextView facts = new TextView(this);
+        StringBuilder line = new StringBuilder();
+        if (!item.year.isEmpty()) line.append(item.year);
+        if (item.rating > 0) {
+            if (line.length() > 0) line.append("  ·  ");
+            line.append(String.format(java.util.Locale.ROOT, "%.1f", item.rating)).append("/10");
+        }
+        String catName = nameOf(categoriesOf(iptv), item.group);
+        if (!catName.isEmpty()) {
+            if (line.length() > 0) line.append("  ·  ");
+            line.append(catName);
+        }
+        if (line.length() > 0) {
+            facts.setText(line.toString());
+            facts.setTextColor(0xCCFFFFFF);
+            facts.setTextSize(13);
+            LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            fp.topMargin = dp(6);
+            words.addView(facts, fp);
+        }
+
         TextView watch = new TextView(this);
         watch.setText(progress > 0.01f ? "Reprendre" : "Regarder");
         watch.setTextSize(15);
@@ -379,6 +402,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         watch.setBackground(pill);
         watch.setFocusable(true);
         watch.setOnClickListener(v -> play(item.url, item.name, item.logo));
+        heroButton = watch;
         watch.setOnFocusChangeListener((v, has) -> v.animate().scaleX(has ? 1.06f : 1f).scaleY(has ? 1.06f : 1f)
                 .setDuration(110).start());
         LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -423,13 +447,16 @@ public final class Browse extends Activity implements Iptv.Listener {
             hero(iptv);
 
             List<Iptv.Item> res = new ArrayList<>();
-            res.addAll(Prefs.resume("vod"));
-            res.addAll(Prefs.resume("series"));
+            res.addAll(enrich(Prefs.resume("vod"), iptv));
+            res.addAll(enrich(Prefs.resume("series"), iptv));
             if (!res.isEmpty()) row("Reprendre la lecture", res);
             row("Nouveautés", iptv.fresh("vod", 21, 20));
             row("Chaînes françaises", france(iptv));
             hdmiRow();
-            row("Films les mieux notés", iptv.best("vod", 20));
+            List<Iptv.Item> hype = new ArrayList<>(iptv.best("vod", 14));
+            hype.addAll(iptv.best("series", 8));
+            hype.sort((a, b) -> Float.compare(b.rating, a.rating));
+            row("Hype", hype);
             row("Séries les mieux notées", iptv.best("series", 20));
             List<Iptv.Item> films = iptv.movies();
             for (Iptv.Category c : iptv.movieCategories()) {
@@ -493,7 +520,8 @@ public final class Browse extends Activity implements Iptv.Listener {
         }
         AppLog.w(order.toString());
         View focused = getCurrentFocus();
-        if (firstFocus != null && (focused == null || focused == content
+        boolean gone = focused == null || focused.getParent() == null;   // the last build's views are detached
+        if (firstFocus != null && (gone || focused == content
                 || gridRows.get(gridRows.size() - 1).contains(focused))) {
             firstFocus.requestFocus();
         } else if (focused == null && tabs.getChildCount() > 0) {
@@ -546,6 +574,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         for (TvInputInfo info : tim.getTvInputList()) {
             if (info.getType() == TvInputInfo.TYPE_HDMI) inputs.add(info);
         }
+        inputs.sort((a, b) -> a.getId().compareTo(b.getId()));
         if (inputs.isEmpty()) return;
 
         TextView t = new TextView(this);
@@ -573,10 +602,11 @@ public final class Browse extends Activity implements Iptv.Listener {
             CharSequence label = info.loadLabel(this);
             TextView tile = new TextView(this);
             tile.setText(label == null ? "HDMI" : label.toString());
-            tile.setTextColor(0xFF0B0B0F);
-            tile.setTextSize(15);
+            tile.setTextColor(0xFFFFFFFF);
+            tile.setTextSize(16);
+            tile.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             tile.setGravity(Gravity.CENTER);
-            tile.setBackground(glass(0xE6FFFFFF, 0xFFFFFFFF));
+            tile.setBackground(glass(0x14FFFFFF, 0x26FFFFFF));
             tile.setFocusable(true);
             tile.setContentDescription(label == null ? "HDMI" : label.toString());
             tile.setOnClickListener(v -> {
@@ -587,8 +617,10 @@ public final class Browse extends Activity implements Iptv.Listener {
                     AppLog.w("hdmi: " + e.getMessage());
                 }
             });
-            tile.setOnFocusChangeListener((v, has) -> v.animate().scaleX(has ? 1.05f : 1f).scaleY(has ? 1.05f : 1f)
-                    .setDuration(110).start());
+            tile.setOnFocusChangeListener((v, has) -> {
+                v.animate().scaleX(has ? 1.05f : 1f).scaleY(has ? 1.05f : 1f).setDuration(110).start();
+                v.setBackground(has ? glass(0x2BFFFFFF, 0xFFFFFFFF) : glass(0x14FFFFFF, 0x26FFFFFF));
+            });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(150), dp(CARD_H));
             lp.rightMargin = dp(10);
             line.addView(tile, lp);
@@ -596,6 +628,28 @@ public final class Browse extends Activity implements Iptv.Listener {
             if (firstFocus == null) firstFocus = tile;
             if (firstCard == null) firstCard = tile;
         }
+    }
+
+    private static boolean progress0(Iptv.Item item) {
+        return item != null && !item.url.isEmpty() && Prefs.progressOf(item.url) > 0.01f;
+    }
+
+    /** A resume entry only keeps the stream URL: the poster is looked up again by the stream id. */
+    private List<Iptv.Item> enrich(List<Iptv.Item> items, Iptv iptv) {
+        if (items.isEmpty()) return items;
+        List<Iptv.Item> all = new ArrayList<>();
+        all.addAll(iptv.movies());
+        all.addAll(iptv.series());
+        for (Iptv.Item it : items) {
+            if (!it.logo.isEmpty()) continue;
+            String id = it.url.substring(it.url.lastIndexOf('/') + 1);
+            int dot = id.indexOf('.');
+            if (dot > 0) id = id.substring(0, dot);
+            for (Iptv.Item c : all) {
+                if (c.id.equals(id) && !c.logo.isEmpty()) { it.logo = c.logo; it.year = c.year; it.rating = c.rating; break; }
+            }
+        }
+        return items;
     }
 
     private List<Iptv.Item> france(Iptv iptv) {
@@ -835,6 +889,11 @@ public final class Browse extends Activity implements Iptv.Listener {
         View f = getCurrentFocus();
         if (f == null) return false;
 
+        if (f == heroButton) {
+            if (key == KeyEvent.KEYCODE_DPAD_UP) { tabViews.get(0).requestFocus(); return true; }
+            if (key == KeyEvent.KEYCODE_DPAD_DOWN) return focusGrid(0, 0);
+            return false;
+        }
         if (f == search) {
             if (key == KeyEvent.KEYCODE_DPAD_DOWN) return focusGrid(0, 0) || focusChip(0);
             return false;                        // left/right/up stay in the field
@@ -872,6 +931,12 @@ public final class Browse extends Activity implements Iptv.Listener {
                 if (r > 0) return focusGrid(r - 1, within);
                 return focusChip(Math.max(0, Math.min(chipViews.size() - 1, within)));
             }
+            return true;
+        }
+        // Anything else (the hero button, a detached view): up always means the tabs.
+        if (key == KeyEvent.KEYCODE_DPAD_UP && !tabViews.isEmpty()) {
+            int idx = "home".equals(type) ? 0 : "live".equals(type) ? 1 : "vod".equals(type) ? 2 : 3;
+            tabViews.get(Math.min(idx, tabViews.size() - 1)).requestFocus();
             return true;
         }
         return false;

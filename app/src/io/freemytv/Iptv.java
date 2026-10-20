@@ -35,7 +35,7 @@ import java.util.Map;
  */
 final class Iptv {
     static final class Item {
-        String name = "", logo = "", group = "", url = "", id = "";
+        String name = "", logo = "", group = "", url = "", id = "", year = "";
         long added;             // when the panel added it: "new this week"
         float rating;           // films and series only
         boolean live;
@@ -266,6 +266,7 @@ final class Iptv {
             it.id = o.optString("stream_id");
             it.url = streamUrl(type, it.id, ext);
             it.added = epoch(o.optString("added"));
+            it.year = o.optString("year", "");
             it.rating = (float) o.optDouble("rating", 0);
             if (!it.name.isEmpty()) out.add(it);
         }

@@ -243,6 +243,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             row.slide = row.slideTo = row.win * step(row.kind);
         }
         layout();
+        requestFrame();   // the focus animation restarts: rebuild() zeroes it, and nothing else would
         invalidate();
     }
 

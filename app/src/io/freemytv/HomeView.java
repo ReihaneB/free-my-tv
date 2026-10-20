@@ -694,18 +694,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             } else {
                 drawCover(c, b, r2);
             }
-        } else if (!t.symbol.isEmpty()) {
-            Symbols.draw(getContext(), c, t.symbol, r2.centerX(), r2.centerY(), 54 * k, DIM);
         } else {
-            cardTitle.setTextSize(20 * k);
-            cardTitle.setTextAlign(Paint.Align.CENTER);
-            List<String> lines = wrap(t.title, cardTitle, r2.width() - 24 * k, 2);
-            float ly = r2.centerY() - (lines.size() - 1) * 13 * k;
-            for (String line : lines) {
-                c.drawText(line, r2.centerX(), ly + Ui.halfCap(cardTitle), cardTitle);
-                ly += 26 * k;
-            }
-            cardTitle.setTextAlign(Paint.Align.LEFT);
+            // No artwork: a quiet glyph, never the title — the caption under the card already has it.
+            String glyph = !t.symbol.isEmpty() ? t.symbol : t.live ? "tv" : "play";
+            Symbols.draw(getContext(), c, glyph, r2.centerX(), r2.centerY(), 54 * k, 0x59FFFFFF);
         }
 
         if (t.progress > 0.005f) {

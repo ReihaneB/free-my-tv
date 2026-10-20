@@ -64,6 +64,12 @@ public final class Browse extends Activity implements Iptv.Listener {
 
     @Override public void onIptv() { ui.post(this::show); }
 
+    /** Coming back from the player: the "Continue watching" row is new. */
+    @Override protected void onResume() {
+        super.onResume();
+        if (content != null) ui.post(this::show);
+    }
+
     // MARK: - Chrome
 
     private View build() {
@@ -501,7 +507,7 @@ public final class Browse extends Activity implements Iptv.Listener {
     }
 
     private void open(Iptv.Item item) {
-        if (!item.url.isEmpty()) { play(item.url, item.name); return; }
+        if (!item.url.isEmpty()) { play(item.url, item.name, item.logo); return; }
         if ("series".equals(type)) showEpisodes(item);
     }
 
@@ -564,10 +570,13 @@ public final class Browse extends Activity implements Iptv.Listener {
         }).start();
     }
 
-    private void play(String url, String name) {
+    private void play(String url, String name) { play(url, name, ""); }
+
+    private void play(String url, String name, String logo) {
         Intent it = new Intent(this, Player.class);
         it.putExtra(Player.EXTRA_URL, url);
         it.putExtra(Player.EXTRA_NAME, name);
+        it.putExtra(Player.EXTRA_LOGO, logo);
         startActivity(it);
     }
 

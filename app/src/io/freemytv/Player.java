@@ -23,12 +23,12 @@ import android.widget.TextView;
 public final class Player extends Activity implements SurfaceHolder.Callback, MediaPlayer.OnPreparedListener,
         MediaPlayer.OnErrorListener, MediaPlayer.OnInfoListener {
 
-    static final String EXTRA_URL = "url", EXTRA_NAME = "name";
+    static final String EXTRA_URL = "url", EXTRA_NAME = "name", EXTRA_LOGO = "logo";
 
     private SurfaceView surface;
     private TextView title, status;
     private MediaPlayer player;
-    private String url = "", name = "";
+    private String url = "", name = "", logo = "";
     private boolean prepared, paused;
 
     @Override protected void onCreate(Bundle state) {
@@ -38,6 +38,8 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
         url = intent.getStringExtra(EXTRA_URL);
         name = intent.getStringExtra(EXTRA_NAME);
         if (name == null) name = "";
+        logo = intent.getStringExtra(EXTRA_LOGO);
+        if (logo == null) logo = "";
         if (url == null || url.isEmpty()) { finish(); return; }
 
         FrameLayout root = new FrameLayout(this);
@@ -126,7 +128,7 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
     private void remember() {
         if (player == null || !prepared) return;
         try {
-            Prefs.saveProgress(url, name, "", player.getCurrentPosition(), player.getDuration());
+            Prefs.saveProgress(url, name, logo, player.getCurrentPosition(), player.getDuration());
         } catch (IllegalStateException ignored) { }
     }
 
@@ -137,6 +139,12 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
             player.release();
             player = null;
         }
+    }
+
+    /** The surface is gone by the time onStop runs: the position has to be taken here. */
+    @Override protected void onPause() {
+        super.onPause();
+        remember();
     }
 
     @Override protected void onStop() {

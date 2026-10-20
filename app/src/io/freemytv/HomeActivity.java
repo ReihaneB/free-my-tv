@@ -35,13 +35,7 @@ public class HomeActivity extends Activity {
             return;
         }
         Ui.init(this);
-        // The TV's home is the streaming home (Browse) when there is an account; the clock screen is one extra tap away.
-        if (Iptv.configured() && !getIntent().getBooleanExtra("canvas", false)) {
-            startActivity(new Intent(this, Browse.class));
-            finish();
-            return;
-        }
-        home = new HomeView(this);
+        home = new HomeView(this);      // this screen is the home, as it always was
         setContentView(home);
         getWindow().setBackgroundDrawable(null);
     }

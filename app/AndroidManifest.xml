@@ -91,9 +91,11 @@
             </intent-filter>
         </activity>
 
+        <!-- The screensaver. It has to run in the main process: Android 11's DreamActivity (the host the system
+             starts for a dream) casts the service's binder to a local DreamServiceWrapper, so a dream service in
+             another process crashes on start there. -->
         <service
             android:name=".Screensaver"
-            android:process=":home"
             android:exported="true"
             android:label="Free My TV"
             android:permission="android.permission.BIND_DREAM_SERVICE">

@@ -188,19 +188,9 @@ final class HomeMode {
             latest.put("originalHome", home).put("originalDream", dream);
             save(c, latest);
             // Turning off an app makes Android delete the Wi-Fi networks it saved (#14), and Original can't bring them
-            // back. The TV's first setup usually saved the network: then stop here, before anything changes.
+            // back. So those apps are left on (the loop below skips them): the TV's first setup is usually one of them,
+            // and losing the network would be worse than living with the setup wizard.
             Set<String> owners = wifiOwners(adb);
-            if (owners.contains(GOOGLE_SETUP) || owners.contains(packageOf(home))) {
-                throw new IOException(Ui.tr("a configuração inicial da TV salvou o Wi-Fi, e desligá-la apagaria essas redes. "
-                        + "Em Configurações → Rede e Internet, esqueça a rede e conecte de novo (as fora de alcance não aparecem "
-                        + "lá: o Claude Code apaga pelo computador) e tente outra vez.",
-                        "the TV's first setup saved the Wi-Fi, and turning it off would erase those networks. "
-                        + "In Settings → Network & Internet, forget the network and connect again (networks out of range don't "
-                        + "show there: Claude Code can remove them from your computer), then try once more.",
-                        "la configuración inicial del TV guardó el Wi-Fi, y desactivarla borraría esas redes. "
-                        + "En Ajustes → Red e Internet, olvida la red y vuelve a conectarte (las fuera de alcance no aparecen "
-                        + "ahí: Claude Code las borra desde la computadora) y vuelve a intentarlo."));
-            }
             if (metrics(latest, ORIGINAL) == null && !home.isEmpty()) {
                 busy(c, Ui.tr("Medindo o Início original…", "Measuring the original home screen…"));
                 measureHomeTime(c, adb, ORIGINAL);
@@ -214,14 +204,17 @@ final class HomeMode {
             Set<String> disabled = new HashSet<>(stringList(state(c), "disabled"));
             Set<String> present = packages(adb, "");
             int done = 0;
+            List<String> keptForWifi = new ArrayList<>();
             for (String pkg : targets) {
                 done++;
                 busy(c, Ui.tr("Desligando apps (", "Turning off apps (") + done + "/" + targets.size() + ")…");
+                if (owners.contains(pkg)) keptForWifi.add(pkg);
                 if (protectedPackage(pkg) || !present.contains(pkg) || owners.contains(pkg)) continue;
                 String out = adb.shell("pm disable-user --user 0 " + pkg);
                 if (out.contains("disabled-user")) disabled.add(pkg);
                 else AppLog.w("could not turn off " + pkg + ": " + out.trim());
             }
+            if (!keptForWifi.isEmpty()) AppLog.w("left on, they saved the Wi-Fi: " + String.join(", ", keptForWifi));
             Watchdog.clear(c);
             s = state(c);
             s.put("mode", FREE).put("since", System.currentTimeMillis()).put("homeReverted", false)
@@ -235,7 +228,10 @@ final class HomeMode {
                 }
             }
             notice(c, Ui.tr("Free My TV ligado: Início e tela de descanso novos, " + disabled.size() + " apps desligados.",
-                    "Free My TV is on: new home screen and screensaver, " + disabled.size() + " apps turned off."));
+                    "Free My TV is on: new home screen and screensaver, " + disabled.size() + " apps turned off.")
+                    + (keptForWifi.isEmpty() ? ""
+                    : " " + Ui.tr("Ficaram ligados, porque salvaram o Wi-Fi: ", "Left on, they saved the Wi-Fi: ")
+                    + String.join(", ", keptForWifi) + "."));
             busy(c, Ui.tr("Medindo o Free My TV…", "Measuring Free My TV…"));
             measureHomeTime(c, adb, FREE);
             done(c, null);

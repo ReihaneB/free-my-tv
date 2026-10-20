@@ -41,9 +41,14 @@ public final class Browse extends Activity implements Iptv.Listener {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout tabs, chips, content;
+    private android.widget.EditText search;
+    private String query = "";
+    private final Runnable runSearch = this::showSearchResults;
+    private int searchSeq;
     private ScrollView scroll;
+    private LinearLayout header;
     private TextView empty;
-    private View firstFocus;
+    private View firstFocus, firstCard;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -75,6 +80,8 @@ public final class Browse extends Activity implements Iptv.Listener {
 
         // Title + tabs
         LinearLayout head = new LinearLayout(this);
+        head.setId(View.generateViewId());
+        header = head;
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
 
@@ -85,15 +92,47 @@ public final class Browse extends Activity implements Iptv.Listener {
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        search = new android.widget.EditText(this);
+        search.setId(1003);
+        search.setHint("Rechercher");
+        search.setHintTextColor(0x66FFFFFF);
+        search.setTextColor(0xFFFFFFFF);
+        search.setTextSize(14);
+        search.setSingleLine(true);
+        search.setBackground(glass(0x14FFFFFF, 0x1FFFFFFF));
+        search.setPadding(dp(14), dp(7), dp(14), dp(8));
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.rightMargin = dp(18);
+        head.addView(search, slp);
+        search.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) { tabs.getChildAt(0).requestFocus(); return true; }
+            return false;
+        });
+        search.addTextChangedListener(new android.text.TextWatcher() {
+            public void afterTextChanged(android.text.Editable e) {
+                query = e.toString().trim();
+                ui.removeCallbacks(runSearch);
+                ui.postDelayed(runSearch, 220);
+            }
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b, int c) { }
+        });
+
         tabs = new LinearLayout(this);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setId(1001);
         head.addView(tabs);
+        tab("live", "Chaînes");
+        tab("vod", "Films");
+        tab("series", "Séries");
         page.addView(head, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         // Categories
         chips = new LinearLayout(this);
         chips.setOrientation(LinearLayout.HORIZONTAL);
+        chips.setId(1002);
         chips.setPadding(0, 0, dp(24), 0);
         HorizontalScrollView chipScroll = new HorizontalScrollView(this);
         chipScroll.setHorizontalScrollBarEnabled(false);
@@ -146,7 +185,41 @@ public final class Browse extends Activity implements Iptv.Listener {
         }
     }
 
+    private final List<String> chipIds = new ArrayList<>();
+
+    /** First chip: hands the focus to the search field, which opens the keyboard. */
+    private void searchChip() {
+        chipIds.add("\u0000search");
+        TextView t = new TextView(this);
+        t.setText("Rechercher");
+        t.setTextSize(13);
+        t.setTextColor(0xCCFFFFFF);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(14), dp(7), dp(14), dp(8));
+        t.setFocusable(true);
+        GradientDrawable pill = new GradientDrawable();
+        pill.setCornerRadius(dp(14));
+        pill.setColor(0x14FFFFFF);
+        t.setBackground(pill);
+        t.setOnClickListener(v -> search.requestFocus());
+        chips.addView(t, margin(0, 0, dp(8), 0));
+    }
+
+    private void paintChips() {
+        for (int i = 0; i < chips.getChildCount() && i < chipIds.size(); i++) {
+            TextView t = (TextView) chips.getChildAt(i);
+            if (chipIds.get(i).startsWith("\u0000")) continue;
+            boolean on = chipIds.get(i).equals(onlyCategory);
+            t.setTextColor(on ? 0xFF0B0B0F : 0xCCFFFFFF);
+            GradientDrawable pill = new GradientDrawable();
+            pill.setCornerRadius(dp(14));
+            pill.setColor(on ? 0xFFFFFFFF : 0x14FFFFFF);
+            t.setBackground(pill);
+        }
+    }
+
     private void chip(String id, String label) {
+        chipIds.add(id);
         TextView t = new TextView(this);
         t.setText(label);
         t.setTextSize(13);
@@ -158,8 +231,17 @@ public final class Browse extends Activity implements Iptv.Listener {
         pill.setCornerRadius(dp(14));
         pill.setColor(id.equals(onlyCategory) ? 0xFFFFFFFF : 0x14FFFFFF);
         t.setBackground(pill);
-        t.setOnClickListener(v -> { onlyCategory = id; show(); });
-        t.setOnFocusChangeListener((v, has) -> { if (has) { onlyCategory = id; show(); } });
+        t.setOnClickListener(v -> { onlyCategory = id; refreshContent(); });
+        t.setNextFocusUpId(1001);
+        t.setOnFocusChangeListener((v, has) -> {
+            if (has && !id.equals(onlyCategory)) { onlyCategory = id; refreshContent(); }
+        });
+        t.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && firstCard != null) { firstCard.requestFocus(); return true; }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP) { tabs.getChildAt(0).requestFocus(); return true; }
+            return false;
+        });
         chips.addView(t, margin(0, 0, dp(8), 0));
     }
 
@@ -167,25 +249,36 @@ public final class Browse extends Activity implements Iptv.Listener {
 
     private void show() {
         Iptv iptv = Iptv.get(this);
-        tabs.removeAllViews();
-        tab("live", "Chaînes");
-        tab("vod", "Films");
-        tab("series", "Séries");
         paintTabs();
 
         chips.removeAllViews();
+        chipIds.clear();
         List<Iptv.Category> cats = categories(iptv);
+        searchChip();
         chip("", "Tout");
         for (Iptv.Category c : cats) chip(c.id, clean(c.name));
 
+        refreshContent();
+    }
+
+    /** Only the rows: called when a chip takes the focus, so the chip that has it is not rebuilt under it. */
+    private void refreshContent() {
+        Iptv iptv = Iptv.get(this);
+        paintChips();
         content.removeAllViews();
         firstFocus = null;
+        firstCard = null;
 
         if (!Iptv.configured()) {
             empty.setText("Aucun compte IPTV configuré (iptv_host, iptv_user, iptv_pass).");
             return;
         }
         empty.setText("");
+
+        if (!query.isEmpty()) {
+            showSearchResults();
+            return;
+        }
 
         List<Iptv.Item> all = items(iptv);
         if (all.isEmpty()) {
@@ -225,10 +318,46 @@ public final class Browse extends Activity implements Iptv.Listener {
                 if (++rows >= 5) break;
             }
         } else {
-            row(nameOf(cats, onlyCategory), pool);
+            row(nameOf(categories(iptv), onlyCategory), pool);
         }
 
         if (firstFocus != null) firstFocus.requestFocus();
+    }
+
+    /** Matches on the name, in the current tab, off the UI thread (12 000 films, and the remote types fast). */
+    private void showSearchResults() {
+        final String q = query.toLowerCase(java.util.Locale.ROOT);
+        if (q.isEmpty()) return;
+        final String kind = type;
+        final int seq = ++searchSeq;
+        content.removeAllViews();
+        empty.setText("Recherche…");
+        final List<Iptv.Item> all = items(Iptv.get(this));
+        new Thread(() -> {
+            List<Iptv.Item> hits = new ArrayList<>();
+            for (Iptv.Item i : all) {
+                if (hits.size() >= 60) break;
+                if (i.name.toLowerCase(java.util.Locale.ROOT).contains(q)) hits.add(i);
+            }
+            ui.post(() -> {
+                if (seq != searchSeq) return;
+                content.removeAllViews();
+                firstFocus = null;
+                if (hits.isEmpty()) {
+                    empty.setText("Rien pour « " + query + " ».");
+                    return;
+                }
+                empty.setText("");
+                List<Iptv.Item> row = new ArrayList<>(hits.subList(0, Math.min(20, hits.size())));
+                this.row(hits.size() + " résultat" + (hits.size() > 1 ? "s" : ""), row);
+                if (hits.size() > 20) {
+                    for (int from = 20; from < hits.size(); from += 20) {
+                        this.row("", new ArrayList<>(hits.subList(from, Math.min(from + 20, hits.size()))));
+                    }
+                }
+                if (firstFocus != null) firstFocus.requestFocus();
+            });
+        }, "search").start();
     }
 
     private List<Iptv.Category> categories(Iptv iptv) {
@@ -331,13 +460,22 @@ public final class Browse extends Activity implements Iptv.Listener {
                     ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
+        card.setNextFocusUpId(1002);
         card.setOnFocusChangeListener((v, has) -> {
             v.animate().scaleX(has ? 1.07f : 1f).scaleY(has ? 1.07f : 1f).setDuration(110).start();
             v.setBackground(has ? glass(0x2BFFFFFF, 0xFFFFFFFF) : glass(0x0FFFFFFF, 0x1FFFFFFF));
             v.setElevation(dp(has ? 18 : 2));
         });
         card.setOnClickListener(v -> open(item));
+        card.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                if (chips.getChildCount() > 0) { chips.getChildAt(0).requestFocus(); return true; }
+            }
+            return false;
+        });
         if (firstFocus == null) firstFocus = card;
+        if (firstCard == null) firstCard = card;
         return card;
     }
 

@@ -82,7 +82,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
     // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
-    private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 442;
+    private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 372;
+    // One row of small posters under the cards: what was left unfinished, or what just came in.
+    private static final float L_ROW_TITLE = 668, L_ROW_TOP = 684, L_ROW_H = 138, L_ROW_W = 92, L_ROW_GAP = 12;
     private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
     private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
@@ -90,7 +92,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final String[] TABS_EN = {"Explore", "Movies", "Shows"};
     private static final String[] TABS_ES = {"Explorar", "Películas", "Series"};
     private static final String[] TAB_KIND = {null, "movie", "tv"};
-    private static final int Z_TOP = 4, Z_CARDS = 5;
+    private static final int Z_TOP = 4, Z_CARDS = 5, Z_ROW = 6;
 
     private final Activity activity;
     private final Scene scene = new Scene();
@@ -128,6 +130,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final Spring[] topFocus = new Spring[6];
     private final RectF[] topRects = new RectF[6];
     private final Spring[] cardFocus = new Spring[3];
+    private final List<Recs.Pick> rowItems = new ArrayList<>();
+    private final RectF[] rowRects = new RectF[7];
+    private int rowIndex;
+    private String rowHeading = "";
+    private Paint lRowTitle, rowGlass, rowGlassOn, rowInk, rowFilter;
     private final RectF[] cardRects = new RectF[3];
     private final List<HomeApps.Item> lightButtons = new ArrayList<>();
     private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip;
@@ -319,6 +326,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = 0; i < 3; i++) {
             cardFocus[i] = new Spring(0.32f, 0.78f, 0);
             cardRects[i] = new RectF();
+        }
+        for (int i = 0; i < rowRects.length; i++) {
+            rowRects[i] = new RectF();
         }
         makeLightButtons();
         recs.setLight(true);
@@ -1749,6 +1759,22 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     zone = Z_STATUS;
                     statusIndex = 0;
                 } else {
+                    if (!rowItems.isEmpty()) {
+                        zone = Z_ROW;
+                        rowIndex = Math.min(rowIndex, rowItems.size() - 1);
+                    } else {
+                        zone = Z_SHELF;
+                    }
+                }
+                break;
+            case Z_ROW:
+                if (dx != 0) {
+                    int next = Math.max(0, Math.min(rowItems.size() - 1, rowIndex + dx));
+                    if (next == rowIndex) return;
+                    rowIndex = next;
+                } else if (dy < 0) {
+                    zone = Z_HERO;
+                } else {
                     zone = Z_SHELF;
                 }
                 break;
@@ -1864,6 +1890,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             }
             it = lightButtons.get(topIndex - 3);
             r = topRects[topIndex];
+        } else if (zone == Z_ROW) {
+            Recs.Pick p = rowIndex < rowItems.size() ? rowItems.get(rowIndex) : null;
+            if (p == null || p.url == null) return;
+            play(p);
+            return;
         } else if (zone == Z_CARDS) {
             Recs.Pick p = cardIndex < cards.size() ? cards.get(cardIndex) : null;
             if (p != null && p.url != null) { play(p); return; }
@@ -2072,6 +2103,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         cardRects[0].set(left, top, left + wide, top + ch);
         cardRects[1].set(cardRects[0].right + g, top, cardRects[0].right + g + tall, top + ch);
         cardRects[2].set(cardRects[1].right + g, top, cardRects[1].right + g + tall, top + ch);
+        float ry = L_ROW_TOP * k, rw = L_ROW_W * k, rh = L_ROW_H * k;
+        for (int i = 0; i < rowRects.length; i++) {
+            float x0 = left + i * (rw + L_ROW_GAP * k);
+            rowRects[i].set(x0, ry, x0 + rw, ry + rh);
+        }
         heroDirty = statusDirty = true;
     }
 
@@ -2089,8 +2125,42 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (Recs.Pick p : recs.wanted()) recs.backdrop(p);   // all three tabs preloaded: switching tabs is instant
         Backdrop b = cards.isEmpty() ? null : recs.backdrop(cards.get(0));
         if (cards.isEmpty() || b != null) showBackdrop(b);
+        updateRow();
         heroDirty = true;
         spoken.focusMoved();    // new picks under the focused card
+    }
+
+    /**
+     * The small row: the films and episodes left unfinished, and when there are none, what the panel just added.
+     * A live channel is never resumed (there is nothing to resume in a stream that never ends).
+     */
+    private void updateRow() {
+        List<Recs.Pick> list = new ArrayList<>();
+        List<Iptv.Item> resume = new ArrayList<>();
+        resume.addAll(Prefs.resume("vod"));
+        resume.addAll(Prefs.resume("series"));
+        for (Iptv.Item i : resume) {
+            Recs.Pick p = new Recs.Pick();
+            p.title = i.name;
+            p.url = i.url;
+            p.image = i.logo;
+            list.add(p);
+        }
+        if (list.isEmpty() && Iptv.configured()) {
+            for (Iptv.Item i : Iptv.get(getContext()).fresh("vod", 21, 7)) {
+                Recs.Pick p = new Recs.Pick();
+                p.title = i.name;
+                p.url = i.url;
+                p.image = i.logo;
+                p.meta = i.group;
+                list.add(p);
+            }
+        }
+        rowHeading = resume.isEmpty() ? "Nouveautés" : "Reprendre la lecture";
+        rowItems.clear();
+        rowItems.addAll(list.size() > rowRects.length ? list.subList(0, rowRects.length) : list);
+        rowIndex = Math.min(rowIndex, Math.max(0, rowItems.size() - 1));
+        if (rowItems.isEmpty() && zone == Z_ROW) zone = Z_SHELF;
     }
 
     private void selectTab(int index) {
@@ -2170,6 +2240,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = 0; i < 3; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
         for (int i = 0; i < 3; i++) if (i != top) drawLightCard(c, i);
         if (top >= 0) drawLightCard(c, top);
+        drawRow(c);
         if (HomeData.coinCount() > 0) drawQuotes(c);
     }
 
@@ -2178,6 +2249,49 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      * a soft shadow; when focused, it grows 5%, rises and lights up its border. Below it, the title (and on the large
      * card, genre · runtime · service).
      */
+    /** The small posters under the cards: Continue watching, or what just came in. */
+    private void drawRow(Canvas c) {
+        if (rowItems.isEmpty()) return;
+        if (lRowTitle == null) {
+            lRowTitle = Ui.text(Ui.medium, 15 * k, 0xFF6E6E73);
+            rowGlass = new Paint(Paint.ANTI_ALIAS_FLAG);
+            rowGlassOn = new Paint(Paint.ANTI_ALIAS_FLAG);
+            rowGlassOn.setStyle(Paint.Style.STROKE);
+            rowGlassOn.setStrokeWidth(2.5f * k);
+            rowGlassOn.setColor(tone(0x33000000, 0x66FFFFFF));
+            rowInk = Ui.text(Ui.medium, 11 * k, 0xFFFFFFFF);
+            rowFilter = new Paint(Paint.FILTER_BITMAP_FLAG);
+        }
+        lRowTitle.setColor(tone(0xFF6E6E73, 0xFF9A9AA0));
+        lRowTitle.setTextSize(15 * k);
+        c.drawText(rowHeading, MARGIN * k, L_ROW_TITLE * k + Ui.halfCap(lRowTitle), lRowTitle);
+        for (int i = 0; i < rowItems.size(); i++) {
+            RectF r = rowRects[i];
+            boolean on = zone == Z_ROW && i == rowIndex;
+            rowGlass.setColor(tone(0x14000000, 0x22FFFFFF));
+            c.drawRoundRect(r, 12 * k, 12 * k, rowGlass);
+            Recs.Pick p = rowItems.get(i);
+            Bitmap b = Posters.get(getContext()).get(p.image, (u, bmp) -> handler.post(this::invalidateAll));
+            if (b != null) {
+                clip.reset();
+                clip.addRoundRect(r, 12 * k, 12 * k, Path.Direction.CW);
+                c.save();
+                c.clipPath(clip);
+                float sw = b.getWidth(), sh = b.getHeight();
+                float scale = Math.max(r.width() / sw, r.height() / sh);
+                float dw = sw * scale, dh = sh * scale;
+                c.drawBitmap(b, null, new RectF(r.centerX() - dw / 2, r.centerY() - dh / 2,
+                        r.centerX() + dw / 2, r.centerY() + dh / 2), rowFilter);
+                c.restore();
+            } else {
+                String initial = p.title == null || p.title.isEmpty() ? "?" : p.title.substring(0, 1).toUpperCase();
+                Paint cap = Ui.text(Ui.semibold, 30 * k, tone(0x33000000, 0x44FFFFFF));
+                c.drawText(initial, r.centerX() - cap.measureText(initial) / 2, r.centerY() + Ui.halfCap(cap), cap);
+            }
+            if (on) c.drawRoundRect(r, 12 * k, 12 * k, rowGlassOn);
+        }
+    }
+
     private void drawLightCard(Canvas c, int i) {
         RectF base = cardRects[i];
         Recs.Pick p = i < cards.size() ? cards.get(i) : null;

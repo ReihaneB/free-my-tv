@@ -45,6 +45,7 @@ final class Recs {
         String kind;            // "movie" or "tv"
         String title, backdrop, meta = "", app, pkg;
         String url;             // an IPTV stream: the card opens the player instead of an app
+        String image;           // an IPTV poster URL (the small row under the cards)
         boolean detailed;
     }
 

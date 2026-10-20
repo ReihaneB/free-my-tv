@@ -24,70 +24,81 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * The home screen, built like Infuse on the Apple TV: a bar of library tabs, then shelves of artwork.
+ * The home screen, in the clothes of Infuse 8 on the Apple TV: a search field and three capsule buttons on top, then
+ * shelves of large 16:9 cards with their title centred underneath and an orange progress bar where a film was left.
  *
- * <p>Everything on screen is the account: a row of three large cards ("À la une"), then the shelves — continue
- * watching, new films, new series, channels — then the TV's own things (apps, HDMI inputs) as shelves of the same
- * shape. Left/Right walks a shelf (the row slides under the focus), Up/Down goes from shelf to shelf, and the bar on
- * top switches between the home and each library. The account is on disk, so the screen opens with no network.
+ * <p>The first shelf is what is being watched, the second is the libraries (Fims, Séries, Live, Apps, Entrées — the
+ * Favorites row of Infuse), then the account's shelves. Opening a library swaps the top bar for a back button and the
+ * library's name, and shows that library's rows; Back comes home. Everything is drawn on the canvas from the account
+ * cached on disk, so the screen opens with no network.
  */
 final class HomeView extends View implements Choreographer.FrameCallback, Iptv.Listener {
 
     // MARK: - Model
 
-    /** One card: a film, an episode, a channel, an app or an input. */
+    /** One card: a film, an episode, a channel, an app, an input, or one of the library tiles. */
     private static final class Tile {
-        String title = "", meta = "", image = "", url = "", seriesId = "";
+        String title = "", meta = "", image = "", url = "", seriesId = "", symbol = "";
         Bitmap art;                 // apps: the ready 16:9 card
         HomeApps.Item app;          // apps and inputs open through HomeApps
-        String symbol = "";         // inputs: the icon
         float progress;             // continue watching: 0..1
         boolean series, live;
+        int color;                  // library tile
+        int action = -1;            // >= 0: open that library tab; TO_SETTINGS / TO_BROWSE
     }
 
     private static final class Row {
         String title = "";
         int kind, seeTab = -1;
         final List<Tile> items = new ArrayList<>();
-        float y, h;                 // in the content column, from 0
-        int col, win;               // focused card, first card shown
-        float slide, slideTo;       // horizontal offset of the shelf (animated)
-        float[] focus = new float[0];   // per card, 0..1
+        float y, h;
+        int col, win;
+        float slide, slideTo;
+        float[] focus = new float[0];
     }
 
-    private static final int R_HERO = 0, R_POSTER = 1, R_LOGO = 2, R_APP = 3;
+    private static final int R_CARD = 0, R_FAV = 1;
     private static final int Z_ROW = 0, Z_BAR = 1;
     /** col value of the "Tout voir" label at the end of a shelf. */
     private static final int SEE_ALL = -2;
 
-    private static final String[] TABS = {"Accueil", "Films", "Séries", "Live", "Apps"};
-    private static final int TAB_COUNT = TABS.length;
-    private static final int GEAR = TAB_COUNT;          // last stop in the bar
+    private static final String[] LIBRARIES = {"Accueil", "Films", "Séries", "Direct", "Apps"};
+    private static final int TAB_COUNT = LIBRARIES.length;
+
+    // Chrome stops, in the order they are laid out.
+    private static final int CH_BACK = 0, CH_SEARCH = 1, CH_APPS = 2, CH_SYNC = 3, CH_GEAR = 4;
 
     // MARK: - Geometry (designed at 1920×1080, scaled by k)
 
-    private static final float BAR_H = 106, MARGIN = 96;
-    private static final float HEAD_H = 54, ROW_GAP = 30, CAP_H = 56;
-    private static final float HERO_W = 548, HERO_H = 308, HERO_GAP = 30;
-    private static final float POSTER_W = 190, POSTER_H = 285, POSTER_GAP = 26;
-    private static final float LOGO_W = 240, LOGO_H = 135, LOGO_GAP = 24;
-    private static final float APP_W = 240, APP_H = 135, APP_GAP = 24;
+    private static final float BAR_H = 104, MARGIN = 96;
+    private static final float HEAD_H = 40, ROW_GAP = 46, CAP_H = 70;
+    private static final float CARD_W = 400, CARD_H = 225, CARD_GAP = 30;
+    private static final float FAV_W = 300, FAV_H = 169, FAV_GAP = 30;
+    private static final float PILL_W = 300, PILL_H = 58, BUTTON_W = 78, BUTTON_H = 58, BUTTON_GAP = 14;
+    private static final float LIB_TITLE_H = 96;      // the library's name above its shelves
 
-    private static final int BG = 0xFF0B0B0D;
-    private static final int INK = 0xFFFFFFFF, DIM = 0xB3FFFFFF, FAINT = 0x80FFFFFF, ACCENT = 0xFFFF8A00;
+    // Infuse 8's slate background, not black.
+    private static final int BG_TOP = 0xFF2E3A41, BG_BOTTOM = 0xFF1A242C;
+    private static final int INK = 0xFFFFFFFF, DIM = 0xFFB8C4C9, FAINT = 0xFF8798A0, ACCENT = 0xFFFF8A00;
+    private static final int GLASS = 0x1FFFFFFF, GLASS_ON = 0x33FFFFFF, HAIR = 0x33FFFFFF;
 
     private float k = 1f, w, h;
+    private LinearGradient bg;
 
     // MARK: - State
 
     private final List<Row> rows = new ArrayList<>();
-    private final Map<String, Float> progress = new HashMap<>();   // continue watching, read once per rebuild
-    private int tab, zone = Z_ROW, barIndex, rowIndex, colIndex;
+    private final Map<String, Float> progress = new HashMap<>();
+    private int tab, zone = Z_ROW, rowIndex, colIndex, chromeIndex;
     private float offset, offsetTo;
     private boolean resumed, framePosted;
     private long lastFrame;
     private int prefsVersion = Prefs.version;
     private String dataKey = "";
+
+    private final RectF[] chromeRects = new RectF[5];
+    private final int[] chromeOrder = new int[5];
+    private int chromeCount;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable clockTick = new Runnable() {
@@ -97,20 +108,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
     };
 
-    // MARK: - Paints (built after Ui.init, or they miss the font)
+    // MARK: - Paints
 
-    private Paint tabInk, rowTitle, cardTitle, cardMeta, seeAll, clock, toast, empty;
+    private Paint rowTitle, cardTitle, cardMeta, seeAll, pillInk, toast, empty;
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private final Paint barShade = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint heroShade = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Path clip = new Path();
     private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
     private final android.graphics.Rect srcRect = new android.graphics.Rect();
-    private final RectF[] barRects = new RectF[GEAR + 1];
-    private final Map<String, Bitmap> softs = new HashMap<>();   // url → tiny bitmap stretched as a blur
     private String toastText = "";
     private long toastAt;
 
@@ -118,24 +125,22 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     HomeView(Context context) {
         super(context);
-        setBackgroundColor(BG);
         setFocusable(true);
         setFocusableInTouchMode(true);
         Ui.init(context);
         paints();
-        for (int i = 0; i <= GEAR; i++) barRects[i] = new RectF();
+        for (int i = 0; i < chromeRects.length; i++) chromeRects[i] = new RectF();
         rebuild();
     }
 
     private void paints() {
-        tabInk = Ui.text(Ui.semibold, 26, INK);
-        rowTitle = Ui.text(Ui.displaySemibold, 34, INK);
-        cardTitle = Ui.text(Ui.medium, 24, 0xF2FFFFFF);
-        cardMeta = Ui.text(Ui.regular, 20, FAINT);
-        seeAll = Ui.text(Ui.medium, 22, ACCENT);
-        clock = Ui.numbers(Ui.medium, 22, DIM);
-        toast = Ui.text(Ui.medium, 24, INK);
-        empty = Ui.text(Ui.medium, 26, FAINT);
+        rowTitle = Ui.text(Ui.semibold, 26, 0xFFE7EDEE);
+        cardTitle = Ui.text(Ui.medium, 21, 0xFFFFFFFF);
+        cardMeta = Ui.text(Ui.regular, 17, 0xFF9AA8AE);
+        seeAll = Ui.text(Ui.medium, 20, 0xFFB8C4C9);
+        pillInk = Ui.text(Ui.regular, 22, 0xFFB0BCC1);
+        toast = Ui.text(Ui.medium, 22, INK);
+        empty = Ui.text(Ui.medium, 24, FAINT);
     }
 
     void resume() {
@@ -164,10 +169,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     /** Home pressed on the home screen: back to the top of the home tab. */
     void reset(boolean animated) {
         tab = 0;
-        barIndex = 0;
+        zone = Z_ROW;
         rowIndex = 0;
         colIndex = 0;
-        zone = Z_ROW;
+        chromeIndex = 0;
         offset = offsetTo = 0;
         rebuild();
         requestFrame();
@@ -225,15 +230,12 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         } else {
             Row row = new Row();
             row.title = "Applications";
-            row.kind = R_APP;
+            row.kind = R_CARD;
             addApps(row);
             if (!row.items.isEmpty()) rows.add(row);
         }
-        // Keep the shelf the user was on when the data lands (the account is read in the background).
         int restored = -1;
-        if (keep != null) {
-            for (int i = 0; i < rows.size(); i++) if (rows.get(i).title.equals(keep)) { restored = i; break; }
-        }
+        if (keep != null) for (int i = 0; i < rows.size(); i++) if (rows.get(i).title.equals(keep)) { restored = i; break; }
         rowIndex = restored >= 0 ? restored : Math.min(rowIndex, Math.max(0, rows.size() - 1));
         for (Row row : rows) {
             if (row.col < 0) row.col = 0;
@@ -243,63 +245,41 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             row.slide = row.slideTo = row.win * step(row.kind);
         }
         layout();
-        requestFrame();   // the focus animation restarts: rebuild() zeroes it, and nothing else would
+        requestFrame();   // rebuild() zeroes the per-card focus: nothing else would start the animation again
         invalidate();
     }
 
     private void homeRows() {
         Iptv iptv = Iptv.get(getContext());
-        Row hero = new Row();
-        hero.title = "À la une";
-        hero.kind = R_HERO;
-        List<Iptv.Item> resumed = new ArrayList<>(Prefs.resume("vod"));
-        resumed.addAll(Prefs.resume("series"));
-        if (!resumed.isEmpty()) hero.items.add(resumeTile(resumed.get(0)));
-        if (hero.items.isEmpty()) {
-            for (Iptv.Item i : iptv.fresh("vod", 30, 40)) { hero.items.add(tile(i, false)); break; }
-        }
-        for (Iptv.Item i : iptv.fresh("series", 60, 40)) {
-            if (hero.items.size() >= 2) break;
-            hero.items.add(tile(i, true));
-        }
-        for (Iptv.Item i : frenchChannels(iptv, 4)) {
-            if (hero.items.size() >= 3) break;
-            hero.items.add(tile(i, false));
-        }
-        if (!hero.items.isEmpty()) rows.add(hero);
 
-        Row resume = new Row();
-        resume.title = "Reprendre la lecture";
-        resume.kind = R_POSTER;
-        for (Iptv.Item i : Prefs.resume("vod")) resume.items.add(resumeTile(i));
-        for (Iptv.Item i : Prefs.resume("series")) resume.items.add(resumeTile(i));
-        if (!resume.items.isEmpty()) rows.add(resume);
+        Row watching = new Row();
+        watching.title = "En cours";
+        watching.kind = R_CARD;
+        for (Iptv.Item i : Prefs.resume("vod")) watching.items.add(resumeTile(i));
+        for (Iptv.Item i : Prefs.resume("series")) watching.items.add(resumeTile(i));
+        if (!watching.items.isEmpty()) rows.add(watching);
 
-        shelf("Nouveautés films", R_POSTER, iptv.fresh("vod", 30, 30), false, 1);
-        shelf("Nouvelles séries", R_POSTER, iptv.fresh("series", 60, 30), true, 2);
-        shelf("Chaînes", R_LOGO, frenchChannels(iptv, 30), false, 3);
-        shelf("Les mieux notés", R_POSTER, iptv.best("vod", 30), false, 1);
-        shelf("Séries", R_POSTER, firstOf(iptv.series(), 30), true, 2);
+        Row favs = new Row();
+        favs.title = "Favoris";
+        favs.kind = R_FAV;
+        favs.items.add(library("Films", "play", 0xFFE8590C, 1));
+        favs.items.add(library("Séries", "live_tv", 0xFF1C7ED6, 2));
+        favs.items.add(library("Direct", "tv", 0xFFD6336C, 3));
+        favs.items.add(library("Apps", "apps", 0xFF7048E8, 4));
+        favs.items.add(library("Entrées", "hdmi", 0xFF2F9E44, 4));
+        rows.add(favs);
 
-        Row apps = new Row();
-        apps.title = "Applications";
-        apps.kind = R_APP;
-        apps.seeTab = 4;
-        addApps(apps);
-        if (!apps.items.isEmpty()) rows.add(apps);
-
-        Row inputs = new Row();
-        inputs.title = "Entrées";
-        inputs.kind = R_LOGO;
-        inputs.seeTab = 4;
-        addInputs(inputs);
-        if (!inputs.items.isEmpty()) rows.add(inputs);
+        shelf("Nouveautés films", iptv.fresh("vod", 30, 24), false, 1);
+        shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, 2);
+        shelf("Chaînes", frenchChannels(iptv, 24), false, 3);
+        shelf("Les mieux notés", iptv.best("vod", 24), false, 1);
+        shelf("Séries", firstOf(iptv.series(), 24), true, 2);
     }
 
     private void filmRows() {
         Iptv iptv = Iptv.get(getContext());
-        shelf("Nouveautés", R_POSTER, iptv.fresh("vod", 30, 30), false, -1);
-        shelf("Les mieux notés", R_POSTER, iptv.best("vod", 30), false, -1);
+        shelf("Nouveautés", iptv.fresh("vod", 30, 24), false, -1);
+        shelf("Les mieux notés", iptv.best("vod", 24), false, -1);
         List<Iptv.Item> all = iptv.movies();
         int built = 0;
         for (Iptv.Category c : iptv.movieCategories()) {
@@ -308,18 +288,18 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             for (Iptv.Item i : all) {
                 if (!c.id.equals(i.group) || i.name.startsWith("─") || i.name.contains("✧")) continue;
                 items.add(i);
-                if (items.size() >= 30) break;
+                if (items.size() >= 24) break;
             }
             if (items.size() < 4) continue;
-            shelf(clean(c.name), R_POSTER, items, false, -1);
+            shelf(clean(c.name), items, false, -1);
             built++;
         }
     }
 
     private void seriesRows() {
         Iptv iptv = Iptv.get(getContext());
-        shelf("Nouvelles séries", R_POSTER, iptv.fresh("series", 60, 30), true, -1);
-        shelf("Les mieux notées", R_POSTER, iptv.best("series", 30), true, -1);
+        shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, -1);
+        shelf("Les mieux notées", iptv.best("series", 24), true, -1);
         List<Iptv.Item> all = iptv.series();
         int built = 0;
         for (Iptv.Category c : iptv.seriesCategories()) {
@@ -328,17 +308,17 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             for (Iptv.Item i : all) {
                 if (!c.id.equals(i.group)) continue;
                 items.add(i);
-                if (items.size() >= 30) break;
+                if (items.size() >= 24) break;
             }
             if (items.size() < 4) continue;
-            shelf(clean(c.name), R_POSTER, items, true, -1);
+            shelf(clean(c.name), items, true, -1);
             built++;
         }
     }
 
     private void liveRows() {
         Iptv iptv = Iptv.get(getContext());
-        shelf("Chaînes françaises", R_LOGO, frenchChannels(iptv, 30), false, -1);
+        shelf("Chaînes françaises", frenchChannels(iptv, 24), false, -1);
         List<Iptv.Item> all = iptv.live();
         int built = 0;
         for (Iptv.Category c : iptv.liveCategories()) {
@@ -351,10 +331,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 if (i.name.startsWith("─") || i.name.startsWith("=") || i.name.contains("✧")) continue;
                 if (!seen.add(norm(i.name))) continue;
                 items.add(i);
-                if (items.size() >= 30) break;
+                if (items.size() >= 24) break;
             }
             if (items.size() < 4) continue;
-            shelf(clean(c.name), R_LOGO, items, false, -1);
+            shelf(clean(c.name), items, false, -1);
             built++;
         }
     }
@@ -362,25 +342,24 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private void appRows() {
         Row apps = new Row();
         apps.title = "Applications";
-        apps.kind = R_APP;
+        apps.kind = R_CARD;
         addApps(apps);
         if (!apps.items.isEmpty()) rows.add(apps);
         Row inputs = new Row();
         inputs.title = "Entrées";
-        inputs.kind = R_LOGO;
+        inputs.kind = R_CARD;
         addInputs(inputs);
         if (!inputs.items.isEmpty()) rows.add(inputs);
     }
 
-    private void shelf(String title, int kind, List<Iptv.Item> items, boolean series, int seeTab) {
+    private void shelf(String title, List<Iptv.Item> items, boolean series, int seeTab) {
         if (items.isEmpty()) return;
         Row row = new Row();
         row.title = title;
-        row.kind = kind;
+        row.kind = R_CARD;
         row.seeTab = seeTab;
         Set<String> seen = new HashSet<>();
         for (Iptv.Item i : items) {
-            // The panel lists a channel in HD, FHD and backup, and a film twice under two ids.
             if (!seen.add(norm(pretty(i.name)))) continue;
             row.items.add(tile(i, series));
         }
@@ -400,6 +379,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             t.symbol = it.symbol == null || it.symbol.isEmpty() ? "hdmi" : it.symbol;
             row.items.add(t);
         }
+    }
+
+    private static Tile library(String name, String symbol, int color, int tab) {
+        Tile t = new Tile();
+        t.title = name;
+        t.symbol = symbol;
+        t.color = color;
+        t.action = tab;
+        return t;
     }
 
     private static final java.util.regex.Pattern YEAR = java.util.regex.Pattern.compile("\\((\\d{4})\\)\\s*$");
@@ -424,7 +412,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return t;
     }
 
-    /** A saved position has the title and the stream but no artwork: take the poster from the catalogue. */
+    /** A saved position has the title and the stream but no artwork and no year: take both from the catalogue. */
     private Tile resumeTile(Iptv.Item i) {
         Tile t = tile(i, false);
         if (!t.image.isEmpty() || t.title.isEmpty()) return t;
@@ -455,21 +443,22 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         w = width;
         h = height;
         k = Math.min(width / 1920f, height / 1080f);
+        bg = new LinearGradient(0, 0, 0, height, BG_TOP, BG_BOTTOM, Shader.TileMode.CLAMP);
         layout();
         offset = offsetTo;
         for (Row row : rows) row.slide = row.slideTo;
     }
 
     private float tw(int kind) {
-        return (kind == R_HERO ? HERO_W : kind == R_POSTER ? POSTER_W : kind == R_APP ? APP_W : LOGO_W) * k;
+        return (kind == R_FAV ? FAV_W : CARD_W) * k;
     }
 
     private float th(int kind) {
-        return (kind == R_HERO ? HERO_H : kind == R_POSTER ? POSTER_H : kind == R_APP ? APP_H : LOGO_H) * k;
+        return (kind == R_FAV ? FAV_H : CARD_H) * k;
     }
 
     private float gap(int kind) {
-        return (kind == R_HERO ? HERO_GAP : kind == R_POSTER ? POSTER_GAP : kind == R_APP ? APP_GAP : LOGO_GAP) * k;
+        return (kind == R_FAV ? FAV_GAP : CARD_GAP) * k;
     }
 
     private float step(int kind) {
@@ -482,11 +471,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private float capH(int kind) {
-        return (kind == R_HERO ? 22 : kind == R_POSTER ? CAP_H : 34) * k;
+        return (kind == R_FAV ? 58 : CAP_H) * k;
+    }
+
+    private float contentTop() {
+        return (tab == 0 ? 0 : LIB_TITLE_H * k);
     }
 
     private void layout() {
-        float y = 0;
+        float y = contentTop();
         for (Row row : rows) {
             row.y = y;
             row.h = (HEAD_H + th(row.kind) + capH(row.kind)) * k;
@@ -509,19 +502,28 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private void layoutBar() {
-        float x = MARGIN * k;
-        tabInk.setTextSize(26 * k);
-        for (int i = 0; i < TAB_COUNT; i++) {
-            float wdt = tabInk.measureText(TABS[i]) + 34 * k;
-            barRects[i].set(x, 8 * k, x + wdt, BAR_H * k - 8 * k);
-            x += wdt + 6 * k;
+        float top = 26 * k, hh = PILL_H * k, m = MARGIN * k;
+        float x = m;
+        chromeCount = 0;
+        if (tab != 0) {
+            chromeRects[CH_BACK].set(x, top, x + 58 * k, top + hh);
+            x += 58 * k + 12 * k;
+            chromeOrder[chromeCount++] = CH_BACK;
         }
-        float g = 38 * k;
-        barRects[GEAR].set(w - MARGIN * k - g, (BAR_H * k - g) / 2, w - MARGIN * k, (BAR_H * k + g) / 2);
+        chromeRects[CH_SEARCH].set(x, top, x + PILL_W * k, top + hh);
+        chromeOrder[chromeCount++] = CH_SEARCH;
+        float bw = BUTTON_W * k, right = w - m;
+        chromeRects[CH_GEAR].set(right - bw, top, right, top + hh);
+        chromeRects[CH_SYNC].set(right - 2 * bw - BUTTON_GAP * k, top, right - bw - BUTTON_GAP * k, top + hh);
+        chromeRects[CH_APPS].set(right - 3 * bw - 2 * BUTTON_GAP * k, top, right - 2 * bw - 2 * BUTTON_GAP * k, top + hh);
+        chromeOrder[chromeCount++] = CH_APPS;
+        chromeOrder[chromeCount++] = CH_SYNC;
+        chromeOrder[chromeCount++] = CH_GEAR;
+        chromeIndex = Math.max(0, Math.min(chromeIndex, chromeCount - 1));
     }
 
     private float contentH() {
-        if (rows.isEmpty()) return 0;
+        if (rows.isEmpty()) return contentTop();
         Row last = rows.get(rows.size() - 1);
         return last.y + last.h;
     }
@@ -534,13 +536,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         offsetTo = Math.max(0, Math.min(maxOffset(), offsetTo));
     }
 
-    /** Scrolls so the focused shelf is entirely on screen. */
+    /** The focused shelf sits right under the bar, so the shelf below always peeks at the bottom. */
     private void reveal() {
         if (rows.isEmpty()) return;
-        // The focused shelf sits right under the bar, so the shelf below always peeks at the bottom: no half row
-        // cut at the top without its title.
-        Row row = rows.get(rowIndex);
-        offsetTo = row.y - 4 * k;
+        offsetTo = rows.get(rowIndex).y - 4 * k;
         clampOffset();
         requestFrame();
     }
@@ -592,69 +591,60 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     // MARK: - Drawing
 
     @Override protected void onDraw(Canvas c) {
+        fill.setAlpha(255);
+        fill.setShader(bg);
+        c.drawRect(0, 0, w, h, fill);
+        fill.setShader(null);
+
         float barH = BAR_H * k;
-        drawBackdrop(c);
         c.save();
         c.clipRect(0, barH, w, h);
-        float top = barH + 16 * k - offset;
+        float top = barH + 18 * k - offset;
         if (rows.isEmpty()) {
-            empty.setTextSize(26 * k);
+            empty.setTextSize(24 * k);
             c.drawText("Aucun compte IPTV : renseignez-le dans les réglages.", MARGIN * k, top + 60 * k, empty);
-        }
-        for (int i = 0; i < rows.size(); i++) {
-            Row row = rows.get(i);
-            float y = top + row.y;
-            if (y > h || y + row.h < barH) continue;
-            drawRow(c, row, i, y);
+        } else {
+            if (tab != 0) {
+                rowTitle.setTextSize(44 * k);
+                rowTitle.setTextAlign(Paint.Align.LEFT);
+                c.drawText(LIBRARIES[tab], MARGIN * k, top + 52 * k, rowTitle);
+            }
+            for (int i = 0; i < rows.size(); i++) {
+                Row row = rows.get(i);
+                float y = top + row.y;
+                if (y > h || y + row.h < barH) continue;
+                drawRow(c, row, i, y);
+            }
         }
         c.restore();
         drawBar(c);
         drawToast(c);
     }
 
-    /** A soft wash of the focused artwork behind the top of the screen (Infuse blurs its backdrop the same way). */
-    private void drawBackdrop(Canvas c) {
-        fill.setShader(null);
-        fill.setColor(BG);
-        c.drawRect(0, 0, w, h, fill);
-        if (rows.isEmpty() || zone != Z_ROW) return;
-        Row row = rows.get(rowIndex);
-        if (row.kind != R_HERO || row.col < 0 || row.col >= row.items.size()) return;
-        Bitmap soft = soft(row.items.get(row.col));
-        if (soft == null) return;
-        r2.set(0, 0, w, h * 0.78f);
-        art.setAlpha(44);
-        c.drawBitmap(soft, null, r2, art);
-        art.setAlpha(255);
-        heroShade.setShader(new LinearGradient(0, 0, 0, h * 0.88f, 0x00000000, BG, Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, h * 0.88f, heroShade);
-        heroShade.setShader(null);
-    }
-
     private void drawRow(Canvas c, Row row, int index, float y) {
         float m = MARGIN * k;
-        rowTitle.setTextSize(34 * k);
+        rowTitle.setTextSize(26 * k);
         rowTitle.setTextAlign(Paint.Align.LEFT);
         float base = y + HEAD_H * k - 12 * k;
         c.drawText(row.title, m, base, rowTitle);
 
         boolean focusedRow = index == rowIndex && zone == Z_ROW;
         if (row.seeTab >= 0) {
-            seeAll.setTextSize(24 * k);
+            seeAll.setTextSize(20 * k);
             seeAll.setTextAlign(Paint.Align.RIGHT);
             boolean on = focusedRow && row.col == SEE_ALL;
             float tw2 = seeAll.measureText("Tout voir");
             if (on) {
-                r.set(w - m - tw2 - 22 * k, base - Ui.cap(seeAll) - 10 * k, w - m + 12 * k, base + 10 * k);
+                r.set(w - m - tw2 - 20 * k, base - Ui.cap(seeAll) - 9 * k, w - m + 12 * k, base + 9 * k);
                 fill.setShader(null);
                 fill.setColor(0xF2FFFFFF);
-                c.drawRoundRect(r, 20 * k, 20 * k, fill);
-                seeAll.setColor(0xFF000000);
+                c.drawRoundRect(r, 18 * k, 18 * k, fill);
+                seeAll.setColor(0xFF0B1013);
             } else {
-                seeAll.setColor(ACCENT);
+                seeAll.setColor(0xFFB8C4C9);
             }
             c.drawText("Tout voir", w - m, base, seeAll);
-            seeAll.setColor(ACCENT);
+            seeAll.setColor(0xFFB8C4C9);
         }
 
         int n = cols(row.kind);
@@ -664,25 +654,26 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             Tile t = row.items.get(j);
             float x = m + j * s - row.slide;
             r.set(x, tilesTop, x + tw, tilesTop + th);
-            if (r.right < m - 8 || r.left > w - m + 8) continue;
+            if (r.right < m - 12 || r.left > w - m + 12) continue;
             float f = j < row.focus.length ? row.focus[j] : 0;
-            drawTile(c, row.kind, r, t, f);
-            if (row.kind != R_HERO) drawCaption(c, row.kind, t, x, tilesTop + th + 8 * k, tw);
+            if (row.kind == R_FAV) drawFavourite(c, r, t, f);
+            else drawCard(c, r, t, f);
+            drawCaption(c, t, r, tilesTop + th + 8 * k);
         }
     }
 
-    private void drawTile(Canvas c, int kind, RectF box, Tile t, float f) {
-        float radius = (kind == R_HERO ? 20 : 14) * k;
-        float grow = 1 + 0.05f * f;
+    private void drawCard(Canvas c, RectF box, Tile t, float f) {
+        float radius = 14 * k;
+        float grow = 1 + 0.055f * f;
         r2.set(box);
         r2.inset(-box.width() * (grow - 1) / 2, -box.height() * (grow - 1) / 2);
         float rad = radius * grow;
 
         if (f > 0.02f) {
             dst.set(r2);
-            dst.offset(0, 12 * k * f);
+            dst.offset(0, 14 * k * f);
             fill.setShader(null);
-            fill.setColor(Ui.alpha(0xFF000000, 0.45f * f));
+            fill.setColor(Ui.alpha(0xFF000000, 0.35f * f));
             c.drawRoundRect(dst, rad, rad, fill);
         }
 
@@ -691,39 +682,43 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         c.save();
         c.clipPath(clip);
         fill.setShader(null);
-        fill.setColor(kind == R_APP || kind == R_LOGO ? 0xFF17171B : 0xFF101014);
+        fill.setColor(0xFF243038);
         c.drawRect(r2, fill);
 
         Bitmap b = artOf(t);
-        if (kind == R_HERO) {
-            drawHeroCard(c, r2, t);
-        } else if (b != null) {
-            if (kind == R_POSTER || t.art != null) drawCover(c, b, r2);
-            else drawLogo(c, b, r2);
+        if (b != null) {
+            if (t.live) {
+                artBox.set(r2);
+                artBox.inset(26 * k, 26 * k);
+                drawContain(c, b, artBox);
+            } else {
+                drawCover(c, b, r2);
+            }
         } else if (!t.symbol.isEmpty()) {
-            Symbols.draw(getContext(), c, t.symbol, r2.centerX(), r2.centerY() - 6 * k, 64 * k, DIM);
+            Symbols.draw(getContext(), c, t.symbol, r2.centerX(), r2.centerY(), 54 * k, DIM);
         } else {
-            cardTitle.setTextSize((kind == R_POSTER ? 22 : 20) * k);
+            cardTitle.setTextSize(20 * k);
             cardTitle.setTextAlign(Paint.Align.CENTER);
-            List<String> lines = wrap(t.title, cardTitle, r2.width() - 24 * k, kind == R_POSTER ? 3 : 2);
-            float ly = r2.centerY() - (lines.size() - 1) * 14 * k;
+            List<String> lines = wrap(t.title, cardTitle, r2.width() - 24 * k, 2);
+            float ly = r2.centerY() - (lines.size() - 1) * 13 * k;
             for (String line : lines) {
                 c.drawText(line, r2.centerX(), ly + Ui.halfCap(cardTitle), cardTitle);
-                ly += 28 * k;
+                ly += 26 * k;
             }
             cardTitle.setTextAlign(Paint.Align.LEFT);
         }
 
         if (t.progress > 0.005f) {
-            float barY = r2.bottom - 3.5f * k;
-            fill.setColor(0x99000000);
-            c.drawRect(r2.left, barY - 3.5f * k, r2.right, barY, fill);
+            float barY = r2.bottom;
+            fill.setColor(0x59000000);
+            c.drawRect(r2.left, barY - 4 * k, r2.right, barY, fill);
             fill.setColor(ACCENT);
-            c.drawRect(r2.left, barY - 3.5f * k, r2.left + Math.max(10 * k, r2.width() * t.progress), barY, fill);
+            c.drawRect(r2.left, barY - 4 * k, r2.left + Math.max(10 * k, r2.width() * t.progress), barY, fill);
         }
         if (f > 0.02f) {
-            fill.setShader(new LinearGradient(0, r2.top, 0, r2.top + r2.height() * 0.45f,
-                    Ui.alpha(0xFFFFFFFF, 0.07f * f), 0x00FFFFFF, Shader.TileMode.CLAMP));
+            fill.setAlpha(255);
+            fill.setShader(new LinearGradient(0, r2.top, 0, r2.top + r2.height() * 0.5f,
+                    Ui.alpha(0xFFFFFFFF, 0.06f * f), 0x00FFFFFF, Shader.TileMode.CLAMP));
             c.drawRect(r2, fill);
             fill.setShader(null);
         }
@@ -731,13 +726,45 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeWidth(1 * k);
-        stroke.setColor(0x1AFFFFFF);
+        stroke.setColor(0x22FFFFFF);
         c.drawRoundRect(r2, rad, rad, stroke);
         if (f > 0.02f) {
-            stroke.setStrokeWidth(2 * k);
-            stroke.setColor(Ui.alpha(0xFFFFFFFF, 0.62f * f));
+            stroke.setStrokeWidth(2.5f * k);
+            stroke.setColor(Ui.alpha(0xFFFFFFFF, 0.92f * f));
             c.drawRoundRect(r2, rad, rad, stroke);
         }
+    }
+
+    /** A library tile, the way Infuse draws its Favorites: a solid coloured card with a white glyph. */
+    private void drawFavourite(Canvas c, RectF box, Tile t, float f) {
+        float radius = 16 * k;
+        float grow = 1 + 0.055f * f;
+        r2.set(box);
+        r2.inset(-box.width() * (grow - 1) / 2, -box.height() * (grow - 1) / 2);
+        float rad = radius * grow;
+
+        if (f > 0.02f) {
+            dst.set(r2);
+            dst.offset(0, 14 * k * f);
+            fill.setColor(Ui.alpha(0xFF000000, 0.35f * f));
+            c.drawRoundRect(dst, rad, rad, fill);
+        }
+        clip.reset();
+        clip.addRoundRect(r2, rad, rad, Path.Direction.CW);
+        c.save();
+        c.clipPath(clip);
+        fill.setAlpha(255);   // setColor() leaves its alpha on the paint, and a shader would inherit it
+        fill.setShader(new LinearGradient(0, r2.top, 0, r2.bottom,
+                lighten(t.color, 1.25f), t.color, Shader.TileMode.CLAMP));
+        c.drawRect(r2, fill);
+        fill.setShader(null);
+        Symbols.draw(getContext(), c, t.symbol, r2.centerX(), r2.centerY(), 56 * k, 0xF2FFFFFF);
+        c.restore();
+
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth(f > 0.02f ? 2.5f * k : 1 * k);
+        stroke.setColor(f > 0.02f ? Ui.alpha(0xFFFFFFFF, 0.92f * f) : 0x22FFFFFF);
+        c.drawRoundRect(r2, rad, rad, stroke);
     }
 
     private Bitmap artOf(Tile t) {
@@ -755,64 +782,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         c.drawBitmap(b, srcRect, box, art);
     }
 
-    /**
-     * A hero card: the artwork on the left, its title, year and button on the right, over a blurred wash of the same
-     * artwork. Infuse shows fanart here; the panel only has posters, so the poster is shown whole instead.
-     */
-    private void drawHeroCard(Canvas c, RectF box, Tile t) {
-        Bitmap b = artOf(t);
-        Bitmap low = soft(t);
-        if (low != null) {
-            art.setAlpha(120);
-            c.drawBitmap(low, null, box, art);
-            art.setAlpha(255);
-        }
-        heroShade.setShader(new LinearGradient(box.left, box.top, box.right, box.top,
-                0xE6000000, 0x59000000, Shader.TileMode.CLAMP));
-        c.drawRect(box, heroShade);
-        heroShade.setShader(null);
-
-        float pad = 22 * k;
-        float artH = box.height() - 2 * pad;
-        float artW = artH * 2f / 3f;   // one text column for every card, whatever the artwork's shape
-        artBox.set(box.left + pad, box.top + pad, box.left + pad + artW, box.top + pad + artH);
-        if (b != null) {
-            drawContain(c, b, artBox);
-        } else if (!t.symbol.isEmpty()) {
-            Symbols.draw(getContext(), c, t.symbol, artBox.centerX(), artBox.centerY(), 70 * k, DIM);
-        }
-
-        float tx = artBox.right + 26 * k;
-        float maxW = box.right - pad - tx;
-        cardTitle.setTextSize(30 * k);
-        cardTitle.setTextAlign(Paint.Align.LEFT);
-        List<String> lines = wrap(t.title, cardTitle, maxW, 2);
-        float ty = box.top + pad + 8 * k;
-        for (String line : lines) {
-            c.drawText(line, tx, ty + Ui.cap(cardTitle), cardTitle);
-            ty += 38 * k;
-        }
-        cardMeta.setTextSize(20 * k);
-        cardMeta.setTextAlign(Paint.Align.LEFT);
-        String meta = t.meta == null ? "" : t.meta;
-        if (!meta.isEmpty()) c.drawText(fit(cardMeta, meta, maxW), tx, ty + Ui.cap(cardMeta) + 4 * k, cardMeta);
-
-        String label = t.series ? "Épisodes" : t.url.isEmpty() ? "" : t.live ? "En direct" : "Regarder";
-        if (!label.isEmpty()) {
-            cardTitle.setTextSize(20 * k);
-            float bw = cardTitle.measureText(label) + 58 * k;
-            float by = Math.min(box.bottom - pad - 44 * k, ty + Ui.cap(cardMeta) + 26 * k);
-            r.set(tx, by, tx + bw, by + 44 * k);
-            fill.setShader(null);
-            fill.setColor(0xF2FFFFFF);
-            c.drawRoundRect(r, 22 * k, 22 * k, fill);
-            Symbols.draw(getContext(), c, "play", r.left + 25 * k, r.centerY(), 22 * k, 0xFF000000);
-            cardTitle.setColor(0xFF000000);
-            c.drawText(label, r.left + 44 * k, r.centerY() + Ui.halfCap(cardTitle), cardTitle);
-            cardTitle.setColor(0xF2FFFFFF);
-        }
-    }
-
     private void drawContain(Canvas c, Bitmap b, RectF box) {
         float bw = b.getWidth(), bh = b.getHeight();
         float scale = Math.min(box.width() / bw, box.height() / bh);
@@ -821,75 +790,84 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         c.drawBitmap(b, null, dst, art);
     }
 
-    private Bitmap soft(Tile t) {
-        if (t == null || t.image == null || t.image.isEmpty()) return null;
-        Bitmap s = softs.get(t.image);
-        if (s != null) return s;
-        Bitmap src = artOf(t);
-        if (src == null) return null;
-        int hh = 26;
-        int ww = Math.max(4, Math.round(hh * (float) src.getWidth() / Math.max(1, src.getHeight())));
-        s = Bitmap.createScaledBitmap(src, ww, hh, true);
-        if (softs.size() > 16) softs.clear();
-        softs.put(t.image, s);
-        return s;
+    private static int lighten(int color, float f) {
+        int r = Math.min(255, Math.round(((color >> 16) & 255) * f));
+        int g = Math.min(255, Math.round(((color >> 8) & 255) * f));
+        int b = Math.min(255, Math.round((color & 255) * f));
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
     }
 
-    private void drawLogo(Canvas c, Bitmap b, RectF box) {
-        float pad = 18 * k;
-        float bw = b.getWidth(), bh = b.getHeight();
-        float scale = Math.min((box.width() - 2 * pad) / bw, (box.height() - 2 * pad) / bh);
-        float dw = bw * scale, dh = bh * scale;
-        dst.set(box.centerX() - dw / 2, box.centerY() - dh / 2, box.centerX() + dw / 2, box.centerY() + dh / 2);
-        c.drawBitmap(b, null, dst, art);
-    }
-
-    private void drawCaption(Canvas c, int kind, Tile t, float x, float y, float width) {
-        cardTitle.setTextSize((kind == R_HERO ? 26 : kind == R_POSTER ? 22 : 21) * k);
-        cardTitle.setTextAlign(Paint.Align.LEFT);
-        cardMeta.setTextSize((kind == R_HERO ? 20 : 18) * k);
-        cardMeta.setTextAlign(Paint.Align.LEFT);
-        c.drawText(fit(cardTitle, t.title, width), x, y + Ui.cap(cardTitle), cardTitle);
+    private void drawCaption(Canvas c, Tile t, RectF box, float y) {
+        cardTitle.setTextSize(21 * k);
+        cardTitle.setTextAlign(Paint.Align.CENTER);
+        cardMeta.setTextSize(17 * k);
+        cardMeta.setTextAlign(Paint.Align.CENTER);
+        float width = box.width() + 24 * k;
+        c.drawText(fit(cardTitle, t.title, width), box.centerX(), y + Ui.cap(cardTitle), cardTitle);
         String meta = t.meta == null ? "" : t.meta;
-        if (kind == R_LOGO && t.app != null && !t.app.connected) meta = "Débranché";
-        if (!meta.isEmpty()) c.drawText(fit(cardMeta, meta, width), x, y + Ui.cap(cardTitle) + 26 * k, cardMeta);
+        if (!meta.isEmpty()) {
+            c.drawText(fit(cardMeta, meta, width), box.centerX(), y + Ui.cap(cardTitle) + 26 * k, cardMeta);
+        }
+        cardTitle.setTextAlign(Paint.Align.LEFT);
     }
+
+    // MARK: - Top bar
 
     private void drawBar(Canvas c) {
         float barH = BAR_H * k;
-        barShade.setShader(new LinearGradient(0, 0, 0, barH + 34 * k, 0xF20B0B0D, 0x000B0B0D, Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, barH + 34 * k, barShade);
-        barShade.setShader(null);
+        fill.setAlpha(255);
+        fill.setShader(new LinearGradient(0, 0, 0, barH + 40 * k,
+                Ui.alpha(BG_TOP, 1f), Ui.alpha(BG_TOP, 0f), Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, w, barH + 40 * k, fill);
+        fill.setShader(null);
 
-        for (int i = 0; i <= GEAR; i++) {
-            boolean on = i == tab;
-            boolean focus = zone == Z_BAR && i == barIndex;
-            RectF box = barRects[i];
-            if (focus) {
-                fill.setColor(0x26FFFFFF);
-                c.drawRoundRect(box, 17 * k, 17 * k, fill);
-            }
-            if (i == GEAR) {
-                Symbols.draw(getContext(), c, "settings", box.centerX(), box.centerY(), 30 * k, focus ? INK : DIM);
-                continue;
-            }
-            tabInk.setTextSize(26 * k);
-            tabInk.setTextAlign(Paint.Align.CENTER);
-            tabInk.setColor(on ? INK : focus ? 0xE6FFFFFF : 0x73FFFFFF);
-            c.drawText(TABS[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk), tabInk);
-            if (on) {
-                fill.setColor(ACCENT);
-                c.drawCircle(box.centerX(), box.bottom - 6 * k, 3.2f * k, fill);
-            }
+        drawPill(c, chromeRects[CH_SEARCH], zone == Z_BAR && focused(CH_SEARCH));
+        drawCapsule(c, chromeRects[CH_APPS], "apps", zone == Z_BAR && focused(CH_APPS));
+        drawCapsule(c, chromeRects[CH_SYNC], "sync", zone == Z_BAR && focused(CH_SYNC));
+        drawCapsule(c, chromeRects[CH_GEAR], "settings", zone == Z_BAR && focused(CH_GEAR));
+        if (tab != 0) {
+            RectF box = chromeRects[CH_BACK];
+            boolean on = zone == Z_BAR && focused(CH_BACK);
+            drawCapsule(c, box, "", on);
+            c.save();
+            c.rotate(180, box.centerX(), box.centerY());
+            Symbols.draw(getContext(), c, "chevron_right", box.centerX(), box.centerY(), 30 * k, on ? INK : DIM);
+            c.restore();
         }
-        tabInk.setColor(INK);
+    }
 
-        clock.setTextSize(22 * k);
-        clock.setTextAlign(Paint.Align.RIGHT);
-        String time = new java.text.SimpleDateFormat("HH:mm", Locale.FRANCE)
-                .format(new java.util.Date(System.currentTimeMillis()));
-        c.drawText(time, barRects[GEAR].left - 34 * k,
-                BAR_H * k / 2 + Ui.halfCap(clock), clock);
+    private boolean focused(int id) {
+        return chromeOrder[Math.max(0, Math.min(chromeIndex, chromeCount - 1))] == id;
+    }
+
+    private void drawPill(Canvas c, RectF box, boolean on) {
+        fill.setColor(on ? GLASS_ON : GLASS);
+        c.drawRoundRect(box, box.height() / 2, box.height() / 2, fill);
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth((on ? 2 : 1) * k);
+        stroke.setColor(on ? 0xE6FFFFFF : HAIR);
+        c.drawRoundRect(box, box.height() / 2, box.height() / 2, stroke);
+
+        float cx = box.left + 30 * k, cy = box.centerY();
+        stroke.setStrokeWidth(2.2f * k);
+        stroke.setColor(on ? INK : DIM);
+        c.drawCircle(cx, cy - 1 * k, 9 * k, stroke);
+        c.drawLine(cx + 6.5f * k, cy + 6 * k, cx + 13 * k, cy + 12.5f * k, stroke);
+
+        pillInk.setTextSize(22 * k);
+        pillInk.setTextAlign(Paint.Align.LEFT);
+        pillInk.setColor(on ? 0xFFFFFFFF : 0xFFB0BCC1);
+        c.drawText("Rechercher", box.left + 54 * k, box.centerY() + Ui.halfCap(pillInk), pillInk);
+    }
+
+    private void drawCapsule(Canvas c, RectF box, String symbol, boolean on) {
+        fill.setColor(on ? GLASS_ON : GLASS);
+        c.drawRoundRect(box, 20 * k, 20 * k, fill);
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth((on ? 2 : 1) * k);
+        stroke.setColor(on ? 0xE6FFFFFF : HAIR);
+        c.drawRoundRect(box, 20 * k, 20 * k, stroke);
+        if (!symbol.isEmpty()) Symbols.draw(getContext(), c, symbol, box.centerX(), box.centerY(), 28 * k, on ? INK : DIM);
     }
 
     private void drawToast(Canvas c) {
@@ -899,16 +877,14 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             toastText = "";
             return;
         }
-        float a = age < 200 ? age / 200f : age > 2200 ? 1 - (age - 2200) / 400f : 1f;
-        a = Ui.clamp(a);
-        toast.setTextSize(24 * k);
+        float a = Ui.clamp(age < 200 ? age / 200f : age > 2200 ? 1 - (age - 2200) / 400f : 1f);
+        toast.setTextSize(22 * k);
         toast.setTextAlign(Paint.Align.CENTER);
         toast.setAlpha((int) (255 * a));
-        fill.setShader(null);
-        fill.setColor(Ui.alpha(0xFF000000, 0.72f * a));
-        float tw = toast.measureText(toastText) + 60 * k;
-        r.set(w / 2 - tw / 2, h - 120 * k, w / 2 + tw / 2, h - 60 * k);
-        c.drawRoundRect(r, 30 * k, 30 * k, fill);
+        fill.setColor(Ui.alpha(0xFF000000, 0.7f * a));
+        float tw = toast.measureText(toastText) + 56 * k;
+        r.set(w / 2 - tw / 2, h - 116 * k, w / 2 + tw / 2, h - 60 * k);
+        c.drawRoundRect(r, 28 * k, 28 * k, fill);
         c.drawText(toastText, w / 2, r.centerY() + Ui.halfCap(toast), toast);
         toast.setAlpha(255);
         main.postDelayed(this::invalidate, 240);
@@ -952,7 +928,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void move(int dx) {
         if (zone == Z_BAR) {
-            barIndex = Math.max(0, Math.min(GEAR, barIndex + dx));
+            chromeIndex = Math.max(0, Math.min(chromeCount - 1, chromeIndex + dx));
             invalidate();
             return;
         }
@@ -989,7 +965,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (dy < 0) {
             if (rowIndex == 0) {
                 zone = Z_BAR;
-                barIndex = tab;
+                chromeIndex = 0;
                 invalidate();
                 return;
             }
@@ -1005,7 +981,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
     }
 
-    /** The focus lands on the shelf: same column as the shelf above, inside the window. */
     private void enterRow() {
         Row row = rows.get(rowIndex);
         colIndex = Math.max(0, Math.min(colIndex, row.items.size() - 1));
@@ -1026,14 +1001,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void activate() {
         if (zone == Z_BAR) {
-            if (barIndex == GEAR) {
-                RectF box = barRects[GEAR];
-                android.app.Activity a = activity();
-                if (a != null) HomeApps.open(a, HomeApps.settings(), this, Math.round(box.left), Math.round(box.top),
-                        Math.round(box.width()), Math.round(box.height()));
-                return;
-            }
-            selectTab(barIndex);
+            activateChrome();
             return;
         }
         if (rows.isEmpty()) return;
@@ -1043,7 +1011,40 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             return;
         }
         if (colIndex < 0 || colIndex >= row.items.size()) return;
-        open(row.items.get(colIndex), row);
+        Tile t = row.items.get(colIndex);
+        if (t.action >= 0) { selectTab(t.action); return; }
+        open(t, row);
+    }
+
+    private void activateChrome() {
+        switch (chromeOrder[Math.max(0, Math.min(chromeIndex, chromeCount - 1))]) {
+            case CH_SEARCH:
+                getContext().startActivity(new Intent(getContext(), Browse.class));
+                break;
+            case CH_APPS:
+                selectTab(4);
+                break;
+            case CH_SYNC:
+                Iptv.get(getContext()).refresh();
+                showToast("Mise à jour du catalogue…");
+                break;
+            case CH_GEAR:
+                openSettings();
+                break;
+            case CH_BACK:
+                selectTab(0);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void openSettings() {
+        android.app.Activity a = activity();
+        if (a == null) return;
+        RectF box = chromeRects[CH_GEAR];
+        HomeApps.open(a, HomeApps.settings(), this, Math.round(box.left), Math.round(box.top),
+                Math.round(box.width()), Math.round(box.height()));
     }
 
     private void open(Tile t, Row row) {
@@ -1052,7 +1053,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             if (a == null) return;
             int i = Math.max(0, colIndex);
             float x = MARGIN * k + i * step(row.kind) - row.slide;
-            float y = BAR_H * k + 16 * k + row.y + HEAD_H * k - offset;
+            float y = BAR_H * k + 18 * k + row.y + HEAD_H * k - offset;
             if (!HomeApps.open(a, t.app, this, Math.round(x), Math.round(y),
                     Math.round(tw(row.kind)), Math.round(th(row.kind)))) {
                 showToast("Impossible d'ouvrir " + t.title + ".");
@@ -1075,10 +1076,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void selectTab(int index) {
         tab = Math.max(0, Math.min(TAB_COUNT - 1, index));
-        barIndex = tab;
         zone = Z_ROW;
         rowIndex = 0;
         colIndex = 0;
+        chromeIndex = 0;
         offset = offsetTo = 0;
         rows.clear();
         rebuild();
@@ -1087,6 +1088,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private void back() {
+        if (tab != 0) {
+            selectTab(0);
+            return;
+        }
         if (zone == Z_BAR) return;
         if (offsetTo > 2) {
             offsetTo = 0;
@@ -1098,7 +1103,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             return;
         }
         zone = Z_BAR;
-        barIndex = tab;
+        chromeIndex = 0;
         invalidate();
     }
 
@@ -1113,7 +1118,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     // MARK: - Text helpers
 
-    /** The string, cut with an ellipsis to fit the width. */
     private static String fit(Paint p, String s, float maxWidth) {
         if (s == null) return "";
         if (p.measureText(s) <= maxWidth) return s;
@@ -1145,7 +1149,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     // MARK: - Panel names
 
-    /** "FR || TF1 [HEVC]" is a data label, not a title for the sofa. */
     static String pretty(String name) {
         if (name == null) return "";
         String t = name.replace("[#]", "").replace("|FR|", "").replace("FR ||", "").replace("FR||", "").replace("FR:", "").trim();
@@ -1159,7 +1162,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return t.isEmpty() ? name.trim() : t;
     }
 
-    /** A channel name without its quality suffix, to spot the same channel twice. */
     static String norm(String name) {
         if (name == null) return "";
         String t = name.toUpperCase(Locale.ROOT)
@@ -1169,7 +1171,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return t.replaceAll("[^A-Z0-9]", "");
     }
 
-    /** The panel decorates its category names: keep the word. */
     static String clean(String name) {
         if (name == null) return "";
         String t = name.replace("✧", "").replace("･", "").replace("ﾟ", "").replace("─", "").replace("||", "");
@@ -1180,7 +1181,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return t.isEmpty() ? name.trim() : t;
     }
 
-    /** The French channels first: the home screen should not open on a Belgian shopping channel. */
     private static List<Iptv.Item> frenchChannels(Iptv iptv, int max) {
         List<Iptv.Item> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();

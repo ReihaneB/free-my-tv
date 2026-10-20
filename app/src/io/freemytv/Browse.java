@@ -20,6 +20,10 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import android.media.tv.TvContract;
+import android.media.tv.TvInputInfo;
+import android.media.tv.TvInputManager;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -424,6 +428,7 @@ public final class Browse extends Activity implements Iptv.Listener {
             if (!res.isEmpty()) row("Reprendre la lecture", res);
             row("Nouveautés", iptv.fresh("vod", 21, 20));
             row("Chaînes françaises", france(iptv));
+            hdmiRow();
             row("Films les mieux notés", iptv.best("vod", 20));
             row("Séries les mieux notées", iptv.best("series", 20));
             List<Iptv.Item> films = iptv.movies();
@@ -531,6 +536,66 @@ public final class Browse extends Activity implements Iptv.Listener {
                 if (firstFocus != null && !search.hasFocus()) firstFocus.requestFocus();
             });
         }, "search").start();
+    }
+
+    /** The HDMI sockets, and nothing else from the tuner: the antenna is not part of this TV any more. */
+    private void hdmiRow() {
+        TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
+        if (tim == null) return;
+        List<TvInputInfo> inputs = new ArrayList<>();
+        for (TvInputInfo info : tim.getTvInputList()) {
+            if (info.getType() == TvInputInfo.TYPE_HDMI) inputs.add(info);
+        }
+        if (inputs.isEmpty()) return;
+
+        TextView t = new TextView(this);
+        t.setText("Entrées HDMI");
+        t.setTextColor(0xE6FFFFFF);
+        t.setTextSize(ROW_TITLE);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        tp.topMargin = dp(14);
+        tp.bottomMargin = dp(6);
+        content.addView(t, tp);
+
+        LinearLayout line = new LinearLayout(this);
+        line.setOrientation(LinearLayout.HORIZONTAL);
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(line);
+        content.addView(hs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        List<View> registered = new ArrayList<>();
+        gridRows.add(registered);
+
+        for (TvInputInfo info : inputs) {
+            CharSequence label = info.loadLabel(this);
+            TextView tile = new TextView(this);
+            tile.setText(label == null ? "HDMI" : label.toString());
+            tile.setTextColor(0xFF0B0B0F);
+            tile.setTextSize(15);
+            tile.setGravity(Gravity.CENTER);
+            tile.setBackground(glass(0xE6FFFFFF, 0xFFFFFFFF));
+            tile.setFocusable(true);
+            tile.setContentDescription(label == null ? "HDMI" : label.toString());
+            tile.setOnClickListener(v -> {
+                try {
+                    startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                            TvContract.buildChannelUriForPassthroughInput(info.getId())));
+                } catch (Exception e) {
+                    AppLog.w("hdmi: " + e.getMessage());
+                }
+            });
+            tile.setOnFocusChangeListener((v, has) -> v.animate().scaleX(has ? 1.05f : 1f).scaleY(has ? 1.05f : 1f)
+                    .setDuration(110).start());
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(150), dp(CARD_H));
+            lp.rightMargin = dp(10);
+            line.addView(tile, lp);
+            registered.add(tile);
+            if (firstFocus == null) firstFocus = tile;
+            if (firstCard == null) firstCard = tile;
+        }
     }
 
     private List<Iptv.Item> france(Iptv iptv) {

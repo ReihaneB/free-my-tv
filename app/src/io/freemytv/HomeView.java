@@ -84,7 +84,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
     private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 258, L_CARD_H = 262;
     // Two rows of posters under the cards: the account, in the home.
-    private static final float L_ROW_TITLE = 550, L_ROW_TOP = 574, L_ROW_H = 84, L_ROW_W = 63, L_ROW_GAP = 8,
+    private static final float L_ROW_TITLE = 550, L_ROW_TOP = 574, L_ROW_H = 84, L_ROW_W = 88, L_ROW_GAP = 9,
             L_ROW_STEP = 100;
     private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
     private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
@@ -133,7 +133,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final Spring[] cardFocus = new Spring[3];
     private static final int ROWS = 2;
     private final List<List<Recs.Pick>> shelves = new ArrayList<>();
-    private final RectF[][] shelfRects = new RectF[ROWS][8];
+    private final RectF[][] shelfRects = new RectF[ROWS][14];
     private final int[] shelfCol = new int[ROWS];
     private int shelfRow;
     private final String[] shelfTitles = new String[ROWS];
@@ -2162,7 +2162,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         shelfTitles[0] = resume.isEmpty() ? "Nouveautés" : "Reprendre la lecture";
         List<Recs.Pick> first = new ArrayList<>(resume);
         for (Recs.Pick p : fresh) {
-            if (first.size() >= 8) break;
+            if (first.size() >= 14) break;
             boolean seen = false;
             for (Recs.Pick q : first) if (q.url != null && q.url.equals(p.url)) { seen = true; break; }
             if (!seen) first.add(p);
@@ -2174,9 +2174,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             if (!c.name.toUpperCase(java.util.Locale.ROOT).contains("FRANCE")) continue;
             for (Iptv.Item i : iptv.live()) {
                 if (i.group.equals(c.id) && !i.url.isEmpty() && !i.name.startsWith("─")) channels.add(pick(i));
-                if (channels.size() >= 8) break;
+                if (channels.size() >= 14) break;
             }
-            if (channels.size() >= 8) break;
+            if (channels.size() >= 14) break;
         }
         shelfTitles[1] = "Chaînes françaises";
         shelves.add(channels);

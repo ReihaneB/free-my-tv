@@ -172,6 +172,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         t.setPadding(dp(20), dp(9), dp(20), dp(10));
         t.setFocusable(true);
         t.setOnClickListener(v -> { type = id; onlyCategory = ""; show(); });
+        tabViews.add(t);
         t.setOnFocusChangeListener((v, has) -> { if (has) { type = id; onlyCategory = ""; show(); } paintTabs(); });
         tabs.addView(t, margin(0, 0, dp(8), 0));
     }
@@ -189,6 +190,9 @@ public final class Browse extends Activity implements Iptv.Listener {
     }
 
     private final List<String> chipIds = new ArrayList<>();
+    private final List<View> chipViews = new ArrayList<>();
+    private final List<View> tabViews = new ArrayList<>();
+    private final List<List<View>> gridRows = new ArrayList<>();
 
     /** First chip: hands the focus to the search field, which opens the keyboard. */
     private void searchChip() {
@@ -206,6 +210,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         t.setBackground(pill);
         t.setOnClickListener(v -> search.requestFocus());
         chips.addView(t, margin(0, 0, dp(8), 0));
+        chipViews.add(t);
     }
 
     private void paintChips() {
@@ -256,6 +261,7 @@ public final class Browse extends Activity implements Iptv.Listener {
 
         chips.removeAllViews();
         chipIds.clear();
+        chipViews.clear();
         List<Iptv.Category> cats = categories(iptv);
         searchChip();
         chip("", "Tout");
@@ -271,6 +277,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         content.removeAllViews();
         firstFocus = null;
         firstCard = null;
+        gridRows.clear();
 
         if (!Iptv.configured()) {
             empty.setText("Aucun compte IPTV configuré (iptv_host, iptv_user, iptv_pass).");
@@ -324,7 +331,10 @@ public final class Browse extends Activity implements Iptv.Listener {
             row(nameOf(categories(iptv), onlyCategory), pool);
         }
 
-        if (firstFocus != null) firstFocus.requestFocus();
+        View focused = getCurrentFocus();
+        if (firstFocus != null && (focused == null || focused == content || gridRows.get(gridRows.size() - 1).contains(focused))) {
+            firstFocus.requestFocus();
+        }
     }
 
     /** Matches on the name, in the current tab, off the UI thread (12 000 films, and the remote types fast). */
@@ -418,10 +428,16 @@ public final class Browse extends Activity implements Iptv.Listener {
         content.addView(hs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        List<View> line2 = new ArrayList<>();
+        gridRows.add(line2);
         int shown = 0;
         for (Iptv.Item it : items) {
             if (shown++ >= 20) break;
-            line.addView(card(it), margin(0, 0, dp(10), 0));
+            View card = card(it);
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(dp(CARD_W), dp(CARD_H));
+            clp.rightMargin = dp(10);
+            line.addView(card, clp);
+            line2.add(card);
         }
     }
 
@@ -470,6 +486,7 @@ public final class Browse extends Activity implements Iptv.Listener {
             v.setBackground(has ? glass(0x2BFFFFFF, 0xFFFFFFFF) : glass(0x0FFFFFFF, 0x1FFFFFFF));
             v.setElevation(dp(has ? 18 : 2));
         });
+        card.setContentDescription(item.name);
         card.setOnClickListener(v -> open(item));
         card.setOnKeyListener((v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
@@ -552,6 +569,81 @@ public final class Browse extends Activity implements Iptv.Listener {
         it.putExtra(Player.EXTRA_URL, url);
         it.putExtra(Player.EXTRA_NAME, name);
         startActivity(it);
+    }
+
+    /**
+     * Navigation by sections instead of Android's guesswork: the field, the tabs, the category chips, the rows of
+     * cards. Up always goes to the section above, down to the one below, and the column is kept.
+     */
+    @Override public boolean dispatchKeyEvent(KeyEvent e) {
+        if (e.getAction() == KeyEvent.ACTION_DOWN) {
+            int k = e.getKeyCode();
+            if (k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN
+                    || k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                if (navigate(k)) return true;
+            }
+        }
+        return super.dispatchKeyEvent(e);
+    }
+
+    private boolean navigate(int key) {
+        View f = getCurrentFocus();
+        if (f == null) return false;
+
+        if (f == search) {
+            if (key == KeyEvent.KEYCODE_DPAD_DOWN) return focusGrid(0, 0) || focusChip(0);
+            return false;                        // left/right/up stay in the field
+        }
+        int t = tabViews.indexOf(f);
+        if (t >= 0) {
+            if (key == KeyEvent.KEYCODE_DPAD_LEFT && t > 0) { tabViews.get(t - 1).requestFocus(); return true; }
+            if (key == KeyEvent.KEYCODE_DPAD_RIGHT && t < tabViews.size() - 1) { tabViews.get(t + 1).requestFocus(); return true; }
+            if (key == KeyEvent.KEYCODE_DPAD_DOWN) return focusChip(0);
+            if (key == KeyEvent.KEYCODE_DPAD_UP) { search.requestFocus(); return true; }
+            return true;
+        }
+        int c = chipViews.indexOf(f);
+        if (c >= 0) {
+            if (key == KeyEvent.KEYCODE_DPAD_LEFT && c > 0) { chipViews.get(c - 1).requestFocus(); return true; }
+            if (key == KeyEvent.KEYCODE_DPAD_RIGHT && c < chipViews.size() - 1) { chipViews.get(c + 1).requestFocus(); return true; }
+            if (key == KeyEvent.KEYCODE_DPAD_DOWN) return focusGrid(0, c);
+            if (key == KeyEvent.KEYCODE_DPAD_UP) {
+                int t2 = Math.min(tabViews.size() - 1, Math.max(0, "live".equals(type) ? 0 : "vod".equals(type) ? 1 : 2));
+                tabViews.get(t2).requestFocus();
+                return true;
+            }
+            return true;
+        }
+        for (int r = 0; r < gridRows.size(); r++) {
+            int within = gridRows.get(r).indexOf(f);
+            if (within < 0) continue;
+            if (key == KeyEvent.KEYCODE_DPAD_LEFT) { if (within > 0) { gridRows.get(r).get(within - 1).requestFocus(); return true; } return true; }
+            if (key == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                if (within < gridRows.get(r).size() - 1) { gridRows.get(r).get(within + 1).requestFocus(); return true; }
+                return true;
+            }
+            if (key == KeyEvent.KEYCODE_DPAD_DOWN) return r + 1 < gridRows.size() && focusGrid(r + 1, within);
+            if (key == KeyEvent.KEYCODE_DPAD_UP) {
+                if (r > 0) return focusGrid(r - 1, within);
+                return focusChip(Math.max(0, Math.min(chipViews.size() - 1, within)));
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean focusGrid(int row, int column) {
+        if (row < 0 || row >= gridRows.size()) return false;
+        List<View> line = gridRows.get(row);
+        if (line.isEmpty()) return false;
+        line.get(Math.max(0, Math.min(line.size() - 1, column))).requestFocus();
+        return true;
+    }
+
+    private boolean focusChip(int index) {
+        if (chipViews.isEmpty()) return false;
+        chipViews.get(Math.max(0, Math.min(chipViews.size() - 1, index))).requestFocus();
+        return true;
     }
 
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {

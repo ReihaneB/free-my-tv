@@ -24,6 +24,7 @@ final class Posters {
     interface Done { void onPoster(String url, Bitmap bitmap); }
 
     private static final int HOLD = 60;                     // in memory
+    private static final int MIN_W = 300, MIN_H = 300;     // decoded size floor: panel logos are 65x39 originals
     private static Posters instance;
 
     private final File dir;
@@ -39,7 +40,7 @@ final class Posters {
     }
 
     private Posters(android.content.Context c) {
-        dir = new File(c.getCacheDir(), "posters");
+        dir = new File(c.getCacheDir(), "posters3");   // new decode: old 65x39 files must not be reused
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
     }
@@ -120,18 +121,37 @@ final class Posters {
         try {
             if (c.getResponseCode() != 200) return null;
             try (InputStream in = c.getInputStream()) {
+                // Downsample only what is bigger than the screen: a channel logo served at 65x39 must be decoded as
+                // is, or it gets blown up blurry in a 230x129 tile.
+                byte[] bytes = readAll(in);
+                BitmapFactory.Options bounds = new BitmapFactory.Options();
+                bounds.inJustDecodeBounds = true;
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+                int sample = 1;
+                while (bounds.outWidth / (sample * 2) >= MIN_W && bounds.outHeight / (sample * 2) >= MIN_H) sample *= 2;
                 BitmapFactory.Options o = new BitmapFactory.Options();
-                o.inSampleSize = 2;      // a poster is shown at ~260 px wide
-                return BitmapFactory.decodeStream(in, null, o);
+                o.inSampleSize = sample;
+                return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
             }
         } finally {
             c.disconnect();
         }
     }
 
+    private static byte[] readAll(InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[16 * 1024];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        return out.toByteArray();
+    }
+
     private static void write(File f, Bitmap b) {
         try (FileOutputStream out = new FileOutputStream(f)) {
-            b.compress(Bitmap.CompressFormat.JPEG, 85, out);
+            // A channel logo is a transparent PNG: JPEG would flatten the transparency to black and the tile would
+            // show a black rectangle instead of a logo.
+            if (b.hasAlpha()) b.compress(Bitmap.CompressFormat.PNG, 100, out);
+            else b.compress(Bitmap.CompressFormat.JPEG, 85, out);
         } catch (IOException ignored) { }
     }
 }

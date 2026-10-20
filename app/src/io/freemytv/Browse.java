@@ -37,8 +37,9 @@ import java.util.List;
 public final class Browse extends Activity implements Iptv.Listener {
     public static final String EXTRA_SERIES = "series";
 
-    private static final int CARD_W = 132, CARD_H = 198;      // dp, 2:3 poster
-    private static final int ROW_TITLE = 17, TAB = 15;
+    private static final int CARD_W = 118, CARD_H = 177;      // dp, 2:3 poster (Apple TV size at 1080p)
+    private static final int ROW_TITLE = 18, TAB = 13;
+    private static final int HERO_H = 210;                    // dp: the first row must be fully visible under it
 
     private String type = "home";           // home | live | vod | series
     private String onlyCategory = "";       // "" = every category
@@ -56,6 +57,7 @@ public final class Browse extends Activity implements Iptv.Listener {
     private LinearLayout header;
     private TextView empty;
     private View firstFocus, firstCard, heroButton;
+    private String heroTitle = "";
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -94,7 +96,7 @@ public final class Browse extends Activity implements Iptv.Listener {
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(56), dp(28), dp(56), 0);
+        page.setPadding(dp(48), dp(24), dp(48), 0);
         root.addView(page, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -108,7 +110,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         TextView title = new TextView(this);
         title.setText("Free TV");
         title.setTextColor(0xFFFFFFFF);
-        title.setTextSize(28);
+        title.setTextSize(26);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -117,7 +119,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         search.setHint("Rechercher");
         search.setHintTextColor(0x66FFFFFF);
         search.setTextColor(0xFFFFFFFF);
-        search.setTextSize(14);
+        search.setTextSize(13);
         search.setSingleLine(true);
         search.setFocusable(false);
         search.setFocusableInTouchMode(false);
@@ -126,7 +128,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         });
         search.setBackground(glass(0x14FFFFFF, 0x1FFFFFFF));
         search.setPadding(dp(14), dp(7), dp(14), dp(8));
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(230), ViewGroup.LayoutParams.WRAP_CONTENT);
         slp.rightMargin = dp(18);
         head.addView(search, slp);
         search.setOnKeyListener((v, keyCode, event) -> {
@@ -228,7 +230,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         chipIds.add("\u0000search");
         TextView t = new TextView(this);
         t.setText("Rechercher");
-        t.setTextSize(13);
+        t.setTextSize(12);
         t.setTextColor(0xCCFFFFFF);
         t.setGravity(Gravity.CENTER);
         t.setPadding(dp(14), dp(7), dp(14), dp(8));
@@ -263,7 +265,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         chipIds.add(id);
         TextView t = new TextView(this);
         t.setText(label);
-        t.setTextSize(13);
+        t.setTextSize(12);
         t.setTextColor(id.equals(onlyCategory) ? 0xFF0B0B0F : 0xCCFFFFFF);
         t.setGravity(Gravity.CENTER);
         t.setPadding(dp(14), dp(7), dp(14), dp(8));
@@ -325,6 +327,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         if (feature.isEmpty()) feature.addAll(iptv.best("vod", 1));
         if (feature.isEmpty()) return;
         final Iptv.Item item = feature.get(0);
+        heroTitle = item.name;
 
         FrameLayout box = new FrameLayout(this);
         box.setClipToOutline(true);
@@ -350,7 +353,7 @@ public final class Browse extends Activity implements Iptv.Listener {
 
         TextView meta = new TextView(this);
         meta.setText(resuming ? "À REPRENDRE" : "À LA UNE");
-        meta.setTextSize(11);
+        meta.setTextSize(10);
         meta.setTextColor(0xCCFFFFFF);
         meta.setLetterSpacing(0.12f);
         words.addView(meta);
@@ -358,7 +361,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         TextView title = new TextView(this);
         title.setText(item.name);
         title.setTextColor(0xFFFFFFFF);
-        title.setTextSize(30);
+        title.setTextSize(27);
         title.setMaxLines(2);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -391,7 +394,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         if (line.length() > 0) {
             facts.setText(line.toString());
             facts.setTextColor(0xCCFFFFFF);
-            facts.setTextSize(13);
+            facts.setTextSize(12);
             LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT);
             fp.topMargin = dp(6);
@@ -400,7 +403,7 @@ public final class Browse extends Activity implements Iptv.Listener {
 
         TextView watch = new TextView(this);
         watch.setText(progress > 0.01f ? "Reprendre" : "Regarder");
-        watch.setTextSize(15);
+        watch.setTextSize(14);
         watch.setTextColor(0xFF0B0B0F);
         watch.setGravity(Gravity.CENTER);
         watch.setPadding(dp(26), dp(10), dp(26), dp(11));
@@ -417,11 +420,10 @@ public final class Browse extends Activity implements Iptv.Listener {
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         wp.topMargin = dp(16);
         words.addView(watch, wp);
-        if (firstFocus == null) firstFocus = watch;
 
         box.addView(words, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT, Gravity.BOTTOM));
-        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(300));
+        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(HERO_H));
         hp.bottomMargin = dp(18);
         content.addView(box, hp);
         gridRows.add(new ArrayList<>());
@@ -457,7 +459,8 @@ public final class Browse extends Activity implements Iptv.Listener {
             List<Iptv.Item> res = new ArrayList<>();
             res.addAll(enrich(Prefs.resume("vod"), iptv));
             res.addAll(enrich(Prefs.resume("series"), iptv));
-            if (!res.isEmpty()) row("Reprendre la lecture", res);
+            // The hero already features the first of them: a one-card row repeating it reads as a bug.
+            if (res.size() > 1 || (res.size() == 1 && !res.get(0).name.equals(heroTitle))) row("Reprendre la lecture", res);
             row("Nouveautés", iptv.fresh("vod", 21, 20));
             row("Chaînes françaises", france(iptv));
             hdmiRow();
@@ -474,8 +477,10 @@ public final class Browse extends Activity implements Iptv.Listener {
                 if (!r.isEmpty()) row(clean(c.name), r);
             }
             scroll.scrollTo(0, 0);
-        dump("accueil", content);
-            if (firstFocus != null && !search.hasFocus()) firstFocus.requestFocus();
+            // Never steal the focus from the tab row: a tab switch rebuilds the rows, and the tab that has the
+            // focus is not part of that rebuild (taking it back made the tabs impossible to use with the remote).
+            View cur = getCurrentFocus();
+            if (firstFocus != null && !search.hasFocus() && (cur == null || cur.getParent() == null)) firstFocus.requestFocus();
             return;
         }
 
@@ -520,13 +525,6 @@ public final class Browse extends Activity implements Iptv.Listener {
             row(nameOf(categoriesOf(iptv), onlyCategory), pool);
         }
 
-        StringBuilder order = new StringBuilder("content:");
-        for (int i = 0; i < Math.min(content.getChildCount(), 8); i++) {
-            View ch = content.getChildAt(i);
-            order.append(' ').append(i).append(':').append(ch.getClass().getSimpleName());
-            if (ch instanceof TextView) order.append('[').append(((TextView) ch).getText()).append(']');
-        }
-        AppLog.w(order.toString());
         View focused = getCurrentFocus();
         boolean gone = focused == null || focused.getParent() == null;   // the last build's views are detached
         if (firstFocus != null && (gone || focused == content
@@ -702,6 +700,25 @@ public final class Browse extends Activity implements Iptv.Listener {
         return out.isEmpty() ? name.trim() : out;
     }
 
+    /** "FR || TF1 [HEVC]" is a data label: the sofa gets "TF1". */
+    private static String prettyName(String name) {
+        if (name == null) return "";
+        String t = name.replace("[#]", "").replace("|FR|", "").replace("FR ||", "").replace("FR||", "").replace("FR:", "").trim();
+        t = t.replaceAll("\\s*\\[(HEVC|FHD|UHD|4K|HD|SD|RAW|BACKUP)]", "");
+        t = t.replaceAll("\\s*\\((FHD|UHD|4K|HD|SD|RAW|BACKUP)\\)", "");
+        t = t.replaceAll("\\s{2,}", " ").trim();
+        while (t.startsWith("#") || t.startsWith("-") || t.startsWith("·") || t.startsWith("[") || t.startsWith("]")) t = t.substring(1).trim();
+        return t.isEmpty() ? name.trim() : t;
+    }
+
+    /** The panel lists TF1 in HD, FHD, HEVC and backup: one card per channel. */
+    private static String norm(String name) {
+        String t = prettyName(name).toUpperCase(java.util.Locale.ROOT)
+                .replace("FULL HD", "").replace("FHD", "").replace("UHD", "").replace("4K", "")
+                .replace("HD", "").replace("SD", "").replace("RAW", "").replace("BACKUP", "");
+        return t.replaceAll("[^A-Z0-9]", "");
+    }
+
     private static String strip(String name) {
         String s = name.replace("✧", "").replace("･", "").replace("ﾟ", "").replace("─", "").replace("|||", "");
         s = s.replace("||", "").trim();
@@ -735,8 +752,11 @@ public final class Browse extends Activity implements Iptv.Listener {
         List<View> line2 = new ArrayList<>();
         gridRows.add(line2);
         int shown = 0;
+        java.util.Set<String> seen = new java.util.HashSet<>();
         for (Iptv.Item it : items) {
-            if (shown++ >= 20) break;
+            if (shown >= 20) break;
+            if (!seen.add(norm(it.name))) continue;      // TF1 HD / TF1 4K / TF1 SD are one channel
+            shown++;
             View card = card(it);
             LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(dp(CARD_W), dp(CARD_H));
             clp.rightMargin = dp(10);
@@ -754,15 +774,18 @@ public final class Browse extends Activity implements Iptv.Listener {
         card.setLayoutParams(new ViewGroup.LayoutParams(dp(CARD_W), dp(CARD_H)));
 
         ImageView img = new ImageView(this);
-        img.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        // A channel logo is wide: contained with air around it, never cropped into a 2:3 box.
+        boolean channelCard = "live".equals(type);
+        img.setScaleType(channelCard ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+        if (channelCard) img.setPadding(dp(14), dp(26), dp(14), dp(44));
         img.setAlpha(0.92f);
         card.addView(img, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView label = new TextView(this);
-        label.setText(item.name);
+        label.setText(prettyName(item.name));
         label.setTextColor(0xFFFFFFFF);
-        label.setTextSize(12);
+        label.setTextSize(11);
         label.setMaxLines(2);
         label.setPadding(dp(8), dp(6), dp(8), dp(8));
         GradientDrawable scrim = new GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
@@ -786,11 +809,11 @@ public final class Browse extends Activity implements Iptv.Listener {
 
         card.setNextFocusUpId(1002);
         card.setOnFocusChangeListener((v, has) -> {
-            v.animate().scaleX(has ? 1.07f : 1f).scaleY(has ? 1.07f : 1f).setDuration(110).start();
-            v.setBackground(has ? glass(0x2BFFFFFF, 0xFFFFFFFF) : glass(0x0FFFFFFF, 0x1FFFFFFF));
+            v.animate().scaleX(has ? 1.05f : 1f).scaleY(has ? 1.05f : 1f).setDuration(120).start();
+            v.setBackground(has ? ring() : glass(0x0FFFFFFF, 0x1FFFFFFF));
             v.setElevation(dp(has ? 18 : 2));
         });
-        card.setContentDescription(item.name);
+        card.setContentDescription(prettyName(item.name));
         card.setOnClickListener(v -> open(item));
         card.setOnKeyListener((v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
@@ -923,8 +946,7 @@ public final class Browse extends Activity implements Iptv.Listener {
             if (key == KeyEvent.KEYCODE_DPAD_RIGHT && c < chipViews.size() - 1) { chipViews.get(c + 1).requestFocus(); return true; }
             if (key == KeyEvent.KEYCODE_DPAD_DOWN) return focusGrid(0, c);
             if (key == KeyEvent.KEYCODE_DPAD_UP) {
-                int t2 = Math.min(tabViews.size() - 1, Math.max(0, "live".equals(type) ? 0 : "vod".equals(type) ? 1 : 2));
-                tabViews.get(t2).requestFocus();
+                tabViews.get(tabIndex()).requestFocus();
                 return true;
             }
             return true;
@@ -939,18 +961,25 @@ public final class Browse extends Activity implements Iptv.Listener {
             }
             if (key == KeyEvent.KEYCODE_DPAD_DOWN) return r + 1 < gridRows.size() && focusGrid(r + 1, within);
             if (key == KeyEvent.KEYCODE_DPAD_UP) {
-                if (r > 0) return focusGrid(r - 1, within);
-                return focusChip(Math.max(0, Math.min(chipViews.size() - 1, within)));
+                // gridRows[0] is the hero's (empty): the first row of cards goes up to the chips, never to nothing.
+                if (r > 1) return focusGrid(r - 1, within);
+                if (focusChip(Math.max(0, Math.min(chipViews.size() - 1, within)))) return true;
+                tabViews.get(tabIndex()).requestFocus();     // the home tab has no chips: up goes to the tabs
+                return true;
             }
             return true;
         }
         // Anything else (the hero button, a detached view): up always means the tabs.
         if (key == KeyEvent.KEYCODE_DPAD_UP && !tabViews.isEmpty()) {
-            int idx = "home".equals(type) ? 0 : "live".equals(type) ? 1 : "vod".equals(type) ? 2 : 3;
-            tabViews.get(Math.min(idx, tabViews.size() - 1)).requestFocus();
+            tabViews.get(tabIndex()).requestFocus();
             return true;
         }
         return false;
+    }
+
+    private int tabIndex() {
+        int i = "home".equals(type) ? 0 : "live".equals(type) ? 1 : "vod".equals(type) ? 2 : 3;
+        return Math.min(i, Math.max(0, tabViews.size() - 1));
     }
 
     private boolean focusGrid(int row, int column) {
@@ -973,6 +1002,15 @@ public final class Browse extends Activity implements Iptv.Listener {
     }
 
     // MARK: - dp
+
+    /** The tvOS focus: the card is outlined by a solid white ring, not a hairline nobody sees from the sofa. */
+    private GradientDrawable ring() {
+        GradientDrawable d = new GradientDrawable();
+        d.setCornerRadius(dp(14));
+        d.setColor(0x1FFFFFFF);
+        d.setStroke(Math.max(2, dp(3)), 0xFFFFFFFF);
+        return d;
+    }
 
     /** What Apple's glass looks like without a GPU blur: a thin white wash, a hairline, and a shadow to lift it. */
     private GradientDrawable glass(int fill, int stroke) {

@@ -41,6 +41,11 @@ LON="$(number longitude -74.0060)"
 ASSIST=false; [ "$(prop disable_assistant false)" = "true" ] && ASSIST=true
 CRYPTO=false; [ "$(prop show_crypto true)" = "true" ] && CRYPTO=true
 
+# minSdk: 31 (Android 12) unless MIN_SDK asks for lower. Android 11 TVs (SDK 30) run the flat fallback for the
+# aurora, computed in Frost instead of AGSL.
+MIN_SDK="${MIN_SDK:-31}"
+TARGET_SDK="${TARGET_SDK:-33}"
+
 rm -rf out && mkdir -p out/gen/io/freemytv out/classes
 cat > out/gen/io/freemytv/Config.java <<EOF
 package io.freemytv;
@@ -66,10 +71,10 @@ EOF
 "$BT/aapt2" compile --dir app/res -o out/res.zip
 # Fonts uncompressed: Android reads them straight from the APK.
 "$BT/aapt2" link -o out/base.apk -I "$AJ" --manifest app/AndroidManifest.xml --java out/gen out/res.zip \
-  --min-sdk-version 31 --target-sdk-version 33 -A app/assets -0 ttf
+  --min-sdk-version "$MIN_SDK" --target-sdk-version "$TARGET_SDK" -A app/assets -0 ttf
 "$JAVAC" -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$AJ:$BT/core-lambda-stubs.jar" -classpath "$AJ" \
   -d out/classes $(find app/src out/gen -name '*.java')
-"$BT/d8" --release --min-api 31 --lib "$AJ" --output out $(find out/classes -name '*.class')
+"$BT/d8" --release --min-api "$MIN_SDK" --lib "$AJ" --output out $(find out/classes -name '*.class')
 (cd out && zip -qj base.apk classes.dex)
 "$BT/zipalign" -f -p 4 out/base.apk out/aligned.apk
 

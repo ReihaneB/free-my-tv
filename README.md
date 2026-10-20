@@ -58,6 +58,8 @@ About ten minutes. You need a Google TV or Android TV (Android 12 or newer) and 
    ./build.sh
    ```
    The first run creates `config.properties`. Set your city and your [TMDB key](#the-tmdb-key) there, then run it again.
+   On an Android 11 TV (Philips/TP Vision 2020–2021, for example), build with `MIN_SDK=30 ./build.sh`: same app, the
+   aurora is drawn on the CPU instead of the GPU shaders.
 4. **Install:**
    ```bash
    adb connect 192.168.1.50:5555

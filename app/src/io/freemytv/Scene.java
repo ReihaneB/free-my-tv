@@ -5,6 +5,7 @@ import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RecordingCanvas;
 import android.graphics.RectF;
@@ -30,6 +31,12 @@ final class Scene {
     private final Paint flatFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint flatRim = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fallback = new Paint();
+    // Without AGSL (Android 11 and older): the same aurora, computed on the CPU by Frost (48×27) and scaled up. It
+    // moves at 4 steps per second, which is all a background this soft needs.
+    private final Paint soft = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final Paint flatTint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Matrix softMatrix = new Matrix();
+    private float softAt = -10;
     private final RenderNode auroraNode = new RenderNode("aurora");
     // The layer is drawn at a quarter size and scaled up: filtered, its soft shapes stay soft instead of stepping.
     private final Paint layerPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
@@ -89,17 +96,33 @@ final class Scene {
 
     private void push() {
         dim = Math.min(0.6f, baseDim + Math.max(0, Math.min(0.22f, (palette.brightest() - 0.45f) * 0.5f)));
-        if (aurora == null) return;
+        if (aurora == null) {
+            softAurora(time);
+            return;
+        }
         aurora.setFloatUniform("speed", speed);
         aurora.setFloatUniform("dim", dim);
         palette.apply(aurora);
         advance(time);
     }
 
+    /** Software aurora (no AGSL): Frost's image, scaled to the screen. ~1,300 pixels, redrawn 4×/s. */
+    private void softAurora(float seconds) {
+        if (Math.abs(seconds - softAt) < 0.25f) return;
+        softAt = seconds;
+        BitmapShader s = frost.render(seconds, speed, dim, palette.c, (float) w / h);
+        softMatrix.setScale((float) w / Frost.W, (float) h / Frost.H);
+        s.setLocalMatrix(softMatrix);
+        soft.setShader(s);
+    }
+
     /** Moves the aurora to `seconds`: redraws the layer on the next draw, recomputes the glass's frosted aurora now. */
     void advance(float seconds) {
         time = seconds;
-        if (aurora == null) return;
+        if (aurora == null) {
+            softAurora(seconds);
+            return;
+        }
         aurora.setFloatUniform("t", seconds);
         if (!imageFrost || !imageGlass) {
             BitmapShader s = frost.render(seconds, speed, dim, palette.c, (float) w / h);
@@ -218,6 +241,11 @@ final class Scene {
 
     void drawBackground(Canvas c) {
         if (aurora == null) {
+            softAurora(time);
+            if (soft.getShader() != null) {
+                c.drawRect(0, 0, w, h, soft);
+                return;
+            }
             if (fallback.getShader() == null) applyPalette();
             c.drawRect(0, 0, w, h, fallback);
             return;
@@ -250,8 +278,17 @@ final class Scene {
         if (alpha <= 0.004f) return;
         if (glass == null) {
             if (body > 0) {
-                flatFill.setColor(Ui.alpha(tint | 0xFF000000, Math.max(0.35f, tintAlpha)));
-                c.drawRoundRect(r, radius, radius, flatFill);
+                // No AGSL: the blurred aurora (Frost) behind the rectangle stands in for the refracted background.
+                Shader behind = soft.getShader();
+                if (behind != null) {
+                    flatFill.setShader(behind);
+                    flatFill.setAlpha(Math.round(255 * Math.min(1, alpha)));
+                    c.drawRoundRect(r, radius, radius, flatFill);
+                    flatFill.setShader(null);
+                    flatFill.setAlpha(255);
+                }
+                flatTint.setColor(Ui.alpha(tint | 0xFF000000, Math.max(0.35f, tintAlpha) * alpha));
+                c.drawRoundRect(r, radius, radius, flatTint);
             }
             c.drawRoundRect(r, radius, radius, flatRim);
             return;

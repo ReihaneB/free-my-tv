@@ -45,8 +45,8 @@ final class HomeMode {
     static final String GOOGLE_SETUP = "com.google.android.tungsten.setupwraith";
 
     /**
-     * Turned off in Free My TV mode, when the TV has them. Google extras first, then TV-maker extras (TCL here; add
-     * your brand's, see the README). The TV's own home screen and screensaver are added at switch time.
+     * Turned off in Free My TV mode, when the TV has them. Google extras first, then TV-maker extras (TCL and Philips
+     * here; add your brand's, see the README). The TV's own home screen and screensaver are added at switch time.
      */
     static final String[] DEBLOAT = {
         "com.google.android.play.games", "com.google.android.youtube.tvmusic",        // Play Games, YouTube Music
@@ -56,6 +56,9 @@ final class HomeMode {
         "com.tcl.messagebox", "com.tcl.usercenter",                                   // TCL messages and account
         "com.tcl.exhibit", "com.tcl.esticker", "com.tcl.hotelmenu",                   // store demo, hotel menu
         "com.tcl.repairguide", "com.tcl.ocean.instructions", "com.tcl.logkit",        // repair guide, manual, logs
+        // Philips / TP Vision
+        "org.droidtv.nettv.market", "org.droidtv.nettvregistration",                  // app store, registration nags
+        "fusion.android.tv.demo",                                                    // store demo
     };
 
     /** The voice assistant, only with disable_assistant=true in config.properties (the mic button stops working). */
@@ -71,6 +74,17 @@ final class HomeMode {
         "com.google.android.gms", "com.google.android.gsf", "com.android.vending", "com.google.android.apps.mediashell",
         "com.google.android.tv.remote.service", "com.google.android.inputmethod.latin", "com.google.android.webview",
         "com.android.tv.settings", "com.android.systemui", "android", PKG));
+
+    /**
+     * Never turned off by brand: the TV-maker's own system pieces (picture, sound, inputs, tuner, remote, setup,
+     * updates). When in doubt, protect it; a package in DEBLOAT stays an explicit exception.
+     */
+    private static final String[] PROTECTED_PREFIXES = {
+        "org.droidtv.",          // Philips / TP Vision: Ambilight, tuner, strings, settings
+        "com.mediatek.",         // Philips' MediaTek: tuner, live TV, setup wizard
+        "com.android.tv.",       // Android TV: settings, OTA
+        "com.tcl.", "com.tvos",  // TCL
+    };
 
     /** One switch at a time (jobs can overlap: a boot check and a button press). */
     private static final Object RUN = new Object();
@@ -203,7 +217,7 @@ final class HomeMode {
             for (String pkg : targets) {
                 done++;
                 busy(c, Ui.tr("Desligando apps (", "Turning off apps (") + done + "/" + targets.size() + ")…");
-                if (PROTECTED.contains(pkg) || !present.contains(pkg) || owners.contains(pkg)) continue;
+                if (protectedPackage(pkg) || !present.contains(pkg) || owners.contains(pkg)) continue;
                 String out = adb.shell("pm disable-user --user 0 " + pkg);
                 if (out.contains("disabled-user")) disabled.add(pkg);
                 else AppLog.w("could not turn off " + pkg + ": " + out.trim());
@@ -346,7 +360,7 @@ final class HomeMode {
                 }
                 Set<String> disabled = new HashSet<>(stringList(s, "disabled"));
                 for (String pkg : sorted(wanted)) {
-                    if (PROTECTED.contains(pkg) || !present.contains(pkg) || owners.contains(pkg)) continue;
+                    if (protectedPackage(pkg) || !present.contains(pkg) || owners.contains(pkg)) continue;
                     if (disabledNow.contains(pkg)) {
                         disabled.add(pkg);
                         continue;
@@ -378,6 +392,14 @@ final class HomeMode {
                 notice(app, Ui.tr("A TV foi atualizada; o Free My TV continua igual.", "The TV was updated; Free My TV is still on."));
             }
         }
+    }
+
+    /** Checked before every disable: the exact list, then the brand prefixes, with DEBLOAT as the exception. */
+    private static boolean protectedPackage(String pkg) {
+        if (Arrays.asList(DEBLOAT).contains(pkg)) return false;
+        if (PROTECTED.contains(pkg)) return true;
+        for (String prefix : PROTECTED_PREFIXES) if (pkg.startsWith(prefix)) return true;
+        return false;
     }
 
     /** What to turn off: the TV's own home screen and screensaver, Google TV's recovery home, and the lists above. */

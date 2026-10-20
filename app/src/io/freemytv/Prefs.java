@@ -68,6 +68,20 @@ final class Prefs {
         return out;
     }
 
+    /** How much of this stream was watched (0 to 1), from the entry saved for it. */
+    static float progressOf(String url) {
+        Object v = play().getAll().get(key(url));
+        if (v == null) return 0;
+        String[] f = String.valueOf(v).split("\t", -1);
+        if (f.length < 3) return 0;
+        try {
+            long pos = Long.parseLong(f[1]), dur = Long.parseLong(f[2]);
+            return dur <= 0 ? 0 : Math.max(0, Math.min(1, (float) pos / dur));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     private static String key(String url) {
         return Integer.toHexString(url.hashCode());
     }

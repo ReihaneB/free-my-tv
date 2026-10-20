@@ -35,7 +35,7 @@ public final class Browse extends Activity implements Iptv.Listener {
     private static final int CARD_W = 132, CARD_H = 198;      // dp, 2:3 poster
     private static final int ROW_TITLE = 17, TAB = 15;
 
-    private String type = "live";           // live | vod | series
+    private String type = "home";           // home | live | vod | series
     private String onlyCategory = "";       // "" = every category
     private boolean episodesShown;
 
@@ -46,6 +46,7 @@ public final class Browse extends Activity implements Iptv.Listener {
     private final Runnable runSearch = this::showSearchResults;
     private int searchSeq;
     private ScrollView scroll;
+    private FrameLayout holder;
     private LinearLayout header;
     private TextView empty;
     private View firstFocus, firstCard;
@@ -55,6 +56,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         setContentView(build());
         Iptv.get(this).addListener(this);
         show();
+        if (getCurrentFocus() == null) tabs.getChildAt(0).requestFocus();
     }
 
     @Override protected void onDestroy() {
@@ -105,6 +107,11 @@ public final class Browse extends Activity implements Iptv.Listener {
         search.setTextColor(0xFFFFFFFF);
         search.setTextSize(14);
         search.setSingleLine(true);
+        search.setFocusable(false);
+        search.setFocusableInTouchMode(false);
+        search.setOnFocusChangeListener((v, has) -> {
+            if (!has) { search.setFocusable(false); search.setFocusableInTouchMode(false); }
+        });
         search.setBackground(glass(0x14FFFFFF, 0x1FFFFFFF));
         search.setPadding(dp(14), dp(7), dp(14), dp(8));
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -132,6 +139,7 @@ public final class Browse extends Activity implements Iptv.Listener {
         tabs.setOrientation(LinearLayout.HORIZONTAL);
         tabs.setId(1001);
         head.addView(tabs);
+        tab("home", "Accueil");
         tab("live", "Chaînes");
         tab("vod", "Films");
         tab("series", "Séries");
@@ -156,7 +164,9 @@ public final class Browse extends Activity implements Iptv.Listener {
         content.setOrientation(LinearLayout.VERTICAL);
         scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
-        scroll.addView(content);
+        holder = new FrameLayout(this);          // ScrollView accepts one child: the holder takes the rest
+        holder.addView(content);
+        scroll.addView(holder);
         LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         sp.topMargin = dp(8);
         page.addView(scroll, sp);
@@ -186,7 +196,8 @@ public final class Browse extends Activity implements Iptv.Listener {
     private void paintTabs() {
         for (int i = 0; i < tabs.getChildCount(); i++) {
             TextView t = (TextView) tabs.getChildAt(i);
-            boolean on = ("live".equals(type) && i == 0) || ("vod".equals(type) && i == 1) || ("series".equals(type) && i == 2);
+            String want = i == 0 ? "home" : i == 1 ? "live" : i == 2 ? "vod" : "series";
+            boolean on = want.equals(type);
             t.setTextColor(on ? 0xFF0B0B0F : 0xCCFFFFFF);
             GradientDrawable pill = new GradientDrawable();
             pill.setCornerRadius(dp(16));
@@ -214,7 +225,11 @@ public final class Browse extends Activity implements Iptv.Listener {
         pill.setCornerRadius(dp(14));
         pill.setColor(0x14FFFFFF);
         t.setBackground(pill);
-        t.setOnClickListener(v -> search.requestFocus());
+        t.setOnClickListener(v -> {
+            search.setFocusableInTouchMode(true);
+            search.setFocusable(true);
+            search.requestFocus();
+        });
         chips.addView(t, margin(0, 0, dp(8), 0));
         chipViews.add(t);
     }
@@ -268,19 +283,123 @@ public final class Browse extends Activity implements Iptv.Listener {
         chips.removeAllViews();
         chipIds.clear();
         chipViews.clear();
-        List<Iptv.Category> cats = categories(iptv);
-        searchChip();
-        chip("", "Tout");
-        for (Iptv.Category c : cats) chip(c.id, clean(c.name));
+        List<Iptv.Category> cats = categoriesOf(iptv);
+        if (!"home".equals(type)) {
+            searchChip();
+            chip("", "Tout");
+            for (Iptv.Category c : cats) chip(c.id, clean(c.name));
+        }
 
         refreshContent();
+    }
+
+    /** Apple TV's home: one title in the big frame, then the rows; it scrolls away with them. */
+    private void dump(String tag, LinearLayout box) {
+        StringBuilder order = new StringBuilder(tag).append(": ").append(box.getChildCount()).append(" enfants");
+        for (int i = 0; i < Math.min(box.getChildCount(), 10); i++) {
+            View ch = box.getChildAt(i);
+            order.append(" | ").append(i).append(':').append(ch.getClass().getSimpleName());
+            if (ch instanceof TextView) order.append('[').append(((TextView) ch).getText()).append(']');
+        }
+        AppLog.w(order.toString());
+    }
+
+    private void hero(Iptv iptv) {
+        List<Iptv.Item> feature = new ArrayList<>();
+        feature.addAll(Prefs.resume("vod"));
+        feature.addAll(Prefs.resume("series"));
+        if (feature.isEmpty()) feature.addAll(iptv.fresh("vod", 21, 1));
+        if (feature.isEmpty()) feature.addAll(iptv.fresh("live", 3650, 1));
+        if (feature.isEmpty()) return;
+        final Iptv.Item item = feature.get(0);
+
+        FrameLayout box = new FrameLayout(this);
+        box.setClipToOutline(true);
+        GradientDrawable bg = glass(0x18FFFFFF, 0x1FFFFFFF);
+        bg.setCornerRadius(dp(22));
+        box.setBackground(bg);
+
+        ImageView art = new ImageView(this);
+        art.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        box.addView(art, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        android.graphics.Bitmap cached = Posters.get(this).get(item.logo, (u, b) -> ui.post(() -> art.setImageBitmap(b)));
+        if (cached != null) art.setImageBitmap(cached);
+
+        View scrim = new View(this);
+        scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{0xE6000000, 0x99101010, 0x00101010}));
+        box.addView(scrim, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        words.setGravity(Gravity.BOTTOM);
+        words.setPadding(dp(34), dp(24), dp(34), dp(26));
+
+        TextView meta = new TextView(this);
+        meta.setText("À REPRENDRE");
+        meta.setTextSize(11);
+        meta.setTextColor(0xCCFFFFFF);
+        meta.setLetterSpacing(0.12f);
+        words.addView(meta);
+
+        TextView title = new TextView(this);
+        title.setText(item.name);
+        title.setTextColor(0xFFFFFFFF);
+        title.setTextSize(30);
+        title.setMaxLines(2);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        tp.topMargin = dp(6);
+        words.addView(title, tp);
+
+        float progress = Prefs.progressOf(item.url);
+        if (progress > 0.01f) {
+            android.widget.ProgressBar bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+            bar.setMax(1000);
+            bar.setProgress(Math.round(progress * 1000));
+            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(260), dp(4));
+            bp.topMargin = dp(12);
+            words.addView(bar, bp);
+        }
+
+        TextView watch = new TextView(this);
+        watch.setText(progress > 0.01f ? "Reprendre" : "Regarder");
+        watch.setTextSize(15);
+        watch.setTextColor(0xFF0B0B0F);
+        watch.setGravity(Gravity.CENTER);
+        watch.setPadding(dp(26), dp(10), dp(26), dp(11));
+        GradientDrawable pill = new GradientDrawable();
+        pill.setCornerRadius(dp(20));
+        pill.setColor(0xFFFFFFFF);
+        watch.setBackground(pill);
+        watch.setFocusable(true);
+        watch.setOnClickListener(v -> play(item.url, item.name, item.logo));
+        watch.setOnFocusChangeListener((v, has) -> v.animate().scaleX(has ? 1.06f : 1f).scaleY(has ? 1.06f : 1f)
+                .setDuration(110).start());
+        LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        wp.topMargin = dp(16);
+        words.addView(watch, wp);
+        if (firstFocus == null) firstFocus = watch;
+
+        box.addView(words, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT, Gravity.BOTTOM));
+        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(300));
+        hp.bottomMargin = dp(18);
+        content.addView(box, hp);
+        gridRows.add(new ArrayList<>());
     }
 
     /** Only the rows: called when a chip takes the focus, so the chip that has it is not rebuilt under it. */
     private void refreshContent() {
         Iptv iptv = Iptv.get(this);
         paintChips();
-        content.removeAllViews();
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        holder.removeAllViews();
+        holder.addView(column);
+        content = column;
         firstFocus = null;
         firstCard = null;
         gridRows.clear();
@@ -293,6 +412,30 @@ public final class Browse extends Activity implements Iptv.Listener {
 
         if (!query.isEmpty()) {
             showSearchResults();
+            return;
+        }
+
+        if ("home".equals(type)) {
+            hero(iptv);
+
+            List<Iptv.Item> res = new ArrayList<>();
+            res.addAll(Prefs.resume("vod"));
+            res.addAll(Prefs.resume("series"));
+            if (!res.isEmpty()) row("Reprendre la lecture", res);
+            row("Nouveautés", iptv.fresh("vod", 21, 20));
+            row("Chaînes françaises", france(iptv));
+            row("Films les mieux notés", iptv.best("vod", 20));
+            row("Séries les mieux notées", iptv.best("series", 20));
+            List<Iptv.Item> films = iptv.movies();
+            for (Iptv.Category c : iptv.movieCategories()) {
+                if (gridRows.size() > 9) break;
+                List<Iptv.Item> r = new ArrayList<>();
+                for (Iptv.Item i : films) if (c.id.equals(i.group) && !i.url.isEmpty()) r.add(i);
+                if (!r.isEmpty()) row(clean(c.name), r);
+            }
+            scroll.scrollTo(0, 0);
+        dump("accueil", content);
+            if (firstFocus != null && !search.hasFocus()) firstFocus.requestFocus();
             return;
         }
 
@@ -327,19 +470,29 @@ public final class Browse extends Activity implements Iptv.Listener {
                 if (list.size() < 40) list.add(i);
             }
             int rows = 0;
-            for (Iptv.Category c : categories(iptv)) {
+            for (Iptv.Category c : categoriesOf(iptv)) {
                 List<Iptv.Item> row = byCategory.get(c.id);
                 if (row == null || row.isEmpty()) continue;
                 this.row(clean(c.name), row);
                 if (++rows >= 5) break;
             }
         } else {
-            row(nameOf(categories(iptv), onlyCategory), pool);
+            row(nameOf(categoriesOf(iptv), onlyCategory), pool);
         }
 
+        StringBuilder order = new StringBuilder("content:");
+        for (int i = 0; i < Math.min(content.getChildCount(), 8); i++) {
+            View ch = content.getChildAt(i);
+            order.append(' ').append(i).append(':').append(ch.getClass().getSimpleName());
+            if (ch instanceof TextView) order.append('[').append(((TextView) ch).getText()).append(']');
+        }
+        AppLog.w(order.toString());
         View focused = getCurrentFocus();
-        if (firstFocus != null && (focused == null || focused == content || gridRows.get(gridRows.size() - 1).contains(focused))) {
+        if (firstFocus != null && (focused == null || focused == content
+                || gridRows.get(gridRows.size() - 1).contains(focused))) {
             firstFocus.requestFocus();
+        } else if (focused == null && tabs.getChildCount() > 0) {
+            tabs.getChildAt(0).requestFocus();
         }
     }
 
@@ -380,12 +533,25 @@ public final class Browse extends Activity implements Iptv.Listener {
         }, "search").start();
     }
 
-    private List<Iptv.Category> categories(Iptv iptv) {
-        return "live".equals(type) ? iptv.liveCategories() : "vod".equals(type) ? iptv.movieCategories() : iptv.seriesCategories();
+    private List<Iptv.Item> france(Iptv iptv) {
+        List<Iptv.Item> out = new ArrayList<>();
+        for (Iptv.Category c : iptv.liveCategories()) {
+            if (!c.name.toUpperCase(java.util.Locale.ROOT).contains("FRANCE")) continue;
+            for (Iptv.Item i : iptv.live()) {
+                if (i.group.equals(c.id) && !i.url.isEmpty() && !i.name.startsWith("─")) out.add(i);
+                if (out.size() >= 20) return out;
+            }
+        }
+        return out;
     }
 
     private List<Iptv.Item> items(Iptv iptv) {
         return "live".equals(type) ? iptv.live() : "vod".equals(type) ? iptv.movies() : iptv.series();
+    }
+
+    private List<Iptv.Category> categoriesOf(Iptv iptv) {
+        return "live".equals(type) || "home".equals(type) ? iptv.liveCategories()
+                : "vod".equals(type) ? iptv.movieCategories() : iptv.seriesCategories();
     }
 
     private static List<Iptv.Item> filter(List<Iptv.Item> all, String category) {
@@ -405,12 +571,17 @@ public final class Browse extends Activity implements Iptv.Listener {
 
     /** The panel decorates its category names ("─ ✧･ﾟ|| SPORT"): keep the word, drop the ornament. */
     private static String clean(String name) {
+        String out = strip(name);
+        return out.isEmpty() ? name.trim() : out;
+    }
+
+    private static String strip(String name) {
         String s = name.replace("✧", "").replace("･", "").replace("ﾟ", "").replace("─", "").replace("|||", "");
         s = s.replace("||", "").trim();
         while (s.startsWith(":") || s.startsWith("*") || s.startsWith("-") || s.startsWith("◇") || s.startsWith("·")) {
             s = s.substring(1).trim();
         }
-        return s.isEmpty() ? name.trim() : s;
+        return s;
     }
 
     private void row(String title, List<Iptv.Item> items) {

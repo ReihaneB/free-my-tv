@@ -35,6 +35,7 @@ import java.util.List;
  * when the remote lands on it.
  */
 public final class Browse extends Activity implements Iptv.Listener {
+    public static final String EXTRA_SERIES = "series";
 
     private static final int CARD_W = 132, CARD_H = 198;      // dp, 2:3 poster
     private static final int ROW_TITLE = 17, TAB = 15;
@@ -42,6 +43,7 @@ public final class Browse extends Activity implements Iptv.Listener {
     private String type = "home";           // home | live | vod | series
     private String onlyCategory = "";       // "" = every category
     private boolean episodesShown;
+    private String openSeries = "";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout tabs, chips, content;
@@ -60,6 +62,12 @@ public final class Browse extends Activity implements Iptv.Listener {
         setContentView(build());
         Iptv.get(this).addListener(this);
         show();
+        String seriesId = getIntent().getStringExtra(EXTRA_SERIES);
+        if (seriesId != null) {
+            for (Iptv.Item i : Iptv.get(this).series()) {
+                if (seriesId.equals(i.id)) { showEpisodes(i); break; }
+            }
+        }
         if (getCurrentFocus() == null) tabs.getChildAt(0).requestFocus();
     }
 
@@ -802,6 +810,8 @@ public final class Browse extends Activity implements Iptv.Listener {
     }
 
     private void showEpisodes(Iptv.Item series) {
+        if (episodesShown && series.name.equals(openSeries)) return;
+        openSeries = series.name;
         episodesShown = true;
         content.removeAllViews();
         chips.removeAllViews();
@@ -821,6 +831,7 @@ public final class Browse extends Activity implements Iptv.Listener {
             List<Iptv.Item> eps = Iptv.get(this).episodes(series.id);
             ui.post(() -> {
                 content.removeAllViews();
+                if (title.getParent() instanceof ViewGroup) ((ViewGroup) title.getParent()).removeView(title);
                 content.addView(title);
                 if (eps.isEmpty()) {
                     TextView none = new TextView(this);

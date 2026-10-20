@@ -82,17 +82,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
     // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
-    private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 258, L_CARD_H = 262;
+    private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 256, L_CARD_H = 240;
     // Two rows of posters under the cards: the account, in the home.
-    private static final float L_ROW_TITLE = 550, L_ROW_TOP = 574, L_ROW_H = 84, L_ROW_W = 88, L_ROW_GAP = 9,
-            L_ROW_STEP = 100;
+    private static final float L_ROW_TITLE = 552, L_ROW_TOP = 568, L_ROW_H = 84, L_ROW_W = 88, L_ROW_GAP = 9,
+            L_ROW_STEP = 112;
     private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
     private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
-    private static final String[] TABS = {"Explorar", "Filmes", "Séries"};
-    private static final String[] TABS_EN = {"Explore", "Movies", "Shows"};
-    private static final String[] TABS_ES = {"Explorar", "Películas", "Series"};
-    private static final String[] TAB_KIND = {null, "movie", "tv"};
+    private static final int TAB_COUNT = 4;
+    private static final String[] TABS = {"Nouveautés", "Films", "Séries", "Live"};
+    private static final String[] TABS_EN = {"New", "Movies", "Series", "Channels"};
+    private static final String[] TABS_ES = {"Novedades", "Películas", "Series", "Canales"};
     private static final int Z_TOP = 4, Z_CARDS = 5, Z_ROW = 6;
 
     private final Activity activity;
@@ -114,6 +114,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final RectF a11yRect = new RectF();
     private final Layer sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer;
     private int zone = Z_SHELF;
+    private boolean moved;                       // the user has used the remote once: stop re-seating the focus
 
     // Night look (like Apple's "Automatic" appearance): darker from sunset to sunrise, with a 2 s transition.
     private static final long NIGHT_MS = 2000;
@@ -128,8 +129,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // At the top: tabs (0 to 2) and icon-only buttons (3 to 5); the three cards
     private int tab, topIndex, cardIndex;
     private List<Recs.Pick> cards = new ArrayList<>();
-    private final Spring[] topFocus = new Spring[6];
-    private final RectF[] topRects = new RectF[6];
+    private final Spring[] topFocus = new Spring[TAB_COUNT + 3];
+    private final RectF[] topRects = new RectF[TAB_COUNT + 3];
     private final Spring[] cardFocus = new Spring[3];
     private static final int ROWS = 2;
     private final List<List<Recs.Pick>> shelves = new ArrayList<>();
@@ -322,7 +323,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         setContentDescription("Free My TV");
         drawerLayer.setVisibility(INVISIBLE);
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < topFocus.length; i++) {
             topFocus[i] = new Spring(0.26f, 0.85f, 0);
             topRects[i] = new RectF();
         }
@@ -420,13 +421,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     /** With a playlist, the tabs are the playlist's: channels, films, series. */
-    private static final String[] TABS_TV = {"Chaînes", "Films", "Séries"};
-    private static final String[] TABS_TV_EN = {"Live", "Movies", "Series"};
-    private static final String[] TABS_TV_ES = {"Canales", "Películas", "Series"};
 
+    /** The four tabs, in French: the account's catalogue is French whatever the TV language. */
     private static String[] tabs() {
-        if (Iptv.configured()) return Ui.es ? TABS_TV_ES : Ui.en ? TABS_TV_EN : TABS_TV;
-        return Ui.es ? TABS_ES : Ui.en ? TABS_EN : TABS;
+        return TABS;
     }
 
     @Override public void onData() {
@@ -684,7 +682,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private static boolean samePicks(List<Recs.Pick> a, List<Recs.Pick> b) {
         if (a.size() != b.size()) return false;
-        for (int i = 0; i < a.size(); i++) if (!Recs.key(a.get(i)).equals(Recs.key(b.get(i)))) return false;
+        for (int i = 0; i < a.size(); i++) {
+            Recs.Pick x = a.get(i), y = b.get(i);
+            if (!String.valueOf(x.title).equals(String.valueOf(y.title))
+                    || !String.valueOf(x.url).equals(String.valueOf(y.url))) return false;
+        }
         return true;
     }
 
@@ -1070,7 +1072,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         Paint text = lQuote;
         // The corner buttons' names appear in this row: the quotes fade out while one of them has focus.
         float fade = 1;
-        for (int i = 3; i < 6; i++) fade = Math.min(fade, 1 - Ui.clamp(topFocus[i].value));
+        for (int i = TAB_COUNT; i < topFocus.length; i++) fade = Math.min(fade, 1 - Ui.clamp(topFocus[i].value));
         if (fade <= 0.01f) return;
         int textColor = text.getColor();
         text.setColor(Ui.alpha(textColor, fade));
@@ -1730,6 +1732,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void move(int dx, int dy) {
+        moved = true;
         if (sheetOpen) {
             moveGrid(dx, dy);
             return;
@@ -1779,10 +1782,16 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     shelfCol[shelfRow] = next;
                 } else if (dy < 0) {
                     if (shelfRow > 0) shelfRow--;
-                    else zone = Z_HERO;
+                    else {
+                        zone = Z_CARDS;
+                        cardIndex = nearest(cardRects, cardCount(), shelfRects[0][shelfCol[0]].centerX());
+                    }
                 } else {
                     if (shelfRow < ROWS - 1 && shelfRow + 1 < shelves.size() && !shelves.get(shelfRow + 1).isEmpty()) shelfRow++;
-                    else zone = Z_SHELF;
+                    else {
+                        zone = Z_SHELF;
+                        if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, tileRects.length, shelfRects[shelfRow][shelfCol[shelfRow]].centerX());
+                    }
                 }
                 break;
             case Z_STATUS:
@@ -1859,6 +1868,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** A card from the playlist: the stream opens full screen in the app's own player. */
     private void play(Recs.Pick p) {
         click.open();
+        if (p.url != null && p.url.startsWith("series:")) {
+            // A series has no single stream: open it so its episodes can be picked.
+            android.content.Intent s = new android.content.Intent(getContext(), Browse.class);
+            s.putExtra(Browse.EXTRA_SERIES, p.url.substring("series:".length()));
+            getContext().startActivity(s);
+            return;
+        }
         android.content.Intent it = new android.content.Intent(getContext(), Player.class);
         it.putExtra(Player.EXTRA_URL, p.url);
         it.putExtra(Player.EXTRA_NAME, p.title);
@@ -1891,7 +1907,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             it = drawerItems.get(drawerIndex);
             r = drawerRects[drawerIndex];
         } else if (zone == Z_TOP) {
-            if (topIndex < 3) {
+            if (topIndex < TAB_COUNT) {
                 selectTab(topIndex);
                 return;
             }
@@ -1966,7 +1982,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 return label(others, i) + ", " + (i + 1) + Ui.tr(" de ", " of ") + others.size();
             case Z_TOP:
                 if (i >= 3) return label(lightButtons, i - 3);
-                return tabs()[i] + Ui.tr(", aba ", ", tab ") + (i + 1) + Ui.tr(" de 3", " of 3");
+                return tabs()[i] + Ui.tr(", aba ", ", tab ") + (i + 1) + Ui.tr(" de 4", " of 4");
             case Z_CARDS: return i < cards.size() ? pickText(cards.get(i)) : "";
             case Z_SHELF: return label(shelf, i);
             case Z_DRAWER: return label(drawerItems, i);
@@ -2055,7 +2071,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 if (i >= 3 + lightButtons.size()) return;
                 if (drawerOpen) closeDrawer();
                 topIndex = i;
-                if (i < 3) selectTab(i);
+                if (i < TAB_COUNT) selectTab(i);
                 break;
             case Z_CARDS:
                 if (i >= cards.size()) return;
@@ -2096,14 +2112,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // Text tabs; the focus pill extends 26 px past the text (the first tab's text starts at the margin).
         float pad = 26 * k, tabTop = L_TABBAR_TOP * k, tabBottom = (L_TABBAR_TOP + L_TABBAR_H) * k;
         float x = MARGIN * k - pad;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < TAB_COUNT; i++) {
             float tw = Math.max(lTabOn.measureText(tabs()[i]), lTab.measureText(tabs()[i]));
             topRects[i].set(x, tabTop, x + tw + 2 * pad, tabBottom);
             x = topRects[i].right + 4 * k;
         }
         float b = L_BUTTON * k, right = CONTENT_R * k, cy = L_BUTTON_CY * k;
         for (int i = 2; i >= 0; i--) {
-            topRects[3 + i].set(right - b, cy - b / 2, right, cy + b / 2);
+            topRects[TAB_COUNT + i].set(right - b, cy - b / 2, right, cy + b / 2);
             right -= b + L_BUTTON_GAP * k;
         }
         float top = L_CARDS_TOP * k, ch = L_CARD_H * k, g = L_CARD_GAP * k, left = MARGIN * k, tall = L_TALL_W * k;
@@ -2122,8 +2138,35 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     /** The three cards of the current tab (Explore, Movies, Shows) and the background taken from the first one. */
+    /** The three big cards of the current tab, straight from the account. */
     private void updateCards() {
-        List<Recs.Pick> list = recs.now(TAB_KIND[tab]);
+        List<Recs.Pick> list = new ArrayList<>();
+        if (Iptv.configured()) {
+            Iptv iptv = Iptv.get(getContext());
+            List<Iptv.Item> src = new ArrayList<>();
+            if (tab == 0) src.addAll(iptv.fresh("vod", 21, 3));
+            else if (tab == 1) src.addAll(iptv.best("vod", 3));
+            else if (tab == 2) src.addAll(iptv.best("series", 3));
+            else src.addAll(channels(iptv, 3));
+            List<Iptv.Item> fill = new ArrayList<>(src);
+            String kind = tab == 2 ? "series" : "vod";
+            fill.addAll(iptv.fresh(kind, 90, 14));
+            fill.addAll(iptv.best(kind, 20));
+            {
+                List<Iptv.Item> all = tab == 2 ? iptv.series() : iptv.movies();
+                for (int k = 0; k < Math.min(all.size(), 40); k++) fill.add(all.get(k));
+            }
+            if (fill.size() < 3) {
+                List<Iptv.Item> all = tab == 2 ? iptv.series() : iptv.movies();
+                for (int k = 0; k < Math.min(all.size(), 40); k++) fill.add(all.get(k));
+            }
+            for (Iptv.Item i : fill) {
+                boolean seen = false;
+                for (Recs.Pick q : list) if (norm(q.title).equals(norm(i.name))) { seen = true; break; }
+                if (!seen) list.add(pick(i, tab == 2));
+                if (list.size() == 3) break;
+            }
+        }
         if (!samePicks(list, cards)) {
             cards = list;
             cardIndex = Math.min(cardIndex, Math.max(0, list.size() - 1));
@@ -2132,71 +2175,182 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 retarget(false);
             }
         }
-        for (Recs.Pick p : recs.wanted()) recs.backdrop(p);   // all three tabs preloaded: switching tabs is instant
-        Backdrop b = cards.isEmpty() ? null : recs.backdrop(cards.get(0));
-        if (cards.isEmpty() || b != null) showBackdrop(b);
         updateRow();
+        if (!moved && !cards.isEmpty() && zone == Z_SHELF) zone = Z_CARDS;   // open on the first card
         heroDirty = true;
-        spoken.focusMoved();    // new picks under the focused card
+        spoken.focusMoved();
+    }
+
+    /** French channels, in the order the panel lists them. */
+    private static List<Iptv.Item> channels(Iptv iptv, int max) {
+        List<Iptv.Item> out = new ArrayList<>();
+        for (Iptv.Category c : iptv.liveCategories()) {
+            String cat = c.name.toUpperCase(java.util.Locale.ROOT);
+            if (!(cat.contains("FRANCE") || cat.contains("FRENCH") || cat.contains("|FR|") || cat.contains("FR:")
+                    || cat.contains("TF1") || cat.contains("FRANCAIS") || cat.contains("FRANÇAIS"))) continue;
+            for (Iptv.Item i : iptv.live()) {
+                if (!i.group.equals(c.id) || i.url.isEmpty() || i.name.startsWith("─")) continue;
+                if (!contains(out, i)) out.add(i);
+                if (out.size() >= max) return out;
+            }
+        }
+        return out;
+    }
+
+    /** The first channels of the panel, all countries, one per name. */
+    private static List<Iptv.Item> firstChannels(Iptv iptv, int max) {
+        List<Iptv.Item> out = new ArrayList<>();
+        for (Iptv.Item i : iptv.live()) {
+            if (i.url.isEmpty() || i.name.startsWith("─")) continue;
+            out.add(i);
+            if (out.size() >= max * 3) break;                 // enough to survive the duplicates
+        }
+        return out;
+    }
+
+    private static boolean contains(List<Iptv.Item> list, Iptv.Item item) {
+        for (Iptv.Item i : list) if (i.id.equals(item.id)) return true;
+        return false;
+    }
+
+    /** The first `max` items of one category. */
+    private static List<Iptv.Item> inCategory(List<Iptv.Item> all, String categoryId, int max) {
+        List<Iptv.Item> out = new ArrayList<>();
+        for (Iptv.Item i : all) {
+            if (!categoryId.equals(i.group)) continue;
+            out.add(i);
+            if (out.size() >= max) break;
+        }
+        return out;
     }
 
     /**
-     * The small row: the films and episodes left unfinished, and when there are none, what the panel just added.
-     * A live channel is never resumed (there is nothing to resume in a stream that never ends).
-     */
-    /**
-     * The account, in the home: what was left unfinished (or what just came in), then the French channels.
-     * Everything comes from the IPTV catalogue; a live channel is never "resumed".
+     * Two rows under the cards, per tab: what is new (or unfinished), then the channels; for Films and Series, the
+     * first two categories of the panel; for Channels, two channel groups. Everything plays in the app.
      */
     private void updateRow() {
         shelves.clear();
+        shelfTitles[0] = shelfTitles[1] = "";
+        shelves.add(new ArrayList<>());
+        shelves.add(new ArrayList<>());
+        if (!Iptv.configured()) return;
         Iptv iptv = Iptv.get(getContext());
 
-        List<Recs.Pick> resume = new ArrayList<>();
-        for (Iptv.Item i : Prefs.resume("vod")) resume.add(pick(i));
-        for (Iptv.Item i : Prefs.resume("series")) resume.add(pick(i));
-
-        List<Recs.Pick> fresh = new ArrayList<>();
-        for (Iptv.Item i : iptv.fresh("vod", 21, 8)) fresh.add(pick(i));
-
-        shelfTitles[0] = resume.isEmpty() ? "Nouveautés" : "Reprendre la lecture";
-        List<Recs.Pick> first = new ArrayList<>(resume);
-        for (Recs.Pick p : fresh) {
-            if (first.size() >= 14) break;
-            boolean seen = false;
-            for (Recs.Pick q : first) if (q.url != null && q.url.equals(p.url)) { seen = true; break; }
-            if (!seen) first.add(p);
-        }
-        shelves.add(first);
-
-        List<Recs.Pick> channels = new ArrayList<>();
-        for (Iptv.Category c : iptv.liveCategories()) {
-            if (!c.name.toUpperCase(java.util.Locale.ROOT).contains("FRANCE")) continue;
-            for (Iptv.Item i : iptv.live()) {
-                if (i.group.equals(c.id) && !i.url.isEmpty() && !i.name.startsWith("─")) channels.add(pick(i));
-                if (channels.size() >= 14) break;
+        if (tab == 0) {
+            List<Recs.Pick> resume = new ArrayList<>();
+            for (Iptv.Item i : Prefs.resume("vod")) resume.add(pick(i));
+            for (Iptv.Item i : Prefs.resume("series")) resume.add(pick(i));
+            List<Recs.Pick> first = new ArrayList<>();
+            List<Recs.Pick> pool = new ArrayList<>();
+            for (Iptv.Item i : iptv.fresh("vod", 21, 14)) pool.add(pick(i));
+            for (Recs.Pick p : resume) pool.add(0, p);
+            for (Recs.Pick p : pool) {
+                if (first.size() >= 14) break;
+                boolean seen = false;
+                for (Recs.Pick q : first) if (norm(q.title).equals(norm(p.title))) { seen = true; break; }
+                if (!seen) first.add(p);
             }
-            if (channels.size() >= 14) break;
+            shelfTitles[0] = resume.isEmpty() ? "Nouveautés" : "Reprendre la lecture";
+            shelves.set(0, first);
+            shelfTitles[1] = "Chaînes";
+            shelves.set(1, picks(firstChannels(iptv, 14)));
+        } else if (tab == 1) {
+            List<Iptv.Item> films = iptv.movies();
+            int r = 0;
+            for (Iptv.Category c : iptv.movieCategories()) {
+                List<Iptv.Item> items = inCategory(films, c.id, 14);
+                if (items.size() < 3) continue;
+                shelfTitles[r] = clean(c.name);
+                shelves.set(r, picks(items));
+                if (++r == 2) break;
+            }
+        } else if (tab == 2) {
+            List<Iptv.Item> series = iptv.series();
+            int r = 0;
+            for (Iptv.Category c : iptv.seriesCategories()) {
+                List<Iptv.Item> items = inCategory(series, c.id, 14);
+                if (items.size() < 3) continue;
+                shelfTitles[r] = clean(c.name);
+                shelves.set(r, picks(items, true));
+                if (++r == 2) break;
+            }
+        } else {
+            shelfTitles[0] = "Chaînes françaises";
+            shelves.set(0, picks(channels(iptv, 14)));
+            List<Iptv.Item> others = new ArrayList<>();
+            for (Iptv.Category c : iptv.liveCategories()) {
+                if (c.name.toUpperCase(java.util.Locale.ROOT).contains("FRANCE")) continue;
+                for (Iptv.Item i : iptv.live()) {
+                    if (!i.group.equals(c.id) || i.url.isEmpty() || i.name.startsWith("─")) continue;
+                    others.add(i);
+                    if (others.size() >= 14) break;
+                }
+                if (others.size() >= 14) break;
+            }
+            shelfTitles[1] = "Autres pays";
+            shelves.set(1, picks(others));
         }
-        shelfTitles[1] = "Chaînes françaises";
-        shelves.add(channels);
 
         for (int r = 0; r < ROWS; r++) {
-            if (r < shelves.size() && shelves.get(r).size() > shelfRects[r].length) {
-                shelves.set(r, new ArrayList<>(shelves.get(r).subList(0, shelfRects[r].length)));
-            }
-            shelfCol[r] = Math.min(shelfCol[r], Math.max(0, (r < shelves.size() ? shelves.get(r).size() : 0) - 1));
+            List<Recs.Pick> row = shelves.get(r);
+            if (row.size() > shelfRects[r].length) shelves.set(r, new ArrayList<>(row.subList(0, shelfRects[r].length)));
+            shelfCol[r] = Math.min(shelfCol[r], Math.max(0, shelves.get(r).size() - 1));
         }
         if (empty() && zone == Z_ROW) zone = Z_SHELF;
     }
 
+    /** One tile per channel or title: the panel lists the same channel several times (HD, FHD, backup). */
+    private static List<Recs.Pick> picks(List<Iptv.Item> items) {
+        return picks(items, false);
+    }
+
+    private static List<Recs.Pick> picks(List<Iptv.Item> items, boolean series) {
+        List<Recs.Pick> out = new ArrayList<>();
+        for (Iptv.Item i : items) {
+            String key = norm(i.name);
+            boolean seen = false;
+            for (Recs.Pick q : out) if (key.equals(norm(q.title))) { seen = true; break; }
+            if (!seen) out.add(pick(i, series));
+        }
+        return out;
+    }
+
+    /** A channel name without its quality suffix, to spot the same channel twice. */
+    private static String norm(String name) {
+        if (name == null) return "";
+        String t = name.toUpperCase(java.util.Locale.ROOT)
+                .replace("FULL HD", "").replace("FHD", "").replace("UHD", "").replace("4K", "")
+                .replace("HD", "").replace("SD", "").replace("RAW", "").replace("BACKUP", "")
+                .replace("FR:", "").replace("|FR|", "").replace("FR |", "");
+        t = t.replaceAll("[^A-Z0-9]", "");
+        return t;
+    }
+
+    /** The panel decorates its category names: keep the word. */
+    private static String clean(String name) {
+        String t = name.replace("✧", "").replace("･", "").replace("ﾟ", "").replace("─", "").replace("||", "");
+        while (t.startsWith(":") || t.startsWith("*") || t.startsWith("-") || t.startsWith("◇") || t.startsWith("·")) {
+            t = t.substring(1);
+        }
+        t = t.trim();
+        return t.isEmpty() ? name.trim() : t;
+    }
+
     private static Recs.Pick pick(Iptv.Item i) {
+        return pick(i, false);
+    }
+
+    private static Recs.Pick pick(Iptv.Item i, boolean series) {
         Recs.Pick p = new Recs.Pick();
         p.title = i.name;
-        p.url = i.url;
+        p.url = series || i.url == null || i.url.isEmpty() ? "series:" + i.id : i.url;
         p.image = i.logo;
         p.meta = i.group;
         return p;
+    }
+
+    private int cardCount() {
+        return Math.min(3, cards.size());
     }
 
     private boolean empty() {
@@ -2256,7 +2410,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // Text tabs (the selected one in bold, in the main text color); with focus on the tabs, the selected one gets
         // the white pill with a shadow and grows a little (the tvOS focus).
         float focus = Ui.clamp(topFocus[tab].value);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < TAB_COUNT; i++) {
             RectF r = topRects[i];
             if (i == tab && focus > 0.01f) {
                 float s = 1 + 0.05f * focus;
@@ -2278,8 +2432,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             c.drawText(tabs()[i], r.centerX() - p.measureText(tabs()[i]) / 2, r.centerY() + Ui.halfCap(p), p);
         }
         int top = -1;
-        for (int i = 0; i < 3; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
-        for (int i = 0; i < 3; i++) if (i != top) drawLightCard(c, i);
+        for (int i = 0; i < cardCount(); i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
+        for (int i = 0; i < cardCount(); i++) if (i != top) drawLightCard(c, i);
         if (top >= 0) drawLightCard(c, top);
         drawRows(c);
         if (HomeData.coinCount() > 0) drawQuotes(c);
@@ -2293,7 +2447,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** The posters under the cards: the account's own content, two rows. */
     private void drawRows(Canvas c) {
         if (lRowTitle == null) {
-            lRowTitle = Ui.text(Ui.semibold, 15 * k, 0xFF7A7A80);
+            lRowTitle = Ui.text(Ui.semibold, 19 * k, 0xFF4A4A50);
+            lRowTitle.setTextAlign(Paint.Align.LEFT);
             rowGlass = new Paint(Paint.ANTI_ALIAS_FLAG);
             rowGlassOn = new Paint(Paint.ANTI_ALIAS_FLAG);
             rowGlassOn.setStyle(Paint.Style.STROKE);
@@ -2302,13 +2457,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             rowInk = Ui.text(Ui.medium, 11 * k, 0xFFFFFFFF);
             rowFilter = new Paint(Paint.FILTER_BITMAP_FLAG);
         }
-        lRowTitle.setColor(tone(0xFF7A7A80, 0xFFB0B0B6));
+        lRowTitle.setColor(tone(0xFF4A4A50, 0xFFE8E8EC));
         for (int r = 0; r < ROWS && r < shelves.size(); r++) {
             List<Recs.Pick> items = shelves.get(r);
             if (items.isEmpty()) continue;
             float titleBase = (L_ROW_TITLE + r * L_ROW_STEP) * k + Ui.halfCap(lRowTitle);
             c.drawText(shelfTitles[r], MARGIN * k, titleBase, lRowTitle);
-            for (int i = 0; i < items.size(); i++) {
+            for (int i = 0; i < items.size() && i < shelfRects[r].length; i++) {
                 RectF rc = shelfRects[r][i];
                 boolean on = zone == Z_ROW && shelfRow == r && shelfCol[r] == i;
                 rowGlass.setColor(tone(0x14000000, 0x22FFFFFF));
@@ -2337,8 +2492,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void drawLightCard(Canvas c, int i) {
+        if (i >= cards.size()) return;                 // an empty slot is not a card
         RectF base = cardRects[i];
-        Recs.Pick p = i < cards.size() ? cards.get(i) : null;
+        Recs.Pick p = cards.get(i);
         float v = cardFocus[i].value, f = Ui.clamp(v), s = 1 + 0.05f * v;
         float bw = base.width(), bh = base.height(), r0 = 18 * k;
         float cx = base.centerX(), cy = base.centerY() - 6 * k * v;
@@ -2397,8 +2553,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void drawLightButtons(Canvas c) {
         applyTone();
         for (int i = 0; i < 3; i++) {
-            RectF r = topRects[3 + i];
-            float f = Ui.clamp(topFocus[3 + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
+            RectF r = topRects[TAB_COUNT + i];
+            float f = Ui.clamp(topFocus[TAB_COUNT + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
             cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
             tmp.set(cell);
             tmp.offset(0, (6 + 8 * f) * k);
@@ -2427,7 +2583,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         switch (zone) {
             case Z_SHELF:
                 if (dy >= 0 || shelf.isEmpty()) return false;
-                if (cards.isEmpty()) {
+                if (!empty()) {
+                    zone = Z_ROW;
+                    shelfRow = shelves.size() - 1;
+                    shelfCol[shelfRow] = nearest(shelfRects[shelfRow], shelves.get(shelfRow).size(), tileRects[shelfIndex].centerX());
+                } else if (cards.isEmpty()) {
                     zone = Z_TOP;
                     topIndex = tab;
                 } else {
@@ -2437,23 +2597,50 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 break;
             case Z_CARDS:
                 if (dx != 0) {
-                    int next = Math.max(0, Math.min(cards.size() - 1, cardIndex + dx));
+                    int next = Math.max(0, Math.min(cardCount() - 1, cardIndex + dx));
                     if (next == cardIndex) return true;
                     cardIndex = next;
                 } else if (dy < 0) {
                     zone = Z_TOP;
                     topIndex = tab;     // as on Apple TV: moving up to the tabs focuses the selected tab
+                } else if (!empty()) {
+                    zone = Z_ROW;       // the account's rows sit under the cards
+                    shelfRow = 0;
+                    shelfCol[0] = nearest(shelfRects[0], shelves.get(0).size(), cardRects[cardIndex].centerX());
                 } else {
                     zone = Z_SHELF;
                     if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, tileRects.length, cardRects[cardIndex].centerX());
                 }
                 break;
+            case Z_ROW: {
+                if (shelves.isEmpty()) return false;
+                List<Recs.Pick> row = shelves.get(shelfRow);
+                if (dx != 0) {
+                    int next = Math.max(0, Math.min(row.size() - 1, shelfCol[shelfRow] + dx));
+                    if (next == shelfCol[shelfRow]) return true;
+                    shelfCol[shelfRow] = next;
+                } else if (dy < 0) {
+                    if (shelfRow > 0) shelfRow--;
+                    else {
+                        zone = Z_CARDS;
+                        cardIndex = nearest(cardRects, cardCount(), shelfRects[0][shelfCol[0]].centerX());
+                    }
+                } else {
+                    if (shelfRow < ROWS - 1 && shelfRow + 1 < shelves.size() && !shelves.get(shelfRow + 1).isEmpty()) {
+                        shelfRow++;
+                    } else {
+                        zone = Z_SHELF;
+                        if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, tileRects.length, shelfRects[shelfRow][shelfCol[shelfRow]].centerX());
+                    }
+                }
+                break;
+            }
             case Z_TOP:
                 if (dx != 0) {
                     int next = Math.max(0, Math.min(5, topIndex + dx));
                     if (next == topIndex) return true;
                     topIndex = next;
-                    if (topIndex < 3) selectTab(topIndex);   // like Apple TV tabs: focusing a tab selects it
+                    if (topIndex < TAB_COUNT) selectTab(topIndex);   // like Apple TV tabs: focusing a tab selects it
                 } else if (dy > 0) {
                     if (cards.isEmpty()) {
                         zone = Z_SHELF;

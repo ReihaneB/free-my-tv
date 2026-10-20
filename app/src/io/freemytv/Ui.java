@@ -154,8 +154,8 @@ final class Ui {
 
     /** "5:21" (sunrise and sunset; in English, "5:21 AM"). */
     static String time(long at) {
-        return en ? new SimpleDateFormat("h:mm a", Locale.US).format(new Date(at))
-                : new SimpleDateFormat("H:mm", locale()).format(new Date(at));
+        // French launcher: 24-hour clock everywhere (the forecast row already uses it).
+        return new SimpleDateFormat("H:mm", Locale.FRANCE).format(new Date(at));
     }
 
     /** "domingo, 18 de outubro" (lowercase, like the iPhone in Portuguese); "Sunday, October 18" in English. */

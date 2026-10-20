@@ -301,6 +301,19 @@ final class HomeData {
     /** The weather in words, from Open-Meteo's WMO code. */
     static String condition(int code, boolean day) {
         if (code < 0) return "";
+        // The launcher is French (tabs, rows, drawer): the weather speaks French even on an English TV.
+        if (true) {
+            if (code == 0) return day ? "Ensoleillé" : "Ciel dégagé";
+            if (code == 1) return day ? "Plutôt ensoleillé" : "Plutôt dégagé";
+            if (code == 2) return "Partiellement nuageux";
+            if (code == 3) return "Nuageux";
+            if (code == 45 || code == 48) return "Brouillard";
+            if (code >= 51 && code <= 57) return "Bruine";
+            if (code == 65 || code == 67 || code == 82) return "Forte pluie";
+            if (code >= 71 && code <= 77 || code == 85 || code == 86) return "Neige";
+            if (code >= 95) return "Orages";
+            return "Pluie";
+        }
         if (Ui.en) {
             if (code == 0) return "Clear";
             if (code == 1) return day ? "Mostly Sunny" : "Mostly Clear";
@@ -368,8 +381,8 @@ final class HomeData {
     }
 
     static String hour(long at) {
-        return Ui.en ? new SimpleDateFormat("h a", Locale.US).format(new java.util.Date(at))
-                : new SimpleDateFormat(Ui.es ? "HH:mm" : "HH'h'", Ui.locale()).format(new java.util.Date(at));
+        // French UI: the 24-hour clock, whatever the TV's language.
+        return new SimpleDateFormat("HH'h'", Locale.FRANCE).format(new java.util.Date(at));
     }
 
     /** How long ago the data was fetched, if it's stale (no internet): "12 min ago". */

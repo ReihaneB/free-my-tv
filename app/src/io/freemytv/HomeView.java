@@ -71,8 +71,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // Corner capsule.
     // Corner capsule: the height and top offset of the tvOS tab bar (68 and 46).
     private static final float CAPSULE_TOP = 46, CAPSULE_H = 68, BUTTON = 56;
-    // Bottom drawer (measured with it open; everything moves up by SHIFT).
-    private static final float SHIFT = 560, ROW_TITLE = 518, ROW_TOP = 540, ROW_H = 126, CARDS_TOP = 708, CARDS_H = 300;
+    // Top drawer (under the app row): pulled down from above, it holds the inputs, the shortcuts, the weather.
+    private static final float SHIFT = 260, ROW_TITLE = 250, ROW_TOP = 268, ROW_H = 118, CARDS_TOP = 410, CARDS_H = 236;
     // "All Apps" sheet.
     private static final int COLUMNS = 5, VISIBLE_ROWS = 3;
     private static final float GRID_W = 300, GRID_H = 169, GRID_GAP = 40, GRID_ROW = 239, GRID_TOP = 196, GRID_RADIUS = 22;
@@ -84,12 +84,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
     // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
-    private static final float L_TITLE_BASE = 112, L_TABBAR_TOP = 144, L_TABBAR_H = 60, L_CARDS_TOP = 224, L_CARD_H = 228;
-    // Two rows of 16:9 cards under the featured row: the account, in the home.
-    private static final float L_ROW_TITLE = 552, L_ROW_TOP = 564, L_ROW_H = 150, L_ROW_W = 100, L_ROW_GAP = 18,
-            L_ROW_STEP = 192;
+    private static final float L_TITLE_BASE = 112, L_TABBAR_TOP = 214, L_TABBAR_H = 60, L_CARDS_TOP = 300, L_CARD_H = 236;
+    // Two rows of cards under the featured row: the account, in the home.
+    private static final float L_ROW_TITLE = 640, L_ROW_TOP = 652, L_ROW_H = 150, L_ROW_W = 100, L_ROW_GAP = 18,
+            L_ROW_STEP = 186;
     private static final float L_CARD_GAP = 40, L_BUTTON = 60, L_BUTTON_GAP = 18, L_BUTTON_CY = 104;
-    private static final float L_PLATTER_TOP = 924, L_TILE_H = 96;
+    private static final float L_PLATTER_TOP = 44, L_TILE_H = 96;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
     private static final int TAB_COUNT = 4;
     private static final String[] TABS = {"Nouveautés", "Films", "Séries", "Live"};
@@ -163,6 +163,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         TILE_STYLE.put("disney", new int[] {0xFF173584, 0xFF08143F, 0});
         TILE_STYLE.put("max", new int[] {0xFF5C30E8, 0xFF221684, 0});
         TILE_STYLE.put("appletv", new int[] {0xFF1C1C1E, 0xFF000000, 0});
+        TILE_STYLE.put("smartube", new int[] {0xFFE50914, 0xFF8E0009, 0});
+        TILE_STYLE.put("twitch", new int[] {0xFF9146FF, 0xFF5B2CB8, 1});
+        TILE_STYLE.put("m6", new int[] {0xFF2A2A2E, 0xFF0A0A0C, 0});
+        TILE_STYLE.put("steam", new int[] {0xFF2A475E, 0xFF171A21, 0});
+        TILE_STYLE.put("moonlight", new int[] {0xFF2E7D32, 0xFF124419, 0});
     }
     private final android.graphics.PorterDuffColorFilter whiteLogo =
             new android.graphics.PorterDuffColorFilter(0xFFFFFFFF, android.graphics.PorterDuff.Mode.SRC_IN);
@@ -417,11 +422,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** The three corner buttons, with their names in the current language. */
     private void makeLightButtons() {
+        // No corner buttons any more: the app row is the top of the screen and the drawer holds HDMI and settings.
         lightButtons.clear();
-        // The account's channels, films and series (Browse). The antenna is gone: nothing here opens the tuner.
-        lightButtons.add(HomeApps.action(HomeApps.IPTV, "iptv", "Free TV", "live_tv"));
-        lightButtons.add(HomeApps.action(HomeApps.INPUTS, "inputs", Ui.tr("Entradas HDMI", "HDMI Inputs"), "hdmi"));
-        lightButtons.add(HomeApps.action(HomeApps.SETTINGS, "settings", Ui.tr("Configurações", "Settings"), "settings"));
     }
 
     /** With a playlist, the tabs are the playlist's: channels, films, series. */
@@ -457,9 +459,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         measure(status, Math.round(1160 * kk), Math.round(240 * kk));
         // Sized to what they draw (the glass and its shadow; the grown tiles and their shadows): smaller layers are
         // cheaper for the GPU to composite on every frame of the drawer animation.
-        measure(platter, width, Math.round(320 * kk));
-        measure(tiles, width, Math.round(270 * kk));
-        measure(drawerLayer, width, Math.round(600 * kk));
+        measure(platter, width, Math.round(300 * kk));
+        measure(tiles, width, Math.round(260 * kk));
+        measure(drawerLayer, width, height);
         measure(sheetLayer, width, height);
         measure(toastLayer, Math.round(1000 * kk), Math.round(220 * kk));
         setMeasuredDimension(width, height);
@@ -475,9 +477,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         sky.layout(0, 0, width, height);
         place(heroLayer, 0, 0);
         place(status, width - status.getMeasuredWidth(), 0);
-        place(platter, 0, Math.round(750 * kk));
-        place(tiles, 0, Math.round(790 * kk));
-        place(drawerLayer, 0, Math.round(470 * kk));
+        place(platter, 0, 0);
+        place(tiles, 0, 0);
+        place(drawerLayer, 0, 0);
         sheetLayer.layout(0, 0, width, height);
         sheetLayer.setPivotX(width / 2f);
         sheetLayer.setPivotY(height / 2f);
@@ -635,13 +637,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float d = drawer.value, dc = Ui.clamp(d), s = Ui.clamp(sheet.value);
         float home = 1 - s, top = home * (1 - smoothstep(0, 0.32f, dc));
         float shift = SHIFT * k;
-        float lift = -d * shift;
-        show(heroLayer, top, lift);
-        show(status, top, lift);
-        show(platter, home, lift);
-        show(tiles, home, lift);
+        show(heroLayer, top, 0);
+        show(status, top, 0);
+        show(platter, home, 0);
+        show(tiles, home, 0);
         float da = home * smoothstep(0.1f, 0.6f, dc);
-        drawerLayer.setTranslationY((1 - d) * shift);
+        drawerLayer.setTranslationY((1 - d) * -shift);
         drawerLayer.setAlpha(da);
         drawerLayer.setVisibility(da > 0.002f ? VISIBLE : INVISIBLE);
         sheetLayer.setVisibility(s > 0.001f || sheetOpen ? VISIBLE : INVISIBLE);
@@ -1329,8 +1330,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         hourTemp.setColor(drawerInk(0.95f));
         pricePaint.setColor(drawerInk(0.95f));
         float titleBase = ROW_TITLE * k;
-        if (drawerInputs > 0) c.drawText(Ui.tr("Entradas", "Inputs"), drawerRects[0].left + 4 * k, titleBase, rowTitle);
-        if (drawerInputs < drawerItems.size()) c.drawText(Ui.tr("Atalhos", "Shortcuts"), drawerRects[drawerInputs].left + 4 * k, titleBase, rowTitle);
+        if (drawerInputs > 0) c.drawText("Entrées", drawerRects[0].left + 4 * k, titleBase, rowTitle);
+        if (drawerInputs < drawerItems.size()) c.drawText("Raccourcis", drawerRects[drawerInputs].left + 4 * k, titleBase, rowTitle);
         int top = -1;
         for (int i = 0; i < drawerItems.size(); i++) if (drawerFocus[i].value > 0.02f && (top < 0 || drawerFocus[i].value > drawerFocus[top].value)) top = i;
         for (int i = 0; i < drawerItems.size(); i++) if (i != top) drawDrawerTile(c, i);
@@ -1388,8 +1389,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         String now = HomeData.degrees(wx.temp);
         c.drawText(now, x + sw + 18 * k - Ui.leftBearing(bigTemp, now), r.top + 170 * k, bigTemp);
         c.drawText(HomeData.condition(wx.code, wx.isDay), x, r.top + 220 * k, cardText);
-        c.drawText(Ui.en ? "H:" + HomeData.degrees(wx.max) + "   L:" + HomeData.degrees(wx.min)
-                : "Máx. " + HomeData.degrees(wx.max) + "   Mín. " + HomeData.degrees(wx.min), x, r.top + 258 * k, cardDim);
+        c.drawText("Max " + HomeData.degrees(wx.max) + "   Min " + HomeData.degrees(wx.min), x, r.top + 258 * k, cardDim);
         float split = r.left + 392 * k;
         fill.setShader(null);
         fill.setColor(tone(0x1A000000, 0x24FFFFFF));
@@ -1402,8 +1402,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             c.drawText(HomeData.degrees(wx.hourTemp.get(i)), hc, r.top + 196 * k, hourTemp);
         }
         float sx = hx, base = r.top + 258 * k;
-        if (wx.sunrise != 0) sx = sunItem(c, "sunrise", Ui.tr("Nascer ", "Sunrise ") + Ui.time(wx.sunrise), sx, base) + 36 * k;
-        if (wx.sunset != 0) sunItem(c, "sunset", Ui.tr("Pôr do sol ", "Sunset ") + Ui.time(wx.sunset), sx, base);
+        if (wx.sunrise != 0) sx = sunItem(c, "sunrise", "Lever " + Ui.time(wx.sunrise), sx, base) + 36 * k;
+        if (wx.sunset != 0) sunItem(c, "sunset", "Coucher " + Ui.time(wx.sunset), sx, base);
     }
 
     private float sunItem(Canvas c, String symbol, String label, float x, float base) {
@@ -1819,7 +1819,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     int next = Math.max(0, Math.min(drawerItems.size() - 1, drawerIndex + dx));
                     if (next == drawerIndex) return;
                     drawerIndex = next;
-                } else if (dy < 0) {
+                } else if (dy > 0) {
                     closeDrawer();
                 } else {
                     return;
@@ -1887,10 +1887,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void activate() {
         HomeApps.Item it;
-        if (!sheetOpen && zone == Z_TOP && topIndex >= 3) {
-            HomeApps.Item top = lightButtons.get(topIndex - TAB_COUNT);
-            if ("iptv".equals(top.key)) { openBrowse(); return; }
-        }
         RectF r;
         if (sheetOpen) {
             if (others.isEmpty()) return;
@@ -1911,12 +1907,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             it = drawerItems.get(drawerIndex);
             r = drawerRects[drawerIndex];
         } else if (zone == Z_TOP) {
-            if (topIndex < TAB_COUNT) {
-                selectTab(topIndex);
-                return;
-            }
-            it = lightButtons.get(topIndex - TAB_COUNT);
-            r = topRects[topIndex];
+            selectTab(topIndex);              // the top row is the four tabs, nothing else
+            return;
         } else if (zone == Z_ROW) {
             List<Recs.Pick> row = shelfRow < shelves.size() ? shelves.get(shelfRow) : new ArrayList<>();
             Recs.Pick p = shelfCol[shelfRow] < row.size() ? row.get(shelfCol[shelfRow]) : null;
@@ -1985,7 +1977,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 if (i >= others.size()) return "";
                 return label(others, i) + ", " + (i + 1) + Ui.tr(" de ", " of ") + others.size();
             case Z_TOP:
-                if (i >= TAB_COUNT) return label(lightButtons, i - TAB_COUNT);
+                if (i >= TAB_COUNT) return i - TAB_COUNT < lightButtons.size() ? label(lightButtons, i - TAB_COUNT) : "";
                 return tabs()[i] + Ui.tr(", aba ", ", tab ") + (i + 1) + Ui.tr(" de 4", " of 4");
             case Z_CARDS: return i < cards.size() ? pickText(cards.get(i)) : "";
             case Z_SHELF: return label(shelf, i);
@@ -2012,9 +2004,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 break;
             }
             case Z_TOP:
-                if (i >= 3 + lightButtons.size()) return false;
+                if (i >= TAB_COUNT) return false;
                 a11yRect.set(topRects[i]);
-                dy = (i < 3 ? heroLayer : status).getTranslationY();
+                dy = heroLayer.getTranslationY();
                 break;
             case Z_CARDS:
                 if (i >= Math.min(3, cards.size())) return false;
@@ -2429,9 +2421,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void drawLightTop(Canvas c) {
         applyTone();
-        // The brand, not a translated "For You": the home is Free TV.
-        String brand = "Free TV";
-        c.drawText(brand, MARGIN * k - Ui.leftBearing(lTitle, brand), L_TITLE_BASE * k, lTitle);
         // Tabs: the selected one always sits in a white pill (readable at a distance, like tvOS); when the focus is on
         // the tab row the pill turns solid white and its label goes dark.
         for (int i = 0; i < TAB_COUNT; i++) {
@@ -2601,7 +2590,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      */
     private void drawLightButtons(Canvas c) {
         applyTone();
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < lightButtons.size() && i < 3; i++) {
             RectF r = topRects[TAB_COUNT + i];
             float f = Ui.clamp(topFocus[TAB_COUNT + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
             cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
@@ -2631,19 +2620,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private boolean moveLight(int dx, int dy) {
         switch (zone) {
             case Z_SHELF:
-                if (dy >= 0 || shelf.isEmpty()) return false;
-                if (!empty()) {
-                    zone = Z_ROW;
-                    shelfRow = shelves.size() - 1;
-                    shelfCol[shelfRow] = nearest(shelfRects[shelfRow], Math.min(shelves.get(shelfRow).size(), shelfCols[shelfRow]), tileRects[shelfIndex].centerX());
-                } else if (cards.isEmpty()) {
+                if (shelf.isEmpty()) return false;
+                if (dy < 0) {                       // swipe up above Netflix: weather, HDMI, shortcuts
+                    openDrawer();
+                    break;
+                }
+                if (dy > 0) {                      // down: the tabs, then the account
                     zone = Z_TOP;
                     topIndex = tab;
-                } else {
-                    zone = Z_CARDS;
-                    cardIndex = nearest(cardRects, cards.size(), tileRects[shelfIndex].centerX());
+                    break;
                 }
-                break;
+                return false;                      // left/right: the legacy switch moves between apps
             case Z_CARDS:
                 if (dx != 0) {
                     int next = Math.max(0, Math.min(cardCount() - 1, cardIndex + dx));
@@ -2678,15 +2665,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     if (shelfRow < ROWS - 1 && shelfRow + 1 < shelves.size() && !shelves.get(shelfRow + 1).isEmpty()) {
                         shelfRow++;
                     } else {
-                        zone = Z_SHELF;
-                        if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, tileRects.length, shelfRects[shelfRow][shelfCol[shelfRow]].centerX());
+                        return true;        // the app row is at the top now: down from the last row does nothing
                     }
                 }
                 break;
             }
             case Z_TOP:
                 if (dx != 0) {
-                    int next = Math.max(0, Math.min(TAB_COUNT + 2, topIndex + dx));
+                    int next = Math.max(0, Math.min(TAB_COUNT - 1, topIndex + dx));
                     if (next == topIndex) return true;
                     topIndex = next;
                     if (topIndex < TAB_COUNT) selectTab(topIndex);   // like Apple TV tabs: focusing a tab selects it
@@ -2698,7 +2684,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                         cardIndex = nearest(cardRects, cards.size(), topRects[topIndex].centerX());
                     }
                 } else {
-                    return true;
+                    zone = Z_SHELF;     // up from the tabs: the app row
+                    if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, shelf.size(), topRects[topIndex].centerX());
                 }
                 break;
             default:

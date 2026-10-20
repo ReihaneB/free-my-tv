@@ -81,9 +81,15 @@ final class HomeApps {
      */
     private static final String[][] SHELF = {
         {"netflix", "Netflix", "com.netflix.ninja", "E50914", "", "1"},
-        {"youtube", "YouTube", "com.google.android.youtube.tv", "FF0033", "play", "1"},
+        // SmartTube in the YouTube slot: Reihane does not use the YouTube TV app.
+        {"smartube", "SmartTube", "org.smarttube.stable", "E50914", "", "1"},
+        {"twitch", "Twitch", "tv.twitch.android.app", "9146FF", "", "1"},
         {"prime", "Prime Video", "com.amazon.amazonvideo.livingroom", "1A98FF", "tint", "0.96"},
+        {"m6", "M6+", "fr.m6.m6replay", "1E1E1E", "", "1"},
+        {"steam", "Steam Link", "com.valvesoftware.steamlink", "1B2838", "", "1"},
+        {"moonlight", "Moonlight", "com.limelight", "2E7D32", "", "1"},
         {"disney", "Disney+", "com.disney.disneyplus", "1838C8", "", "1"},
+        {"youtube", "YouTube", "com.google.android.youtube.tv", "FF0033", "play", "1"},
         {"max", "Max", "com.wbd.stream", "6C3BE0", "", "1.32"},
         {"appletv", "Apple TV", "com.apple.atve.androidtv.appletv", "B8BCC6", "", "1.1"},
         {"hulu", "Hulu", "com.hulu.livingroomplus", "1CE783", "", "1"},
@@ -92,7 +98,7 @@ final class HomeApps {
         {"globoplay", "Globoplay", "com.globo.globotv", "FF5A1F", "tint", "1"},
         {"spotify", "Spotify", "com.spotify.tv.android", "1DB954", "", "1"},
     };
-    static final int MAX_SHELF = 8;
+    static final int MAX_SHELF = 7;
     /** Live TV apps of some brands (the antenna's channels open through the standard Android request first). */
     static final String[] LIVE_TV_APPS = {"com.tcl.tv", "com.google.android.tv", "com.mediatek.wwtv.tvcenter", "com.sony.dtv.tvx"};
     /** Kept out of "All Apps" (only hidden, still installed). Add the ones your TV shows that you never use. */
@@ -183,10 +189,10 @@ final class HomeApps {
     static List<Item> shortcuts(Context c) {
         List<Item> items = new ArrayList<>();
         if (liveTv(c) != null) {
-            items.add(shortcut(LIVE_TV, "live", Ui.tr("TV ao Vivo", "Live TV"), "tv"));
+            items.add(shortcut(LIVE_TV, "live", "Live TV", "tv"));
         }
         items.addAll(inputs(c));
-        items.add(shortcut(ALL_APPS, "all", Ui.tr("Todos os Apps", "All Apps"), "apps"));
+        items.add(shortcut(ALL_APPS, "all", "Toutes les apps", "apps"));
         return items;
     }
 
@@ -212,9 +218,9 @@ final class HomeApps {
     /** Shortcuts in the bottom drawer. */
     static List<Item> drawerShortcuts() {
         List<Item> items = new ArrayList<>();
-        items.add(shortcut(ALL_APPS, "all", Ui.tr("Todos os Apps", "All Apps"), "apps"));
-        items.add(shortcut(SETTINGS, "settings", Ui.tr("Ajustes do Início", "Home Settings"), "settings"));
-        items.add(shortcut(ANDROID_SETTINGS, "tv-settings", Ui.tr("Ajustes da TV", "TV Settings"), "tv_settings"));
+        items.add(shortcut(ALL_APPS, "all", "Toutes les apps", "apps"));
+        items.add(shortcut(SETTINGS, "settings", "Réglages Free TV", "settings"));
+        items.add(shortcut(ANDROID_SETTINGS, "tv-settings", "Réglages TV", "tv_settings"));
         return items;
     }
 
@@ -231,7 +237,7 @@ final class HomeApps {
     /** For the bottom drawer: live TV and every HDMI input (the ones with no device are shown dimmed). */
     static List<Item> allInputs(Context c) {
         List<Item> items = new ArrayList<>();
-        if (liveTv(c) != null) items.add(shortcut(LIVE_TV, "live", Ui.tr("TV ao Vivo", "Live TV"), "tv"));
+        if (liveTv(c) != null) items.add(shortcut(LIVE_TV, "live", "Live TV", "tv"));
         items.addAll(inputs(c, true));
         return items;
     }

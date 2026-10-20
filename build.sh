@@ -46,6 +46,11 @@ CRYPTO=false; [ "$(prop show_crypto true)" = "true" ] && CRYPTO=true
 MIN_SDK="${MIN_SDK:-31}"
 TARGET_SDK="${TARGET_SDK:-33}"
 
+# Version from git: every APK says which commit it is, so any build can be traced back (and rolled back) to a tag.
+# The code only goes up, so `adb install -r` always accepts the next build; ./deploy.sh rollback uses -d for the rest.
+VERSION_CODE="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+VERSION_NAME="$(git describe --tags --always --dirty 2>/dev/null || echo 1.0)"
+
 rm -rf out && mkdir -p out/gen/io/freemytv out/classes
 cat > out/gen/io/freemytv/Config.java <<EOF
 package io.freemytv;
@@ -71,7 +76,8 @@ EOF
 "$BT/aapt2" compile --dir app/res -o out/res.zip
 # Fonts uncompressed: Android reads them straight from the APK.
 "$BT/aapt2" link -o out/base.apk -I "$AJ" --manifest app/AndroidManifest.xml --java out/gen out/res.zip \
-  --min-sdk-version "$MIN_SDK" --target-sdk-version "$TARGET_SDK" -A app/assets -0 ttf
+  --min-sdk-version "$MIN_SDK" --target-sdk-version "$TARGET_SDK" -A app/assets -0 ttf \
+  --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" --replace-version
 "$JAVAC" -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$AJ:$BT/core-lambda-stubs.jar" -classpath "$AJ" \
   -d out/classes $(find app/src out/gen -name '*.java')
 "$BT/d8" --release --min-api "$MIN_SDK" --lib "$AJ" --output out $(find out/classes -name '*.class')

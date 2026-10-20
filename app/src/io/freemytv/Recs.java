@@ -44,6 +44,7 @@ final class Recs {
         int id;
         String kind;            // "movie" or "tv"
         String title, backdrop, meta = "", app, pkg;
+        String url;             // an IPTV stream: the card opens the player instead of an app
         boolean detailed;
     }
 
@@ -169,6 +170,7 @@ final class Recs {
 
     /** This hour's 3, movies only ("movie") or shows only ("tv"); null = both (the home screen tabs). */
     List<Pick> now(String kind) {
+        if (Iptv.configured()) return playlist(kind);
         List<Pick> list = new ArrayList<>();
         if (!hasKey(context)) return list;    // no TMDB key: no recommendations
         Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
@@ -184,6 +186,29 @@ final class Recs {
         for (int i = 0; i < list.size() && out.size() < 3; i++) {
             Pick p = list.get((int) ((hour * 3 + i) % list.size()));
             if (seen.add(franchise(p.title))) out.add(p);
+        }
+        return out;
+    }
+
+    /**
+     * The three cards from the playlist: channels, films or series. One turn of the list per hour, so the home screen
+     * is not always the same three, and it costs nothing (the playlist is on disk).
+     */
+    private List<Pick> playlist(String kind) {
+        Iptv iptv = Iptv.get(context);
+        List<Iptv.Item> all = kind == null ? iptv.live() : "movie".equals(kind) ? iptv.movies() : iptv.series();
+        List<Pick> out = new ArrayList<>();
+        if (all.isEmpty()) return out;
+        long hour = System.currentTimeMillis() / 3600_000L;
+        int at = (int) ((hour * 3) % all.size());
+        for (int i = 0; i < 3 && i < all.size(); i++) {
+            Iptv.Item it = all.get((at + i) % all.size());
+            Pick p = new Pick();
+            p.title = it.name;
+            p.meta = it.group;
+            p.url = it.url;
+            p.backdrop = null;
+            out.add(p);
         }
         return out;
     }

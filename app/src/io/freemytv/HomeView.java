@@ -282,7 +282,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             checkNotices();
             updatePalette();
             checkNight(true);
-            updatePicks();      // three new ones every hour
+            updatePicks();      // three new ones every hour (the playlist's own rotation included)
             handler.postDelayed(this, 15_000);
         }
     };
@@ -345,6 +345,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         recs.addListener(this);
         data.refreshIfStale();
         recs.refreshIfStale();
+        Iptv.get(getContext()).refreshIfStale();
         if (tvInputs != null) tvInputs.registerCallback(inputCallback, handler);
         handler.postDelayed(tick, 15_000);
         checkNotices();
@@ -404,7 +405,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lightButtons.add(HomeApps.action(HomeApps.SETTINGS, "settings", Ui.tr("Configurações", "Settings"), "settings"));
     }
 
+    /** With a playlist, the tabs are the playlist's: channels, films, series. */
+    private static final String[] TABS_TV = {"Chaînes", "Films", "Séries"};
+    private static final String[] TABS_TV_EN = {"Live", "Movies", "Series"};
+    private static final String[] TABS_TV_ES = {"Canales", "Películas", "Series"};
+
     private static String[] tabs() {
+        if (Iptv.configured()) return Ui.es ? TABS_TV_ES : Ui.en ? TABS_TV_EN : TABS_TV;
         return Ui.es ? TABS_ES : Ui.en ? TABS_EN : TABS;
     }
 
@@ -696,7 +703,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         h.label = Recs.periodLabel();
         h.title = p.title == null ? "" : p.title;
         h.meta = p.meta == null ? "" : p.meta;
-        h.button = p.pkg != null;
+        h.button = p.pkg != null || p.url != null;
         h.dots = picks.size();
         h.dot = pickIndex;
         h.titleLayout = StaticLayout.Builder.obtain(h.title, 0, h.title.length(), titlePaint, Math.max(1, Math.round(HERO_TITLE_W * k)))
@@ -1810,6 +1817,15 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         gridDirty = true;
     }
 
+    /** A card from the playlist: the stream opens full screen in the app's own player. */
+    private void play(Recs.Pick p) {
+        click.open();
+        android.content.Intent it = new android.content.Intent(getContext(), Player.class);
+        it.putExtra(Player.EXTRA_URL, p.url);
+        it.putExtra(Player.EXTRA_NAME, p.title);
+        getContext().startActivity(it);
+    }
+
     private void activate() {
         HomeApps.Item it;
         RectF r;
@@ -1819,6 +1835,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             r = focusedCell;
         } else if (zone == Z_HERO) {
             Recs.Pick p = currentPick();
+            if (p != null && p.url != null) { play(p); return; }
             if (p == null || p.pkg == null) return;
             it = HomeApps.app(p.pkg, Recs.serviceName(p));
             r = heroButton;
@@ -1839,6 +1856,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             r = topRects[topIndex];
         } else if (zone == Z_CARDS) {
             Recs.Pick p = cardIndex < cards.size() ? cards.get(cardIndex) : null;
+            if (p != null && p.url != null) { play(p); return; }
             if (p == null || p.pkg == null) return;
             it = HomeApps.app(p.pkg, Recs.serviceName(p));
             r = cardRects[cardIndex];

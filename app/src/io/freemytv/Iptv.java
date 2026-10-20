@@ -67,7 +67,24 @@ final class Iptv {
     synchronized List<Item> items() { return new ArrayList<>(items); }
 
     synchronized List<Item> live() { return filter(true); }
-    synchronized List<Item> movies() { return filter(false); }
+    /** VOD that isn't a series: films. */
+    synchronized List<Item> movies() {
+        List<Item> out = new ArrayList<>();
+        for (Item i : items) if (!i.live && !seriesGroup(i.group)) out.add(i);
+        return out;
+    }
+
+    /** VOD whose group says series (a season/episode list comes as one entry per episode). */
+    synchronized List<Item> series() {
+        List<Item> out = new ArrayList<>();
+        for (Item i : items) if (!i.live && seriesGroup(i.group)) out.add(i);
+        return out;
+    }
+
+    private static boolean seriesGroup(String group) {
+        String g = group.toLowerCase(Locale.ROOT);
+        return g.contains("serie") || g.contains("série") || g.contains("series");
+    }
 
     private List<Item> filter(boolean live) {
         List<Item> out = new ArrayList<>();

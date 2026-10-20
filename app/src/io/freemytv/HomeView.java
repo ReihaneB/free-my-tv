@@ -1,1693 +1,930 @@
 package io.freemytv;
 
-import android.app.Activity;
 import android.content.Context;
-import android.content.SharedPreferences;
+import android.content.Intent;
 import android.graphics.Bitmap;
-import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
-import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
-import android.media.tv.TvInputManager;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
-import android.text.Layout;
-import android.text.StaticLayout;
-import android.text.TextPaint;
-import android.text.TextUtils;
 import android.view.Choreographer;
 import android.view.KeyEvent;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.accessibility.AccessibilityNodeProvider;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.Set;
 
 /**
- * The home screen, styled after the Apple TV app with the macOS 27 glass:
- *  - at the top left, the "For You" title and the tabs (Explore, Movies, Shows); at the top right, icon-only glass
- *    buttons (Live TV, HDMI Inputs, Settings), with the focused one's name below it, and the small crypto quotes
- *    (logo + price) at the right end of the tab row;
- *  - three cards with the titles recommended for right now in the selected tab (Recs, from TMDB); the background is
- *    the first card's photo, heavily blurred and almost white (Backdrop); without one, a light gradient;
- *  - at the bottom, the glass shelf with the apps (icons in each brand's color, like the tvOS Dock; the focused one
- *    grows);
- *  - ↓ on the shelf: everything moves up and the bottom drawer appears (inputs, shortcuts, weather for the next hours
- *    and quotes with the 24 h change); the background lightens (darkens at night). ↑ or Back closes it;
- *  - from sunset to sunrise, a night look: dark background, smoked glass and white text.
- * Measurements are in a 1920×1080 space (k = width / 1920). The screen is split into layers so the TV's weak GPU only
- * redraws what changed.
+ * The home screen, built like Infuse on the Apple TV: a bar of library tabs, then shelves of artwork.
+ *
+ * <p>Everything on screen is the account: a row of three large cards ("À la une"), then the shelves — continue
+ * watching, new films, new series, channels — then the TV's own things (apps, HDMI inputs) as shelves of the same
+ * shape. Left/Right walks a shelf (the row slides under the focus), Up/Down goes from shelf to shelf, and the bar on
+ * top switches between the home and each library. The account is on disk, so the screen opens with no network.
  */
-final class HomeView extends ViewGroup implements Choreographer.FrameCallback, HomeData.Listener, Recs.Listener {
-    // tvOS grid (Human Interface Guidelines): content inside the safe area, 80 px from the sides and 60 from top and
-    // bottom; 40 px between items; 7 columns of 217 px (the apps). The shelf glass extends 36 px past the tiles (the
-    // same padding on all four sides) and the tile corners are concentric with it (glass radius = radius + padding).
-    private static final float MARGIN = 80, CONTENT_R = 1840;
-    // Apple TV app grid: 80 px safe area, three equal featured cards, rows of eight, a compact glass dock.
-    private static final int ROW_COLS = 14;
-    // Hero, anchored at the bottom (a two-line title grows upward).
-    private static final float HERO_TITLE_W = 900;
-    // Shelf: tiles with corners concentric with the glass (glass radius = tile radius + padding).
-    // Shelf like the tvOS 27 Dock: 5:3 icons (210 × 126) in each brand's color, 48 apart, and the glass bar hugging
-    // them with 40 of padding (the focused icon grows 20% without touching its edge).
-    private static final float SHELF_PAD = 24, TILE_GAP = 28;
-    private static final float TILE_RADIUS = 20, TILE_MAX_W = 170;
-    // Tile focus (Apple TV style): it grows from the center and its shadow drops (it "rises" toward the viewer).
-    private static final float FOCUS_GROW = 0.2f;
-    // Corner capsule.
-    // Corner capsule: the height and top offset of the tvOS tab bar (68 and 46).
-    private static final float CAPSULE_TOP = 46, CAPSULE_H = 68, BUTTON = 56;
-    // Top drawer (under the app row): pulled down from above, it holds the inputs, the shortcuts, the weather.
-    private static final float SHIFT = 260, ROW_TITLE = 250, ROW_TOP = 268, ROW_H = 118, CARDS_TOP = 410, CARDS_H = 236;
-    // "All Apps" sheet.
-    private static final int COLUMNS = 5, VISIBLE_ROWS = 3;
-    private static final float GRID_W = 300, GRID_H = 169, GRID_GAP = 40, GRID_ROW = 239, GRID_TOP = 196, GRID_RADIUS = 22;
-    private static final int SMOKE = 0xFF111113, INK = 0xFF1C1C1E, WHITE = 0xFFF5F5F7;
-    private static final int UP_COLOR = 0xFF30D158, DOWN_COLOR = 0xFFFF453A;
-    private static final long TOAST_MS = 6000, FADE_MS = 800;
-    private static final int SKY = 0, HERO = 1, STATUS = 2, PLATTER = 3, TILES = 4, DRAWER = 5, SHEET = 6, TOAST = 7;
-    private static final int Z_STATUS = 0, Z_HERO = 1, Z_SHELF = 2, Z_DRAWER = 3;
-    private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
-    // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
-    // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
-    private static final float L_TITLE_BASE = 112, L_TABBAR_TOP = 214, L_TABBAR_H = 60, L_CARDS_TOP = 300, L_CARD_H = 236;
-    // Two rows of cards under the featured row: the account, in the home.
-    private static final float L_ROW_TITLE = 640, L_ROW_TOP = 652, L_ROW_H = 150, L_ROW_W = 100, L_ROW_GAP = 18,
-            L_ROW_STEP = 186;
-    private static final float L_CARD_GAP = 40, L_BUTTON = 60, L_BUTTON_GAP = 18, L_BUTTON_CY = 104;
-    private static final float L_PLATTER_TOP = 44, L_TILE_H = 96;
-    private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
-    private static final int TAB_COUNT = 4;
-    private static final String[] TABS = {"Nouveautés", "Films", "Séries", "Live"};
-    private static final String[] TABS_EN = {"New", "Movies", "Series", "Channels"};
-    private static final String[] TABS_ES = {"Novedades", "Películas", "Series", "Canales"};
-    private static final int Z_TOP = 4, Z_CARDS = 5, Z_ROW = 6;
+final class HomeView extends View implements Choreographer.FrameCallback, Iptv.Listener {
 
-    private final Activity activity;
-    private final Scene scene = new Scene();
-    private final HomeData data;
-    private final Recs recs;
-    private final Click click;
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private final SharedPreferences ui;
-    private final TvInputManager tvInputs;
-    private final Spoken spoken = new Spoken(this, new Spoken.Source() {
-        @Override public void items(List<Integer> out) { a11yItems(out); }
-        @Override public String text(int id) { return a11yText(id); }
-        @Override public boolean bounds(int id, Rect out) { return a11yBounds(id, out); }
-        @Override public int focused() { return a11yFocused(); }
-        @Override public void focus(int id) { a11yFocus(id); }
-        @Override public void click(int id) { activate(); }
-    });
-    private final RectF a11yRect = new RectF();
-    private final Layer sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer;
-    private int zone = Z_SHELF;
-    private boolean moved;                       // the user has used the remote once: stop re-seating the focus
+    // MARK: - Model
 
-    // Night look (like Apple's "Automatic" appearance): darker from sunset to sunrise, with a 2 s transition.
-    private static final long NIGHT_MS = 2000;
-    private boolean nightTarget;
-    private float night, nightFrom;     // 0 = day, 1 = night
-    private long nightAt;
-    private final int[] glassNight = new int[Backdrop.GW * Backdrop.GH], frostNight = new int[Backdrop.FW * Backdrop.FH];
-    private final int[] neutralGlassPx = new int[Backdrop.GW * Backdrop.GH], neutralFrostPx = new int[Backdrop.FW * Backdrop.FH];
-    private boolean nightPair;          // the glass holds both photos (day and night), blended by `night`
-    private Shader nightGradient;
-
-    // At the top: tabs (0 to 2) and icon-only buttons (3 to 5); the three cards
-    private int tab, topIndex, cardIndex;
-    private List<Recs.Pick> cards = new ArrayList<>();
-    private final Spring[] topFocus = new Spring[TAB_COUNT + 3];
-    private final RectF[] topRects = new RectF[TAB_COUNT + 3];
-    private final Spring[] cardFocus = new Spring[3];
-    private static final int ROWS = 2;
-    private final List<List<Recs.Pick>> shelves = new ArrayList<>();
-    private final RectF[][] shelfRects = new RectF[ROWS][ROW_COLS];
-    private final int[] shelfCol = new int[ROWS];
-    private int shelfRow;
-    private final String[] shelfTitles = new String[ROWS];
-    private final boolean[] shelfChannels = new boolean[ROWS];
-    private final int[] shelfCols = new int[ROWS];          // how many tiles of the row sit on the screen
-    private Paint lRowTitle, rowGlass, rowGlassOn, rowInk, rowFilter;
-    private final RectF[] cardRects = new RectF[3];
-    private final List<HomeApps.Item> lightButtons = new ArrayList<>();
-    private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip;
-    private Shader lightGradient;
-
-    // Shelf
-    private List<HomeApps.Item> shelf = new ArrayList<>();
-    private Spring[] tileFocus = new Spring[0];
-    private RectF[] tileRects = new RectF[0];
-    private final Map<String, Bitmap> crispLogos = new HashMap<>();   // logos already sized for the focused tile
-    /** Each app's tile like its Apple TV icon: brand colors (top, bottom) and logo (0 = as is, 1 = white, 2 = dark). */
-    private static final Map<String, int[]> TILE_STYLE = new HashMap<>();
-    static {
-        TILE_STYLE.put("netflix", new int[] {0xFF0A0A0A, 0xFF000000, 0});
-        TILE_STYLE.put("youtube", new int[] {0xFF1C1C1E, 0xFF09090A, 0});
-        TILE_STYLE.put("globoplay", new int[] {0xFFFF8A1F, 0xFFFF2D5A, 1});
-        TILE_STYLE.put("prime", new int[] {0xFF2AA8FF, 0xFF0A68D4, 1});
-        TILE_STYLE.put("disney", new int[] {0xFF173584, 0xFF08143F, 0});
-        TILE_STYLE.put("max", new int[] {0xFF5C30E8, 0xFF221684, 0});
-        TILE_STYLE.put("appletv", new int[] {0xFF1C1C1E, 0xFF000000, 0});
-        TILE_STYLE.put("smartube", new int[] {0xFFE50914, 0xFF8E0009, 0});
-        TILE_STYLE.put("twitch", new int[] {0xFF9146FF, 0xFF5B2CB8, 1});
-        TILE_STYLE.put("m6", new int[] {0xFF2A2A2E, 0xFF0A0A0C, 0});
-        TILE_STYLE.put("steam", new int[] {0xFF2A475E, 0xFF171A21, 0});
-        TILE_STYLE.put("moonlight", new int[] {0xFF2E7D32, 0xFF124419, 0});
+    /** One card: a film, an episode, a channel, an app or an input. */
+    private static final class Tile {
+        String title = "", meta = "", image = "", url = "", seriesId = "";
+        Bitmap art;                 // apps: the ready 16:9 card
+        HomeApps.Item app;          // apps and inputs open through HomeApps
+        String symbol = "";         // inputs: the icon
+        float progress;             // continue watching: 0..1
+        boolean series, live;
     }
-    private final android.graphics.PorterDuffColorFilter whiteLogo =
-            new android.graphics.PorterDuffColorFilter(0xFFFFFFFF, android.graphics.PorterDuff.Mode.SRC_IN);
-    private final RectF platterRect = new RectF();
-    private int shelfIndex;
 
-    // Corner capsule
-    private List<HomeApps.Item> statusItems = new ArrayList<>();
-    private Spring[] statusFocus = new Spring[0];
-    private RectF[] statusRects = new RectF[0];
-    private final RectF capsuleRect = new RectF();
-    private float capsuleInfoW;
-    private int statusIndex;
+    private static final class Row {
+        String title = "";
+        int kind, seeTab = -1;
+        final List<Tile> items = new ArrayList<>();
+        float y, h;                 // in the content column, from 0
+        int col, win;               // focused card, first card shown
+        float slide, slideTo;       // horizontal offset of the shelf (animated)
+        float[] focus = new float[0];   // per card, 0..1
+    }
 
-    // Hero and background
-    private List<Recs.Pick> picks = new ArrayList<>();
-    private int pickIndex, heroSlide = 1;
-    private Hero hero, heroFrom;
-    private long heroFadeAt, bgFadeAt;
-    private final Spring heroFocus = new Spring(0.28f, 0.85f, 0);
-    private final RectF heroButton = new RectF();
-    private Backdrop bgFrom, bgTo;     // null = gradient (no photo)
-    private final int[] frostMix = new int[Backdrop.FW * Backdrop.FH];
+    private static final int R_HERO = 0, R_POSTER = 1, R_LOGO = 2, R_APP = 3;
+    private static final int Z_ROW = 0, Z_BAR = 1;
+    /** col value of the "Tout voir" label at the end of a shelf. */
+    private static final int SEE_ALL = -2;
 
-    // Bottom drawer
-    private List<HomeApps.Item> drawerItems = new ArrayList<>();
-    private int drawerInputs;          // how many leading items are inputs (the rest are shortcuts)
-    private Spring[] drawerFocus = new Spring[0];
-    private RectF[] drawerRects = new RectF[0];
-    private final RectF weatherCard = new RectF(), quotesCard = new RectF();
-    private final Spring drawer = new Spring(0.46f, 0.92f, 0);
-    private boolean drawerOpen;
-    private int drawerIndex;
+    private static final String[] TABS = {"Accueil", "Films", "Séries", "Live", "Apps"};
+    private static final int TAB_COUNT = TABS.length;
+    private static final int GEAR = TAB_COUNT;          // last stop in the bar
 
-    // "All Apps" sheet
-    private List<HomeApps.Item> others = new ArrayList<>();
-    private Spring[] gridFocus = new Spring[0];
-    private String[] gridLabels;
-    private final Spring sheet = new Spring(0.38f, 0.9f, 0);
-    private final Spring scroll = new Spring(0.34f, 1f, 0);
-    private final RectF focusedCell = new RectF();
-    private boolean sheetOpen;
-    private int gridIndex;
+    // MARK: - Geometry (designed at 1920×1080, scaled by k)
 
-    // Toasts
-    private final ArrayDeque<String> toasts = new ArrayDeque<>();
-    private StaticLayout toast;
+    private static final float BAR_H = 106, MARGIN = 96;
+    private static final float HEAD_H = 54, ROW_GAP = 30, CAP_H = 56;
+    private static final float HERO_W = 548, HERO_H = 308, HERO_GAP = 30;
+    private static final float POSTER_W = 190, POSTER_H = 285, POSTER_GAP = 26;
+    private static final float LOGO_W = 240, LOGO_H = 135, LOGO_GAP = 24;
+    private static final float APP_W = 240, APP_H = 135, APP_GAP = 24;
+
+    private static final int BG = 0xFF0B0B0D;
+    private static final int INK = 0xFFFFFFFF, DIM = 0xB3FFFFFF, FAINT = 0x80FFFFFF, ACCENT = 0xFFFF8A00;
+
+    private float k = 1f, w, h;
+
+    // MARK: - State
+
+    private final List<Row> rows = new ArrayList<>();
+    private final Map<String, Float> progress = new HashMap<>();   // continue watching, read once per rebuild
+    private int tab, zone = Z_ROW, barIndex, rowIndex, colIndex;
+    private float offset, offsetTo;
+    private boolean resumed, framePosted;
+    private long lastFrame;
+    private int prefsVersion = Prefs.version;
+    private String dataKey = "";
+
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable clockTick = new Runnable() {
+        @Override public void run() {
+            invalidate();
+            if (resumed) main.postDelayed(this, 20_000);
+        }
+    };
+
+    // MARK: - Paints (built after Ui.init, or they miss the font)
+
+    private Paint tabInk, rowTitle, cardTitle, cardMeta, seeAll, clock, toast, empty;
+    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Paint barShade = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint heroShade = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    private final Path clip = new Path();
+    private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
+    private final android.graphics.Rect srcRect = new android.graphics.Rect();
+    private final RectF[] barRects = new RectF[GEAR + 1];
+    private final Map<String, Bitmap> softs = new HashMap<>();   // url → tiny bitmap stretched as a blur
+    private String toastText = "";
     private long toastAt;
 
-    // Frames
-    private boolean running, tilesDirty, statusDirty, heroDirty, drawerDirty, gridDirty, motionDirty = true;
-    private boolean drawerWasMoving;
-    private long lastNanos, resumedAt, lastStep;
-    private int w, h;
-    private float k = 1;
-    private String clockText = "";
-    private long clockMinute = -1;
-    private boolean okDown, backDown;
+    // MARK: - Lifecycle
 
-    private Paint labelPaint, metaPaint, clockPaint, buttonPaint, capsuleText, tipPaint, quotePaint, staleQuote;
-    private Paint rowTitle, drawerLabel, cardTitle, cardText, cardDim, cardDimRight, bigTemp, hourPaint, hourTemp;
-    private Paint pricePaint, changePaint, sheetTitle;
-    private TextPaint titlePaint, gridLabel, toastPaint;
-    private final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private final Paint imagePaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
-    private final Paint shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint shadowSoft = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint shadowDeep = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint sheen = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint veil = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint tileFill = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Path clip = new Path();
-    private final RectF tmp = new RectF(), cell = new RectF(), screen = new RectF();
-
-    /** What the hero shows: a recommendation or, without any, the date, the time and the weather. */
-    private static final class Hero {
-        String label = "", title = "", meta = "";
-        boolean clock, button;
-        int dots, dot;
-        StaticLayout titleLayout;
-
-        boolean sameText(Hero o) {
-            return o != null && clock == o.clock && label.equals(o.label) && title.equals(o.title) && meta.equals(o.meta);
-        }
-    }
-
-    /** One layer of the screen. It draws in full-screen coordinates: the glass needs each pixel's real position. */
-    private final class Layer extends View {
-        private final int kind;
-
-        Layer(Context c, int kind) {
-            super(c);
-            this.kind = kind;
-        }
-
-        @Override protected void onDraw(Canvas c) {
-            if (labelPaint == null) return;
-            c.translate(-getLeft(), -getTop());
-            // The layer may be shifted (bottom drawer): the glass reads the background from where it really is. The
-            // drawer and the top buttons are always drawn as if resting in place (they are only visible there and are
-            // not redrawn while they move).
-            scene.setOffset(0, kind == DRAWER || kind == STATUS ? 0 : getTranslationY());
-            switch (kind) {
-                case SKY: drawSky(c); break;
-                case HERO: drawLightTop(c); break;
-                case STATUS: drawLightButtons(c); break;
-                case PLATTER: drawPlatter(c); break;
-                case TILES: drawTiles(c); break;
-                case DRAWER: drawDrawer(c); break;
-                case SHEET: drawSheet(c); break;
-                default: drawToast(c); break;
-            }
-            scene.setOffset(0, 0);
-        }
-    }
-
-    private final TvInputManager.TvInputCallback inputCallback = new TvInputManager.TvInputCallback() {
-        @Override public void onInputStateChanged(String inputId, int state) { reload(); }
-        @Override public void onInputAdded(String inputId) { reload(); }
-        @Override public void onInputRemoved(String inputId) { reload(); }
-    };
-
-    private final Runnable tick = new Runnable() {
-        @Override public void run() {
-            if (!running) return;
-            data.refreshIfStale();
-            recs.refreshIfStale();
-            checkNotices();
-            updatePalette();
-            checkNight(true);
-            updatePicks();      // three new ones every hour (the playlist's own rotation included)
-            handler.postDelayed(this, 15_000);
-        }
-    };
-
-    HomeView(Activity a) {
-        super(a);
-        activity = a;
-        data = HomeData.get(a);
-        recs = Recs.get(a);
-        click = new Click(a);
-        ui = a.getSharedPreferences("home-ui", Context.MODE_PRIVATE);
-        tvInputs = (TvInputManager) a.getSystemService(Context.TV_INPUT_SERVICE);
+    HomeView(Context context) {
+        super(context);
+        setBackgroundColor(BG);
         setFocusable(true);
-        sky = new Layer(a, SKY);
-        heroLayer = new Layer(a, HERO);
-        status = new Layer(a, STATUS);
-        platter = new Layer(a, PLATTER);
-        tiles = new Layer(a, TILES);
-        drawerLayer = new Layer(a, DRAWER);
-        sheetLayer = new Layer(a, SHEET);
-        toastLayer = new Layer(a, TOAST);
-        // Hardware layers on the GPU: only the one that changed is redrawn; moving, fading and scaling stay cheap.
-        for (View v : new View[] {heroLayer, status, platter, tiles, drawerLayer, sheetLayer}) v.setLayerType(LAYER_TYPE_HARDWARE, null);
-        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer}) {
-            v.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);   // TalkBack reads the items (Spoken)
-            addView(v);
-        }
-        setContentDescription("Free My TV");
-        drawerLayer.setVisibility(INVISIBLE);
-        for (int i = 0; i < topFocus.length; i++) {
-            topFocus[i] = new Spring(0.26f, 0.85f, 0);
-            topRects[i] = new RectF();
-        }
-        for (int i = 0; i < 3; i++) {
-            cardFocus[i] = new Spring(0.32f, 0.78f, 0);
-            cardRects[i] = new RectF();
-        }
-        for (int r = 0; r < ROWS; r++) {
-            for (int i = 0; i < shelfRects[r].length; i++) shelfRects[r][i] = new RectF();
-        }
-        makeLightButtons();
-        recs.setLight(true);
-        checkNight(false);
-        sheetLayer.setVisibility(INVISIBLE);
-        scene.setMotion(0.6f, 0f);
-        updatePalette();
-        // First time: right away (a cold start opens with the apps already there); missing logos come from reload().
-        setShelf(HomeApps.shelf(a, false));
-        setStatusItems(statusList(a));
-        setDrawerItems(drawerList(a));
+        setFocusableInTouchMode(true);
+        Ui.init(context);
+        paints();
+        for (int i = 0; i <= GEAR; i++) barRects[i] = new RectF();
+        rebuild();
     }
 
-    // MARK: - Lifecycle (called by HomeActivity)
+    private void paints() {
+        tabInk = Ui.text(Ui.semibold, 26, INK);
+        rowTitle = Ui.text(Ui.displaySemibold, 34, INK);
+        cardTitle = Ui.text(Ui.medium, 24, 0xF2FFFFFF);
+        cardMeta = Ui.text(Ui.regular, 20, FAINT);
+        seeAll = Ui.text(Ui.medium, 22, ACCENT);
+        clock = Ui.numbers(Ui.medium, 22, DIM);
+        toast = Ui.text(Ui.medium, 24, INK);
+        empty = Ui.text(Ui.medium, 26, FAINT);
+    }
 
     void resume() {
-        if (running) return;
-        running = true;
-        checkNight(false);
-        resumedAt = SystemClock.uptimeMillis();
-        lastNanos = 0;
-        lastStep = 0;
-        data.addListener(this);
-        recs.addListener(this);
-        data.refreshIfStale();
-        recs.refreshIfStale();
-        Iptv.get(getContext()).refreshIfStale();
-        if (tvInputs != null) tvInputs.registerCallback(inputCallback, handler);
-        handler.postDelayed(tick, 15_000);
-        checkNotices();
-        reload();
-        updatePalette();
-        updatePicks();
-        if (sheetOpen) closeSheet();
-        sheet.snap(sheet.target);
-        motionDirty = true;
-        invalidateAll();
-        Choreographer.getInstance().postFrameCallback(this);
-        spoken.readAgain();
+        resumed = true;
+        Iptv.get(getContext()).addListener(this);
+        if (prefsVersion != Prefs.version) {
+            prefsVersion = Prefs.version;
+            rebuild();
+        }
+        requestFrame();
+        main.removeCallbacks(clockTick);
+        main.postDelayed(clockTick, 20_000);
+        invalidate();
     }
 
     void pause() {
-        if (!running) return;
-        running = false;
-        Choreographer.getInstance().removeFrameCallback(this);
-        handler.removeCallbacks(tick);
-        data.removeListener(this);
-        recs.removeListener(this);
-        if (tvInputs != null) tvInputs.unregisterCallback(inputCallback);
+        resumed = false;
+        Iptv.get(getContext()).removeListener(this);
+        main.removeCallbacks(clockTick);
     }
 
     void destroy() {
         pause();
-        click.release();
     }
 
-    /** Starting state (Home pressed while the home screen is showing): first app focused, drawer and sheet closed. */
+    /** Home pressed on the home screen: back to the top of the home tab. */
     void reset(boolean animated) {
-        zone = Z_SHELF;
-        shelfIndex = 0;
-        sheetOpen = false;
-        drawerOpen = false;
-        if (animated) {
-            sheet.target = 0;
-            drawer.target = 0;
+        tab = 0;
+        barIndex = 0;
+        rowIndex = 0;
+        colIndex = 0;
+        zone = Z_ROW;
+        offset = offsetTo = 0;
+        rebuild();
+        requestFrame();
+        invalidate();
+    }
+
+    @Override protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        requestFocus();
+        requestFrame();
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        Choreographer.getInstance().removeFrameCallback(this);
+        framePosted = false;
+    }
+
+    void showToast(String text) {
+        toastText = text;
+        toastAt = System.currentTimeMillis();
+        invalidate();
+    }
+
+    // MARK: - The account, as shelves
+
+    @Override public void onIptv() {
+        main.post(() -> {
+            if (!resumed) return;
+            if (!key().equals(dataKey)) rebuild();
+        });
+    }
+
+    private String key() {
+        Iptv i = Iptv.get(getContext());
+        return tab + "|" + i.live().size() + "|" + i.movies().size() + "|" + i.series().size()
+                + "|" + i.movieCategories().size() + "|" + i.seriesCategories().size()
+                + "|" + Prefs.version;
+    }
+
+    private void rebuild() {
+        dataKey = key();
+        progress.clear();
+        progress.putAll(Prefs.progressAll());
+        String keep = rowIndex < rows.size() ? rows.get(rowIndex).title : null;
+        rows.clear();
+        if (Iptv.configured()) {
+            switch (tab) {
+                case 0: homeRows(); break;
+                case 1: filmRows(); break;
+                case 2: seriesRows(); break;
+                case 3: liveRows(); break;
+                default: appRows(); break;
+            }
         } else {
-            sheet.snap(0);
-            drawer.snap(0);
+            Row row = new Row();
+            row.title = "Applications";
+            row.kind = R_APP;
+            addApps(row);
+            if (!row.items.isEmpty()) rows.add(row);
         }
-        if (pickIndex != 0 && !picks.isEmpty()) {
-            pickIndex = 0;
-            updatePicks();
+        // Keep the shelf the user was on when the data lands (the account is read in the background).
+        int restored = -1;
+        if (keep != null) {
+            for (int i = 0; i < rows.size(); i++) if (rows.get(i).title.equals(keep)) { restored = i; break; }
         }
-        if (tab != 0) selectTab(0);
-        retarget(!animated);
-        motionDirty = true;
+        rowIndex = restored >= 0 ? restored : Math.min(rowIndex, Math.max(0, rows.size() - 1));
+        for (Row row : rows) {
+            if (row.col < 0) row.col = 0;
+            row.col = Math.min(row.col, Math.max(0, row.items.size() - 1));
+            row.focus = new float[row.items.size()];
+            row.win = Math.max(0, Math.min(row.win, Math.max(0, row.items.size() - 1)));
+            row.slide = row.slideTo = row.win * step(row.kind);
+        }
+        layout();
+        invalidate();
     }
 
-    /** The three corner buttons, with their names in the current language. */
-    private void makeLightButtons() {
-        // No corner buttons any more: the app row is the top of the screen and the drawer holds HDMI and settings.
-        lightButtons.clear();
+    private void homeRows() {
+        Iptv iptv = Iptv.get(getContext());
+        Row hero = new Row();
+        hero.title = "À la une";
+        hero.kind = R_HERO;
+        List<Iptv.Item> resumed = new ArrayList<>(Prefs.resume("vod"));
+        resumed.addAll(Prefs.resume("series"));
+        if (!resumed.isEmpty()) hero.items.add(resumeTile(resumed.get(0)));
+        if (hero.items.isEmpty()) {
+            for (Iptv.Item i : iptv.fresh("vod", 30, 40)) { hero.items.add(tile(i, false)); break; }
+        }
+        for (Iptv.Item i : iptv.fresh("series", 60, 40)) {
+            if (hero.items.size() >= 2) break;
+            hero.items.add(tile(i, true));
+        }
+        for (Iptv.Item i : frenchChannels(iptv, 4)) {
+            if (hero.items.size() >= 3) break;
+            hero.items.add(tile(i, false));
+        }
+        if (!hero.items.isEmpty()) rows.add(hero);
+
+        Row resume = new Row();
+        resume.title = "Reprendre la lecture";
+        resume.kind = R_POSTER;
+        for (Iptv.Item i : Prefs.resume("vod")) resume.items.add(resumeTile(i));
+        for (Iptv.Item i : Prefs.resume("series")) resume.items.add(resumeTile(i));
+        if (!resume.items.isEmpty()) rows.add(resume);
+
+        shelf("Nouveautés films", R_POSTER, iptv.fresh("vod", 30, 30), false, 1);
+        shelf("Nouvelles séries", R_POSTER, iptv.fresh("series", 60, 30), true, 2);
+        shelf("Chaînes", R_LOGO, frenchChannels(iptv, 30), false, 3);
+        shelf("Les mieux notés", R_POSTER, iptv.best("vod", 30), false, 1);
+        shelf("Séries", R_POSTER, firstOf(iptv.series(), 30), true, 2);
+
+        Row apps = new Row();
+        apps.title = "Applications";
+        apps.kind = R_APP;
+        apps.seeTab = 4;
+        addApps(apps);
+        if (!apps.items.isEmpty()) rows.add(apps);
+
+        Row inputs = new Row();
+        inputs.title = "Entrées";
+        inputs.kind = R_LOGO;
+        inputs.seeTab = 4;
+        addInputs(inputs);
+        if (!inputs.items.isEmpty()) rows.add(inputs);
     }
 
-    /** With a playlist, the tabs are the playlist's: channels, films, series. */
-
-    /** The four tabs, in French: the account's catalogue is French whatever the TV language. */
-    private static String[] tabs() {
-        return TABS;
+    private void filmRows() {
+        Iptv iptv = Iptv.get(getContext());
+        shelf("Nouveautés", R_POSTER, iptv.fresh("vod", 30, 30), false, -1);
+        shelf("Les mieux notés", R_POSTER, iptv.best("vod", 30), false, -1);
+        List<Iptv.Item> all = iptv.movies();
+        int built = 0;
+        for (Iptv.Category c : iptv.movieCategories()) {
+            if (built >= 12) break;
+            List<Iptv.Item> items = new ArrayList<>();
+            for (Iptv.Item i : all) {
+                if (!c.id.equals(i.group) || i.name.startsWith("─") || i.name.contains("✧")) continue;
+                items.add(i);
+                if (items.size() >= 30) break;
+            }
+            if (items.size() < 4) continue;
+            shelf(clean(c.name), R_POSTER, items, false, -1);
+            built++;
+        }
     }
 
-    @Override public void onData() {
-        updatePalette();
-        checkNight(true);
-        layoutStatus();
-        heroDirty = statusDirty = drawerDirty = true;
-        platter.invalidate();
+    private void seriesRows() {
+        Iptv iptv = Iptv.get(getContext());
+        shelf("Nouvelles séries", R_POSTER, iptv.fresh("series", 60, 30), true, -1);
+        shelf("Les mieux notées", R_POSTER, iptv.best("series", 30), true, -1);
+        List<Iptv.Item> all = iptv.series();
+        int built = 0;
+        for (Iptv.Category c : iptv.seriesCategories()) {
+            if (built >= 12) break;
+            List<Iptv.Item> items = new ArrayList<>();
+            for (Iptv.Item i : all) {
+                if (!c.id.equals(i.group)) continue;
+                items.add(i);
+                if (items.size() >= 30) break;
+            }
+            if (items.size() < 4) continue;
+            shelf(clean(c.name), R_POSTER, items, true, -1);
+            built++;
+        }
     }
 
-    @Override public void onRecs() {
-        updatePicks();
+    private void liveRows() {
+        Iptv iptv = Iptv.get(getContext());
+        shelf("Chaînes françaises", R_LOGO, frenchChannels(iptv, 30), false, -1);
+        List<Iptv.Item> all = iptv.live();
+        int built = 0;
+        for (Iptv.Category c : iptv.liveCategories()) {
+            if (built >= 14) break;
+            if (c.name.toUpperCase(Locale.ROOT).contains("FRANCE")) continue;
+            List<Iptv.Item> items = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            for (Iptv.Item i : all) {
+                if (!c.id.equals(i.group) || i.url.isEmpty()) continue;
+                if (i.name.startsWith("─") || i.name.startsWith("=") || i.name.contains("✧")) continue;
+                if (!seen.add(norm(i.name))) continue;
+                items.add(i);
+                if (items.size() >= 30) break;
+            }
+            if (items.size() < 4) continue;
+            shelf(clean(c.name), R_LOGO, items, false, -1);
+            built++;
+        }
     }
 
-    private void invalidateAll() {
-        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer}) v.invalidate();
+    private void appRows() {
+        Row apps = new Row();
+        apps.title = "Applications";
+        apps.kind = R_APP;
+        addApps(apps);
+        if (!apps.items.isEmpty()) rows.add(apps);
+        Row inputs = new Row();
+        inputs.title = "Entrées";
+        inputs.kind = R_LOGO;
+        addInputs(inputs);
+        if (!inputs.items.isEmpty()) rows.add(inputs);
     }
 
-    // MARK: - Size and layers
-
-    @Override protected void onMeasure(int widthSpec, int heightSpec) {
-        int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
-        float kk = width / 1920f;
-        measure(sky, width, height);
-        measure(heroLayer, width, height);        // full height: the rows now reach past the old 790 px band
-        measure(status, Math.round(1160 * kk), Math.round(240 * kk));
-        // Sized to what they draw (the glass and its shadow; the grown tiles and their shadows): smaller layers are
-        // cheaper for the GPU to composite on every frame of the drawer animation.
-        measure(platter, width, Math.round(300 * kk));
-        measure(tiles, width, Math.round(260 * kk));
-        measure(drawerLayer, width, height);
-        measure(sheetLayer, width, height);
-        measure(toastLayer, Math.round(1000 * kk), Math.round(220 * kk));
-        setMeasuredDimension(width, height);
+    private void shelf(String title, int kind, List<Iptv.Item> items, boolean series, int seeTab) {
+        if (items.isEmpty()) return;
+        Row row = new Row();
+        row.title = title;
+        row.kind = kind;
+        row.seeTab = seeTab;
+        Set<String> seen = new HashSet<>();
+        for (Iptv.Item i : items) {
+            // The panel lists a channel in HD, FHD and backup, and a film twice under two ids.
+            if (!seen.add(norm(pretty(i.name)))) continue;
+            row.items.add(tile(i, series));
+        }
+        if (!row.items.isEmpty()) rows.add(row);
     }
 
-    private static void measure(View v, int width, int height) {
-        v.measure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY));
+    private void addApps(Row row) {
+        for (HomeApps.Item it : HomeApps.shelf(getContext(), false)) row.items.add(appTile(it));
+        for (HomeApps.Item it : HomeApps.others(getContext())) row.items.add(appTile(it));
     }
 
-    @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
-        int width = r - l, height = b - t;
-        float kk = width / 1920f;
-        sky.layout(0, 0, width, height);
-        place(heroLayer, 0, 0);
-        place(status, width - status.getMeasuredWidth(), 0);
-        place(platter, 0, 0);
-        place(tiles, 0, 0);
-        place(drawerLayer, 0, 0);
-        sheetLayer.layout(0, 0, width, height);
-        sheetLayer.setPivotX(width / 2f);
-        sheetLayer.setPivotY(height / 2f);
-        place(toastLayer, (width - toastLayer.getMeasuredWidth()) / 2, 0);
+    private void addInputs(Row row) {
+        for (HomeApps.Item it : HomeApps.allInputs(getContext())) {
+            Tile t = new Tile();
+            t.title = it.label;
+            t.app = it;
+            t.symbol = it.symbol == null || it.symbol.isEmpty() ? "hdmi" : it.symbol;
+            row.items.add(t);
+        }
     }
 
-    private static void place(View v, int x, int y) {
-        v.layout(x, y, x + v.getMeasuredWidth(), y + v.getMeasuredHeight());
+    private static final java.util.regex.Pattern YEAR = java.util.regex.Pattern.compile("\\((\\d{4})\\)\\s*$");
+
+    private Tile tile(Iptv.Item i, boolean series) {
+        Tile t = new Tile();
+        String name = i.name == null ? "" : i.name;
+        java.util.regex.Matcher m = YEAR.matcher(name);
+        if (m.find()) {
+            name = name.substring(0, m.start());
+            t.meta = m.group(1);
+        }
+        t.title = pretty(name);
+        t.image = i.logo == null ? "" : i.logo;
+        if (i.year != null && !i.year.isEmpty()) t.meta = i.year;
+        t.series = series;
+        t.seriesId = i.id == null ? "" : i.id;
+        t.url = t.series ? "" : (i.url == null ? "" : i.url);
+        t.live = t.url.contains("/live/");
+        Float saved = t.live || t.url.isEmpty() ? null : progress.get(t.url);
+        t.progress = saved == null ? 0 : saved;
+        return t;
     }
 
-    @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
-        w = width;
-        h = height;
-        k = w / 1920f;
-        screen.set(0, 0, w, h);
-        scene.setSize(w, h);
-        makePaints();
-        gridLabels = null;
-        clockMinute = -1;
-        updateClock();
-        layoutShelf();
-        layoutStatus();
-        layoutDrawer();
-        layoutLight();
-        hero = null;
-        heroFrom = null;
-        updatePicks();
-        motionDirty = true;
-    }
-
-    private void makePaints() {
-        labelPaint = Ui.text(Ui.medium, 25 * k, 0xC7FFFFFF);
-        labelPaint.setLetterSpacing(0.1f);
-        titlePaint = new TextPaint(Ui.text(Ui.displayMedium, 76 * k, 0xFFFFFFFF));
-        titlePaint.setLetterSpacing(0.005f);
-        metaPaint = Ui.text(Ui.medium, 29 * k, 0xD1FFFFFF);
-        metaPaint.setLetterSpacing(0.014f);
-        clockPaint = Ui.numbers(Ui.thin, 176 * k, 0xFFFFFFFF);
-        clockPaint.setLetterSpacing(-0.01f);
-        for (Paint p : new Paint[] {labelPaint, titlePaint, metaPaint, clockPaint}) p.setShadowLayer(22 * k, 0, 2 * k, 0x59000000);
-        lTitle = Ui.text(Ui.displaySemibold, 76 * k, L_INK);
-        lTitle.setLetterSpacing(0.004f);
-        lTab = Ui.text(Ui.medium, 30 * k, L_DIM);
-        lTabOn = Ui.text(Ui.semibold, 30 * k, L_INK);
-        lCardTitle = Ui.text(Ui.semibold, 31 * k, L_INK);
-        lCardTitle.setLetterSpacing(0.012f);
-        lCardMeta = Ui.text(Ui.medium, 25 * k, L_DIM);
-        lQuote = Ui.numbers(Ui.regular, 21 * k, L_FAINT);
-        lTip = Ui.text(Ui.semibold, 25 * k, L_INK);
-        lTip.setTextAlign(Paint.Align.CENTER);
-        lightGradient = null;
-        buttonPaint = Ui.text(Ui.semibold, 29 * k, INK);
-        capsuleText = Ui.numbers(Ui.medium, 29 * k, 0xF2FFFFFF);
-        tipPaint = Ui.text(Ui.semibold, 25 * k, 0xF2FFFFFF);
-        tipPaint.setTextAlign(Paint.Align.CENTER);
-        tipPaint.setShadowLayer(16 * k, 0, 1 * k, 0x99000000);
-        // Quotes: a subtle detail, smaller and dimmer than the rest.
-        quotePaint = Ui.numbers(Ui.regular, 21 * k, 0xB8FFFFFF);
-        quotePaint.setShadowLayer(14 * k, 0, 1 * k, 0x99000000);
-        staleQuote = Ui.text(Ui.medium, 21 * k, 0x99FFFFFF);
-        staleQuote.setTextAlign(Paint.Align.RIGHT);
-        rowTitle = Ui.text(Ui.semibold, 25 * k, 0xB3FFFFFF);
-        drawerLabel = Ui.text(Ui.medium, 23 * k, 0xEBFFFFFF);
-        drawerLabel.setTextAlign(Paint.Align.CENTER);
-        cardTitle = Ui.text(Ui.semibold, 25 * k, 0xB3FFFFFF);
-        cardText = Ui.text(Ui.medium, 29 * k, 0xF2FFFFFF);
-        cardDim = Ui.numbers(Ui.medium, 23 * k, 0xADFFFFFF);
-        cardDimRight = Ui.text(Ui.medium, 21 * k, 0x99FFFFFF);
-        cardDimRight.setTextAlign(Paint.Align.RIGHT);
-        bigTemp = Ui.numbers(Ui.light, 100 * k, 0xFFFFFFFF);
-        hourPaint = Ui.numbers(Ui.medium, 22 * k, 0xADFFFFFF);
-        hourPaint.setTextAlign(Paint.Align.CENTER);
-        hourTemp = Ui.numbers(Ui.medium, 26 * k, 0xF2FFFFFF);
-        hourTemp.setTextAlign(Paint.Align.CENTER);
-        pricePaint = Ui.numbers(Ui.medium, 26 * k, 0xF2FFFFFF);
-        pricePaint.setTextAlign(Paint.Align.RIGHT);
-        changePaint = Ui.numbers(Ui.semibold, 21 * k, 0xFFFFFFFF);
-        changePaint.setTextAlign(Paint.Align.CENTER);
-        sheetTitle = Ui.text(Ui.displaySemibold, 40 * k, 0xFFFFFFFF);
-        sheetTitle.setTextAlign(Paint.Align.CENTER);
-        gridLabel = new TextPaint(Ui.text(Ui.medium, 24 * k, 0x99FFFFFF));
-        gridLabel.setTextAlign(Paint.Align.CENTER);
-        toastPaint = new TextPaint(Ui.text(Ui.medium, 26 * k, 0xF2FFFFFF));
-        shadow.setMaskFilter(new BlurMaskFilter(26 * k, BlurMaskFilter.Blur.NORMAL));
-        shadowSoft.setMaskFilter(new BlurMaskFilter(12 * k, BlurMaskFilter.Blur.NORMAL));
-        shadowDeep.setMaskFilter(new BlurMaskFilter(30 * k, BlurMaskFilter.Blur.NORMAL));
-        halo.setMaskFilter(new BlurMaskFilter(22 * k, BlurMaskFilter.Blur.NORMAL));
-        border.setStyle(Paint.Style.STROKE);
-        border.setStrokeWidth(2 * k);
-        rim.setStyle(Paint.Style.STROKE);
-        rim.setStrokeWidth(2.5f * k);
-    }
-
-    // MARK: - Frames: 60 per second while something moves; nothing is redrawn when still
-
-    @Override public void doFrame(long frameTimeNanos) {
-        if (!running) return;
-        float dt = lastNanos == 0 ? 1 / 60f : Math.min(0.05f, (frameTimeNanos - lastNanos) / 1e9f);
-        lastNanos = frameTimeNanos;
-        long up = SystemClock.uptimeMillis();
-
-        boolean tilesMoving = step(tileFocus, dt);
-        boolean statusMoving = step(statusFocus, dt);
-        boolean heroMoving = heroFocus.step(dt);
-        boolean topMoving = step(topFocus, dt), cardsMoving = step(cardFocus, dt);
-        if (topMoving) status.invalidate();
-        heroMoving |= topMoving | cardsMoving;
-        boolean drawerItemsMoving = step(drawerFocus, dt);
-        boolean gridMoving = step(gridFocus, dt) | scroll.step(dt);
-        boolean drawerMoving = drawer.step(dt);
-        boolean sheetMoving = sheet.step(dt);
-        boolean toastFading = tickToast(up);
-        boolean heroFading = tickHeroFade(up);
-        boolean bgFading = tickBackgroundFade(up);
-        boolean nightMoving = tickNight(up);
-
-        if (drawerMoving || sheetMoving || motionDirty) updateMotion();
-        // Opening and closing the drawer only moves the cached layers: redrawing the glass on every frame made the TV
-        // drop frames (measured: ~50 ms of GPU per frame). The app tiles have no glass; the top buttons fade out as
-        // they rise; the drawer is drawn resting in place; the glass shelf is redrawn once the drawer stops, so the
-        // glass shows the background where it ended up.
-        if (tilesMoving || tilesDirty) tiles.invalidate();
-        if (statusMoving || statusDirty || bgFading) status.invalidate();
-        if (heroMoving || heroDirty || heroFading) heroLayer.invalidate();
-        if (drawerItemsMoving || drawerDirty || bgFading) drawerLayer.invalidate();
-        if (gridMoving || gridDirty) sheetLayer.invalidate();
-        if (drawerMoving || bgFading) sky.invalidate();
-        if (bgFading || (drawerWasMoving && !drawerMoving)) platter.invalidate();
-        drawerWasMoving = drawerMoving;
-        tilesDirty = statusDirty = heroDirty = drawerDirty = gridDirty = motionDirty = false;
-        if (updateClock()) {
-            layoutStatus();
-            status.invalidate();
-            if (hero != null && hero.clock) {
-                refreshHero(false);
-                heroLayer.invalidate();
+    /** A saved position has the title and the stream but no artwork: take the poster from the catalogue. */
+    private Tile resumeTile(Iptv.Item i) {
+        Tile t = tile(i, false);
+        if (!t.image.isEmpty() || t.title.isEmpty()) return t;
+        String n = norm(t.title);
+        Iptv ip = Iptv.get(getContext());
+        for (Iptv.Item m : ip.movies()) {
+            if (n.equals(norm(pretty(m.name)))) { t.image = m.logo == null ? "" : m.logo; t.meta = m.year == null ? "" : m.year; break; }
+        }
+        if (t.image.isEmpty()) {
+            for (Iptv.Item m : ip.series()) {
+                if (n.equals(norm(pretty(m.name)))) { t.image = m.logo == null ? "" : m.logo; t.meta = m.year == null ? "" : m.year; break; }
             }
         }
+        return t;
+    }
 
-        // Busy: something is moving, or the sheet or the drawer is open.
-        boolean busy = tilesMoving || statusMoving || heroMoving || drawerItemsMoving || gridMoving || drawerMoving
-                || sheetMoving || toastFading || heroFading || bgFading || nightMoving || sheetOpen || sheet.value > 0.001f
-                || drawerOpen || drawer.value > 0.001f;
+    private static Tile appTile(HomeApps.Item it) {
+        Tile t = new Tile();
+        t.title = it.label;
+        t.app = it;
+        t.art = it.tile != null ? it.tile : it.logo;
+        return t;
+    }
+
+    // MARK: - Layout
+
+    @Override protected void onSizeChanged(int width, int height, int oldw, int oldh) {
+        w = width;
+        h = height;
+        k = Math.min(width / 1920f, height / 1080f);
+        layout();
+        offset = offsetTo;
+        for (Row row : rows) row.slide = row.slideTo;
+    }
+
+    private float tw(int kind) {
+        return (kind == R_HERO ? HERO_W : kind == R_POSTER ? POSTER_W : kind == R_APP ? APP_W : LOGO_W) * k;
+    }
+
+    private float th(int kind) {
+        return (kind == R_HERO ? HERO_H : kind == R_POSTER ? POSTER_H : kind == R_APP ? APP_H : LOGO_H) * k;
+    }
+
+    private float gap(int kind) {
+        return (kind == R_HERO ? HERO_GAP : kind == R_POSTER ? POSTER_GAP : kind == R_APP ? APP_GAP : LOGO_GAP) * k;
+    }
+
+    private float step(int kind) {
+        return tw(kind) + gap(kind);
+    }
+
+    private int cols(int kind) {
+        float usable = w - 2 * MARGIN * k;
+        return Math.max(1, (int) ((usable + gap(kind)) / step(kind)));
+    }
+
+    private float capH(int kind) {
+        return (kind == R_HERO ? 22 : kind == R_POSTER ? CAP_H : 34) * k;
+    }
+
+    private void layout() {
+        float y = 0;
+        for (Row row : rows) {
+            row.y = y;
+            row.h = (HEAD_H + th(row.kind) + capH(row.kind)) * k;
+            y += row.h + ROW_GAP * k;
+            if (row.col < 0) row.col = 0;
+            row.col = Math.min(row.col, Math.max(0, row.items.size() - 1));
+            int n = cols(row.kind);
+            if (row.win > row.col) row.win = row.col;
+            if (row.col >= row.win + n) row.win = row.col - n + 1;
+            row.win = Math.max(0, Math.min(row.win, Math.max(0, row.items.size() - n)));
+            row.slideTo = row.win * step(row.kind);
+            if (row.focus.length != row.items.size()) {
+                float[] a = new float[row.items.size()];
+                for (int i = 0; i < Math.min(a.length, row.focus.length); i++) a[i] = row.focus[i];
+                row.focus = a;
+            }
+        }
+        layoutBar();
+        clampOffset();
+    }
+
+    private void layoutBar() {
+        float x = MARGIN * k;
+        tabInk.setTextSize(26 * k);
+        for (int i = 0; i < TAB_COUNT; i++) {
+            float wdt = tabInk.measureText(TABS[i]) + 34 * k;
+            barRects[i].set(x, 8 * k, x + wdt, BAR_H * k - 8 * k);
+            x += wdt + 6 * k;
+        }
+        float g = 38 * k;
+        barRects[GEAR].set(w - MARGIN * k - g, (BAR_H * k - g) / 2, w - MARGIN * k, (BAR_H * k + g) / 2);
+    }
+
+    private float contentH() {
+        if (rows.isEmpty()) return 0;
+        Row last = rows.get(rows.size() - 1);
+        return last.y + last.h;
+    }
+
+    private float maxOffset() {
+        return Math.max(0, contentH() - (h - BAR_H * k - 24 * k));
+    }
+
+    private void clampOffset() {
+        offsetTo = Math.max(0, Math.min(maxOffset(), offsetTo));
+    }
+
+    /** Scrolls so the focused shelf is entirely on screen. */
+    private void reveal() {
+        if (rows.isEmpty()) return;
+        // The focused shelf sits right under the bar, so the shelf below always peeks at the bottom: no half row
+        // cut at the top without its title.
+        Row row = rows.get(rowIndex);
+        offsetTo = row.y - 4 * k;
+        clampOffset();
+        requestFrame();
+    }
+
+    // MARK: - Motion
+
+    private void requestFrame() {
+        if (framePosted) return;
+        framePosted = true;
         Choreographer.getInstance().postFrameCallback(this);
     }
 
-    private static boolean step(Spring[] springs, float dt) {
+    @Override public void doFrame(long nanos) {
+        framePosted = false;
+        long now = nanos / 1_000_000L;
+        float dt = lastFrame == 0 ? 0.016f : Math.min(0.05f, (now - lastFrame) / 1000f);
+        lastFrame = now;
         boolean moving = false;
-        for (Spring s : springs) moving |= s.step(dt);
-        return moving;
-    }
-
-    /** Drawer and sheet: the layers' positions and opacity (without redrawing their content). */
-    private void updateMotion() {
-        float d = drawer.value, dc = Ui.clamp(d), s = Ui.clamp(sheet.value);
-        float home = 1 - s, top = home * (1 - smoothstep(0, 0.32f, dc));
-        float shift = SHIFT * k;
-        show(heroLayer, top, 0);
-        show(status, top, 0);
-        show(platter, home, 0);
-        show(tiles, home, 0);
-        float da = home * smoothstep(0.1f, 0.6f, dc);
-        drawerLayer.setTranslationY((1 - d) * -shift);
-        drawerLayer.setAlpha(da);
-        drawerLayer.setVisibility(da > 0.002f ? VISIBLE : INVISIBLE);
-        sheetLayer.setVisibility(s > 0.001f || sheetOpen ? VISIBLE : INVISIBLE);
-        sheetLayer.setAlpha(s);
-        float scale = 1.04f - 0.04f * s;
-        sheetLayer.setScaleX(scale);
-        sheetLayer.setScaleY(scale);
-    }
-
-    private static void show(View v, float alpha, float translationY) {
-        v.setAlpha(alpha);
-        v.setTranslationY(translationY);
-        v.setVisibility(alpha > 0.002f ? VISIBLE : INVISIBLE);
-    }
-
-    private boolean updateClock() {
-        long now = System.currentTimeMillis();
-        long minute = now / 60_000;
-        if (minute == clockMinute || clockPaint == null) return false;
-        clockMinute = minute;
-        clockText = Ui.clock(now);
-        return true;
-    }
-
-    private void updatePalette() {
-        HomeData.Weather wx = data.weather;
-        Shaders.sky(scene.palette, System.currentTimeMillis(), wx.sunrise, wx.sunset);
-        scene.applyPalette();
-    }
-
-    // MARK: - Recommendations: hero and background
-
-    private Recs.Pick currentPick() {
-        return picks.isEmpty() ? null : picks.get(Math.min(pickIndex, picks.size() - 1));
-    }
-
-    /** This hour's picks: the cards and the background image (called when Recs notifies and every 15 s). */
-    private void updatePicks() {
-        if (labelPaint == null) return;
-        updateCards();
-    }
-
-    private static boolean samePicks(List<Recs.Pick> a, List<Recs.Pick> b) {
-        if (a.size() != b.size()) return false;
-        for (int i = 0; i < a.size(); i++) {
-            Recs.Pick x = a.get(i), y = b.get(i);
-            if (!String.valueOf(x.title).equals(String.valueOf(y.title))
-                    || !String.valueOf(x.url).equals(String.valueOf(y.url))) return false;
-        }
-        return true;
-    }
-
-    /**
-     * Rebuilds the hero. With `animate`, a different title slides in while the previous one slides out; details that
-     * arrive later (genre, runtime) just appear.
-     */
-    private void refreshHero(boolean animate) {
-        Hero next = makeHero();
-        if (next.sameText(hero) && hero.dots == next.dots && hero.dot == next.dot && hero.button == next.button) return;
-        boolean other = hero != null && (hero.clock != next.clock || !hero.title.equals(next.title));
-        if (animate && other) {
-            heroFrom = hero;
-            heroFadeAt = SystemClock.uptimeMillis();
-        }
-        boolean layoutChanged = hero == null || hero.clock != next.clock;
-        hero = next;
-        heroDirty = true;
-        if (layoutChanged) layoutStatus();
-    }
-
-    private Hero makeHero() {
-        Hero h = new Hero();
-        Recs.Pick p = currentPick();
-        if (p == null) {
-            h.clock = true;
-            h.label = Ui.date(System.currentTimeMillis()).toUpperCase(Ui.locale());
-            return h;
-        }
-        h.label = Recs.periodLabel();
-        h.title = p.title == null ? "" : p.title;
-        h.meta = p.meta == null ? "" : p.meta;
-        h.button = p.pkg != null || p.url != null;
-        h.dots = picks.size();
-        h.dot = pickIndex;
-        h.titleLayout = StaticLayout.Builder.obtain(h.title, 0, h.title.length(), titlePaint, Math.max(1, Math.round(HERO_TITLE_W * k)))
-                .setMaxLines(2)
-                .setEllipsize(TextUtils.TruncateAt.END)
-                .setLineSpacing(0, 0.94f)
-                .setIncludePad(false)
-                .build();
-        return h;
-    }
-
-    /** ←/→ on the hero: the next (or previous) of this hour's picks. */
-    private boolean browse(int dir) {
-        if (picks.size() < 2) return false;
-        int next = pickIndex;
-        for (int i = 0; i < picks.size(); i++) {
-            next = (next + dir + picks.size()) % picks.size();
-            if (zone != Z_HERO || picks.get(next).pkg != null) break;
-        }
-        if (next == pickIndex) return false;
-        pickIndex = next;
-        heroSlide = dir;
-        refreshHero(true);
-        Backdrop b = recs.backdrop(currentPick());
-        if (b != null) showBackdrop(b);
-        spoken.focusMoved();
-        return true;
-    }
-
-    /** Swaps the background with a cross-fade (from one image to another, from the gradient to an image, or back). */
-    private void showBackdrop(Backdrop b) {
-        if (b == bgTo) return;
-        long up = SystemClock.uptimeMillis();
-        // In the middle of another swap, start from whichever is more visible.
-        if (bgFadeAt == 0 || fadeEase(bgFadeAt, up) >= 0.5f) bgFrom = bgTo;
-        bgTo = b;
-        bgFadeAt = up;
-        nightPair = false;
-        if (b == null || glassOf(b) == null) return;
-        if (bgFrom == null || glassOf(bgFrom) == null) {
-            scene.setFrost(frostOf(b));
-            scene.setGlassImage(glassOf(b));
+        if (Math.abs(offsetTo - offset) > 0.35f) {
+            offset += (offsetTo - offset) * Math.min(1f, dt * 13f);
+            moving = true;
         } else {
-            scene.setGlassImages(glassOf(bgFrom), glassOf(b));
+            offset = offsetTo;
         }
-    }
-
-    /** What the glass shows: the photo lightened (by day), darkened (at night) or blended in between. */
-    private int[] glassOf(Backdrop b) {
-        if (b.nightGlass == null || night <= 0.001f) return b.lightGlass;
-        if (night >= 0.999f) return b.nightGlass;
-        // During the transition, the blend (only for the current background; a photo fading in uses the nearer side).
-        if (b != bgTo) return night < 0.5f ? b.lightGlass : b.nightGlass;
-        for (int i = 0; i < glassNight.length; i++) glassNight[i] = mix(b.lightGlass[i], b.nightGlass[i], night);
-        return glassNight;
-    }
-
-    /** No photo: the glass reads the background's own gray (not Scene's default aurora, which isn't on screen). */
-    private void neutralGlass() {
-        int color = blend(0xFFEBEBF0, 0xFF141416, night);
-        java.util.Arrays.fill(neutralFrostPx, color);
-        java.util.Arrays.fill(neutralGlassPx, color);
-        scene.setFrost(neutralFrostPx);
-        scene.setGlassImage(neutralGlassPx);
-        nightPair = false;
-    }
-
-    /** What the frosted glass shows (drawer, toasts): the blurred photo, darkened at night. */
-    private int[] frostOf(Backdrop b) {
-        if (b.nightFrost == null || night <= 0.001f) return b.frost;
-        if (night >= 0.999f) return b.nightFrost;
-        if (b != bgTo) return night < 0.5f ? b.frost : b.nightFrost;
-        for (int i = 0; i < frostNight.length; i++) frostNight[i] = mix(b.frost[i], b.nightFrost[i], night);
-        return frostNight;
-    }
-
-    // MARK: - Night look
-
-    /** Day or night right now (from the sun at your location); `animate`: with the transition. */
-    private void checkNight(boolean animate) {
-        boolean want = data.isNight(System.currentTimeMillis());
-        if (want == nightTarget) return;
-        nightTarget = want;
-        if (animate && running) {
-            nightFrom = night;
-            nightAt = SystemClock.uptimeMillis();
-        } else {
-            night = want ? 1 : 0;
-            nightAt = 0;
-            nightChanged();
-        }
-    }
-
-    /** Advances the day ⇄ night transition; true while it runs. */
-    private boolean tickNight(long up) {
-        if (nightAt == 0) return false;
-        float t = Ui.clamp((up - nightAt) / NIGHT_MS), to = nightTarget ? 1 : 0;
-        night = nightFrom + (to - nightFrom) * t * t * (3 - 2 * t);
-        if (t >= 1) {
-            night = to;
-            nightAt = 0;
-        }
-        nightChanged();
-        return true;
-    }
-
-    /** Redraws for the current night value (the glass now reads the lightened, blended or darkened photo). */
-    private void nightChanged() {
-        if (bgFadeAt == 0 && bgTo != null && bgTo.lightGlass != null) {
-            scene.setFrost(frostOf(bgTo));
-            if (nightAt != 0 && bgTo.nightGlass != null) {
-                if (!nightPair) {
-                    scene.setGlassImages(bgTo.lightGlass, bgTo.nightGlass);
-                    nightPair = true;
+        for (int i = 0; i < rows.size(); i++) {
+            Row row = rows.get(i);
+            if (Math.abs(row.slideTo - row.slide) > 0.35f) {
+                row.slide += (row.slideTo - row.slide) * Math.min(1f, dt * 16f);
+                moving = true;
+            } else {
+                row.slide = row.slideTo;
+            }
+            if (row.focus.length != row.items.size()) continue;
+            for (int j = 0; j < row.items.size(); j++) {
+                float target = i == rowIndex && zone == Z_ROW && j == row.col ? 1f : 0f;
+                float f = row.focus[j];
+                if (Math.abs(target - f) < 0.003f) {
+                    row.focus[j] = target;
+                    continue;
                 }
-                scene.setGlassMix(night);
-            } else {
-                scene.setGlassImage(glassOf(bgTo));
-                nightPair = false;
-            }
-        } else if (bgFadeAt == 0 && bgTo == null) {
-            neutralGlass();
-        }
-        heroDirty = statusDirty = tilesDirty = drawerDirty = true;
-        sky.invalidate();
-        platter.invalidate();
-    }
-
-    /** How dark it is: 0 = day, 1 = night (in between during the transition). */
-    private float dark() {
-        return "light".equals(Prefs.theme()) ? 0 : 1;
-    }
-
-    /** The day color or the night color, depending on the night value (blended during the transition). */
-    private int tone(int onLight, int onDark) {
-        return blend(onLight, onDark, dark());
-    }
-
-    private float tone(float onLight, float onDark) {
-        return onLight + (onDark - onLight) * dark();
-    }
-
-    /** Text colors for the current night value (dark by day, white at night). */
-    private void applyTone() {
-        lTitle.setColor(tone(L_INK, WHITE));
-        lTab.setColor(tone(L_DIM, 0xFF8E8E93));
-        lTabOn.setColor(tone(L_INK, WHITE));
-        lCardTitle.setColor(tone(L_INK, WHITE));
-        lCardMeta.setColor(tone(L_DIM, 0xFF98989D));
-        lQuote.setColor(tone(L_FAINT, 0xB8FFFFFF));
-        lTip.setColor(tone(L_INK, WHITE));
-        staleQuote.setColor(tone(L_FAINT, 0x99FFFFFF));
-    }
-
-    private boolean tickBackgroundFade(long up) {
-        if (bgFadeAt == 0) return false;
-        float e = fadeEase(bgFadeAt, up);
-        if (bgTo != null && bgFrom != null && glassOf(bgFrom) != null && glassOf(bgTo) != null) {
-            int[] from = frostOf(bgFrom), to = frostOf(bgTo);
-            for (int i = 0; i < frostMix.length; i++) frostMix[i] = mix(from[i], to[i], e);
-            scene.setFrost(frostMix);
-            scene.setGlassMix(e);
-        }
-        if (e >= 1) {
-            bgFadeAt = 0;
-            bgFrom = null;
-            if (bgTo == null) {
-                neutralGlass();
-            } else {
-                scene.setFrost(frostOf(bgTo));
-                if (glassOf(bgTo) != null) scene.setGlassImage(glassOf(bgTo));
+                row.focus[j] = f + (target - f) * Math.min(1f, dt * 15f);
+                moving = true;
             }
         }
-        return true;
+        invalidate();
+        if (moving) requestFrame();
     }
 
-    private boolean tickHeroFade(long up) {
-        if (heroFadeAt == 0) return false;
-        if (fadeEase(heroFadeAt, up) >= 1) {
-            heroFadeAt = 0;
-            heroFrom = null;
-        }
-        return true;
-    }
+    // MARK: - Drawing
 
-    private float fadeEase(long start, long up) {
-        return fadeEase(start, up, FADE_MS);
-    }
-
-    private static float fadeEase(long start, long up, float duration) {
-        float t = Ui.clamp((up - start) / duration);
-        return t * t * (3 - 2 * t);
-    }
-
-    private static int mix(int a, int b, float f) {
-        int r = Math.round(((a >> 16) & 255) * (1 - f) + ((b >> 16) & 255) * f);
-        int g = Math.round(((a >> 8) & 255) * (1 - f) + ((b >> 8) & 255) * f);
-        int bl = Math.round((a & 255) * (1 - f) + (b & 255) * f);
-        return 0xFF000000 | (r << 16) | (g << 8) | bl;
-    }
-
-    // MARK: - Background
-
-    private void drawSky(Canvas c) {
-        drawLightSky(c);
-    }
-
-    /** Blends a color on top (the drawer's veil) as part of drawing the image, without another layer. */
-    private static android.graphics.ColorFilter veil(float amount, int color) {
-        if (amount <= 0.002f) return null;
-        float keep = 1 - amount;
-        return new android.graphics.ColorMatrixColorFilter(new float[] {
-            keep, 0, 0, 0, ((color >> 16) & 255) * amount,
-            0, keep, 0, 0, ((color >> 8) & 255) * amount,
-            0, 0, keep, 0, (color & 255) * amount,
-            0, 0, 0, 1, 0});
-    }
-
-    private void drawImage(Canvas c, Bitmap image, float alpha) {
-        if (image == null || alpha <= 0.004f) return;
-        imagePaint.setAlpha(Math.round(255 * Math.min(1, alpha)));
-        c.drawBitmap(image, null, screen, imagePaint);
-    }
-
-    // MARK: - Hero
-
-    private static void text(Canvas c, String s, float x, float y, Paint p, int color, float alpha) {
-        if (s == null || s.isEmpty()) return;
-        p.setColor(Ui.alpha(color, alpha));
-        c.drawText(s, x, y, p);
-    }
-
-    // MARK: - Corner capsule: time and weather (when the hero shows a recommendation) and icon-only buttons
-
-    /** Live TV, the inputs with a device on, All Apps and Settings. */
-    private static List<HomeApps.Item> statusList(Context c) {
-        List<HomeApps.Item> list = new ArrayList<>();
-        list.addAll(HomeApps.shortcuts(c));
-        list.add(HomeApps.settings());
-        return list;
-    }
-
-    private void setStatusItems(List<HomeApps.Item> list) {
-        boolean same = list.size() == statusItems.size();
-        for (int i = 0; same && i < list.size(); i++) same = list.get(i).key.equals(statusItems.get(i).key);
-        String focusedKey = statusIndex < statusItems.size() ? statusItems.get(statusIndex).key : null;
-        statusItems = list;
-        if (!same || statusFocus.length != list.size()) {
-            statusFocus = new Spring[list.size()];
-            statusRects = new RectF[list.size()];
-            int index = Math.min(statusIndex, Math.max(0, list.size() - 1));
-            for (int i = 0; i < statusFocus.length; i++) {
-                statusFocus[i] = new Spring(0.26f, 0.85f, 0);
-                statusRects[i] = new RectF();
-                if (list.get(i).key.equals(focusedKey)) index = i;   // a device came on: keep focus on the same button
-            }
-            statusIndex = index;
-            if (zone == Z_STATUS && list.isEmpty()) zone = Z_SHELF;
-            aim(statusFocus, zone == Z_STATUS ? statusIndex : -1, true);   // only the capsule's springs
-            statusDirty = true;
-        }
-        layoutStatus();
-    }
-
-    private boolean showInfo() {
-        return hero != null && !hero.clock;
-    }
-
-    private void layoutStatus() {
-        if (capsuleText == null) return;
-        int n = statusItems.size();
-        float b = BUTTON * k, gap = 4 * k, pad = 6 * k;
-        float info = 0;
-        if (showInfo()) {
-            info = 26 * k + capsuleText.measureText(clockText);
-            HomeData.Weather wx = data.weather;
-            if (!Double.isNaN(wx.temp) && Prefs.weather()) {
-                info += 22 * k + Symbols.width(getContext(), Symbols.weather(wx.code, wx.isDay), 24 * k) + 8 * k
-                        + capsuleText.measureText(HomeData.degrees(wx.temp));
-            }
-            info += 22 * k;
-        }
-        capsuleInfoW = info;
-        float buttons = n * b + Math.max(0, n - 1) * gap;
-        float right = CONTENT_R * k, top = CAPSULE_TOP * k;
-        float left = right - pad - buttons - (info > 0 ? info + 12 * k : pad);
-        capsuleRect.set(left, top, right, top + CAPSULE_H * k);
-        float x = right - pad - buttons, cy = capsuleRect.centerY();
-        for (int i = 0; i < n; i++) {
-            statusRects[i].set(x, cy - b / 2, x + b, cy + b / 2);
-            x += b + gap;
-        }
-        statusDirty = true;
-    }
-
-    // MARK: - Quotes and shelf
-
-    private void setShelf(List<HomeApps.Item> list) {
-        boolean same = list.size() == shelf.size();
-        for (int i = 0; same && i < list.size(); i++) same = list.get(i).key.equals(shelf.get(i).key);
-        shelf = list;
-        if (!same || tileFocus.length != list.size()) {
-            tileFocus = new Spring[list.size()];
-            tileRects = new RectF[list.size()];
-            for (int i = 0; i < tileFocus.length; i++) {
-                tileFocus[i] = new Spring(0.34f, 0.74f, 0);
-                tileRects[i] = new RectF();
-            }
-            shelfIndex = Math.min(shelfIndex, Math.max(0, list.size() - 1));
-            retarget(true);
-            layoutShelf();
-        }
-        tilesDirty = true;
-        platter.invalidate();
-    }
-
-    private void layoutShelf() {
-        int n = shelf.size();
-        float pad = SHELF_PAD * k, gap = TILE_GAP * k, th = L_TILE_H * k;
-        float full = (CONTENT_R - MARGIN) * k;
-        float tw = Math.min(TILE_MAX_W * k, (full - Math.max(0, n - 1) * gap) / Math.max(1, n));
-        float width = n * tw + Math.max(0, n - 1) * gap, left = (w - width) / 2f;
-        float top = L_PLATTER_TOP * k;
-        platterRect.set(left - pad, top, left + width + pad, top + th + 2 * pad);
-        float x = left, y = top + pad;
-        for (int i = 0; i < n; i++) {
-            tileRects[i].set(x, y, x + tw, y + th);
-            x += tw + gap;
-        }
-        crispLogos.clear();
-    }
-
-    /** Shelf layer: the glass bar and its shadow (it only changes with the background). */
-    private void drawPlatter(Canvas c) {
-        if (shelf.isEmpty()) return;
-        float radius = (TILE_RADIUS + SHELF_PAD) * k;
-        tmp.set(platterRect);
-        tmp.offset(0, 18 * k);
-        shadow.setColor(tone(0x1F000000, 0x52000000));
-        c.drawRoundRect(tmp, radius, radius, shadow);
-        // White glass by day; smoked glass at night.
-        scene.liquid(c, platterRect, radius, tone(0xFFFFFFFF, SMOKE), tone(0.42f, 0.12f), tone(0.03f, 0.08f),
-                tone(30, 34) * k, tone(22, 28) * k, tone(0.65f, 0.95f), 1);
-    }
-
-    /** Coin logo + price in the configured currency, in a row at the right end of the tab bar. */
-    private void drawQuotes(Canvas c) {
-        float right = platterRect.isEmpty() ? CONTENT_R * k : platterRect.right - SHELF_PAD * k;
-        applyTone();
-        Paint text = lQuote;
-        // The corner buttons' names appear in this row: the quotes fade out while one of them has focus.
-        float fade = 1;
-        for (int i = TAB_COUNT; i < topFocus.length; i++) fade = Math.min(fade, 1 - Ui.clamp(topFocus[i].value));
-        if (fade <= 0.01f) return;
-        int textColor = text.getColor();
-        text.setColor(Ui.alpha(textColor, fade));
-        // On the tab row, at the right.
-        float base = (L_TABBAR_TOP + L_TABBAR_H / 2) * k + Ui.halfCap(text);
-        float cap = Ui.cap(text), gap = 6 * k, spacing = 24 * k;
-        int n = HomeData.coinCount();
-        if (n == 0) { text.setColor(textColor); return; }
-        int[] coins = HomeData.active();
-        String[] values = new String[n];
-        float[] glyphs = new float[n];
-        float total = spacing * (n - 1);
-        for (int i = 0; i < n; i++) {
-            values[i] = HomeData.compact(data.prices[coins[i]]);
-            glyphs[i] = Glyphs.width(getContext(), HomeData.COINS[coins[i]], cap);
-            total += glyphs[i] + gap + text.measureText(values[i]);
-        }
-        float x = right - total;
-        for (int i = 0; i < n; i++) {
-            Glyphs.coin(getContext(), c, HomeData.COINS[coins[i]], x + glyphs[i] / 2, base - cap / 2, cap,
-                    Ui.alpha(tone(0xB38E8E93, 0x8CFFFFFF), fade));
-            x += glyphs[i] + gap;
-            c.drawText(values[i], x, base, text);
-            x += text.measureText(values[i]) + spacing;
-        }
-        text.setColor(textColor);
-        String stale = HomeData.staleness(data.pricesAt, 5 * 60_000L);
-        if (!stale.isEmpty()) c.drawText(stale, right - total - 24 * k, base, staleQuote);
-    }
-
-    private void drawTiles(Canvas c) {
-        // The focused one last: it grows over its neighbors without being covered by them.
-        int top = -1;
-        float most = 0.02f;
-        for (int i = 0; i < shelf.size(); i++) {
-            if (tileFocus[i].value > most) {
-                most = tileFocus[i].value;
-                top = i;
-            }
-        }
-        for (int pass = 0; pass < 2; pass++) {
-            for (int i = 0; i < shelf.size(); i++) {
-                if ((pass == 0) == (i == top)) continue;
-                drawShelfTile(c, i);
-            }
-        }
-    }
-
-    /**
-     * App icon like the ones in the tvOS 27 Dock: the brand color edge to edge (a soft gradient) with the logo.
-     * Focused: it grows 20% from the center, with a deep shadow (it "rises" toward the viewer) and a subtle glow at the
-     * top. No border and no reflection, as Apple does it.
-     */
-    private void drawShelfTile(Canvas c, int i) {
-        HomeApps.Item it = shelf.get(i);
-        float f = tileFocus[i].value, fc = Ui.clamp(f), s = 1 + FOCUS_GROW * f;
-        RectF base = tileRects[i];
-        float bw = base.width(), bh = base.height(), r0 = TILE_RADIUS * k;
-        float cx = base.centerX(), cy = base.centerY();
-        cell.set(cx - bw * s / 2, cy - bh * s / 2, cx + bw * s / 2, cy + bh * s / 2);
-        float r = r0 * s;
-        // Shadow at the resting icon size, enlarged by the transform (so the blur stays cached): short at rest, deep
-        // and lower when focused.
+    @Override protected void onDraw(Canvas c) {
+        float barH = BAR_H * k;
+        drawBackdrop(c);
         c.save();
-        c.translate(cx, cy);
-        c.scale(s, s);
-        tmp.set(-bw / 2, -bh / 2, bw / 2, bh / 2);
-        tmp.offset(0, (4 + 14 * f) * k);
-        shadowDeep.setColor(Ui.alpha(0xFF000000, tone(0.14f, 0.3f) + tone(0.18f, 0.3f) * fc));
-        c.drawRoundRect(tmp, r0, r0, shadowDeep);
+        c.clipRect(0, barH, w, h);
+        float top = barH + 16 * k - offset;
+        if (rows.isEmpty()) {
+            empty.setTextSize(26 * k);
+            c.drawText("Aucun compte IPTV : renseignez-le dans les réglages.", MARGIN * k, top + 60 * k, empty);
+        }
+        for (int i = 0; i < rows.size(); i++) {
+            Row row = rows.get(i);
+            float y = top + row.y;
+            if (y > h || y + row.h < barH) continue;
+            drawRow(c, row, i, y);
+        }
         c.restore();
-        int[] style = TILE_STYLE.get(it.key);
-        if (it.logo != null && style != null) {
-            tileFill.setShader(new LinearGradient(0, cell.top, 0, cell.bottom, style[0], style[1], Shader.TileMode.CLAMP));
-            c.drawRoundRect(cell, r, r, tileFill);
-            tileFill.setShader(null);
-            if (fc > 0.01f) {
-                tileFill.setShader(new LinearGradient(0, cell.top, 0, cell.top + cell.height() * 0.5f,
-                        Ui.alpha(0xFFFFFFFF, 0.08f * fc), 0x00FFFFFF, Shader.TileMode.CLAMP));
-                c.drawRoundRect(cell, r, r, tileFill);
-                tileFill.setShader(null);
-            }
-            drawLogo(c, it, cell, s, style[2]);
-        } else if (it.logo != null) {
-            tileFill.setShader(null);
-            tileFill.setColor(0xFF161618);
-            c.drawRoundRect(cell, r, r, tileFill);
-            drawLogo(c, it, cell, s, 0);
-        } else {
-            clip.reset();
-            clip.addRoundRect(cell, r, r, Path.Direction.CW);
-            c.save();
-            c.clipPath(clip);
-            if (it.tile != null) c.drawBitmap(it.tile, null, cell, bitmapPaint);
-            c.restore();
-        }
+        drawBar(c);
+        drawToast(c);
     }
 
-    /**
-     * Logo at its "optical" size (all with the same amount of ink, plus each one's own adjustment, never past 80% × 62%
-     * of the tile), centered and already filtered down to the focused tile size: when focused it is drawn pixel for
-     * pixel, without resampling.
-     */
-    private void drawLogo(Canvas c, HomeApps.Item it, RectF box, float s, int mode) {
-        Bitmap logo = crispLogo(it, mode == 2 && it.logoDark != null);
-        if (logo == null) return;
-        float scale = s / (1 + FOCUS_GROW);
-        float dw = logo.getWidth() * scale, dh = logo.getHeight() * scale;
-        float left = box.centerX() - dw / 2, top = box.centerY() - dh / 2;
-        if (scale > 0.998f) {
-            left = Math.round(left);
-            top = Math.round(top);
-        }
-        tmp.set(left, top, left + dw, top + dh);
-        bitmapPaint.setColorFilter(mode == 1 ? whiteLogo : null);
-        c.drawBitmap(logo, null, tmp, bitmapPaint);
-        bitmapPaint.setColorFilter(null);
-    }
-
-    private Bitmap crispLogo(HomeApps.Item it, boolean dark) {
-        Bitmap src = dark ? it.logoDark : it.logo;
-        if (tileRects.length == 0) return src;
-        String key = it.key + "@" + System.identityHashCode(src) + "@" + Math.round(tileRects[0].width());
-        Bitmap cached = crispLogos.get(key);
-        if (cached != null) return cached;
-        float bw = tileRects[0].width() * (1 + FOCUS_GROW), bh = tileRects[0].height() * (1 + FOCUS_GROW);
-        float lw = src.getWidth(), lh = src.getHeight();
-        float scale = (float) Math.sqrt(bw * bh * 0.085f / (lw * lh * Math.max(0.08f, it.logoInk))) * it.logoScale;
-        scale = Math.min(scale, Math.min(bw * 0.76f / lw, bh * 0.58f / lh));
-        Bitmap out = downscale(src, Math.round(lw * scale), Math.round(lh * scale));
-        crispLogos.put(key, out);
-        return out;
-    }
-
-    /** Halves the size while it can (a 2×2 average, no aliasing), then finishes at the exact size. */
-    private static Bitmap downscale(Bitmap src, int w, int h) {
-        w = Math.max(1, w);
-        h = Math.max(1, h);
-        Bitmap b = src;
-        while (b.getWidth() / 2 >= w && b.getHeight() / 2 >= h) {
-            Bitmap half = Bitmap.createScaledBitmap(b, b.getWidth() / 2, b.getHeight() / 2, true);
-            if (b != src) b.recycle();
-            b = half;
-        }
-        Bitmap out = Bitmap.createScaledBitmap(b, w, h, true);
-        if (b != src && b != out) b.recycle();
-        return out;
-    }
-
-    // MARK: - Bottom drawer
-
-    private static List<HomeApps.Item> drawerList(Context c) {
-        List<HomeApps.Item> list = HomeApps.allInputs(c);
-        list.addAll(HomeApps.drawerShortcuts());
-        return list;
-    }
-
-    private void setDrawerItems(List<HomeApps.Item> list) {
-        int inputs = 0;
-        while (inputs < list.size() && (list.get(inputs).kind == HomeApps.INPUT || list.get(inputs).kind == HomeApps.LIVE_TV)) inputs++;
-        boolean same = list.size() == drawerItems.size();
-        for (int i = 0; same && i < list.size(); i++) {
-            same = list.get(i).key.equals(drawerItems.get(i).key) && list.get(i).connected == drawerItems.get(i).connected;
-        }
-        drawerItems = list;
-        drawerInputs = inputs;
-        if (drawerFocus.length != list.size()) {
-            drawerFocus = new Spring[list.size()];
-            drawerRects = new RectF[list.size()];
-            for (int i = 0; i < drawerFocus.length; i++) {
-                drawerFocus[i] = new Spring(0.28f, 0.85f, 0);
-                drawerRects[i] = new RectF();
-            }
-            drawerIndex = Math.min(drawerIndex, Math.max(0, list.size() - 1));
-            retarget(true);
-        }
-        layoutDrawer();
-        if (!same) drawerDirty = true;
-    }
-
-    private void layoutDrawer() {
-        int n = drawerItems.size();
-        float left = MARGIN * k, right = CONTENT_R * k;
-        float gap = 18 * k, groupGap = 56 * k;
-        int groups = drawerInputs > 0 && drawerInputs < n ? 2 : 1;
-        float tw = Math.min(230 * k, (right - left - Math.max(0, n - groups) * gap - (groups - 1) * groupGap) / Math.max(1, n));
-        float x = left, top = ROW_TOP * k;
-        for (int i = 0; i < n; i++) {
-            if (i == drawerInputs && i > 0) x += groupGap - gap;
-            drawerRects[i].set(x, top, x + tw, top + ROW_H * k);
-            x += tw + gap;
-        }
-        float cardsTop = CARDS_TOP * k, split = left + (right - left) * 0.585f;
-        boolean wx = Prefs.weather(), qt = Prefs.quotes() && HomeData.active().length > 0;
-        // A card that is off gives its room to the other one.
-        weatherCard.set(left, cardsTop, qt ? split - 16 * k : right, cardsTop + CARDS_H * k);
-        quotesCard.set(wx ? split + 16 * k : left, cardsTop, right, cardsTop + CARDS_H * k);
-        drawerDirty = true;
-    }
-
-    private void openDrawer() {
-        if (drawerItems.isEmpty()) return;
-        drawerOpen = true;
-        drawer.target = 1;
-        zone = Z_DRAWER;
-        drawerIndex = shelf.isEmpty() ? 0 : nearest(drawerRects, tileRects[shelfIndex].centerX());
-        for (int i = 0; i < drawerFocus.length; i++) drawerFocus[i].snap(i == drawerIndex ? 1 : 0);
-        drawerDirty = true;
-    }
-
-    private void closeDrawer() {
-        drawerOpen = false;
-        drawer.target = 0;
-        zone = Z_SHELF;
-        for (Spring f : drawerFocus) f.snap(0);   // the drawer goes away: its focus doesn't need to animate
-        if (!shelf.isEmpty() && drawerIndex < drawerRects.length) shelfIndex = nearest(tileRects, drawerRects[drawerIndex].centerX());
-    }
-
-    /** Color for the drawer's text and symbols: dark by day, white at night. */
-    private int drawerInk(float alpha) {
-        return Ui.alpha(tone(L_INK, 0xFFFFFFFF), alpha);
-    }
-
-    /** Glass for a drawer card or button: white by day, smoked at night (both during the transition). */
-    private void drawerGlass(Canvas c, RectF r, float radius, float lightTint, int shadowColor, float drop) {
-        float dk = dark();
-        if (dk < 0.999f) {
-            tmp.set(r);
-            tmp.offset(0, drop);
-            shadow.setColor(Ui.alpha(shadowColor, 1 - dk));
-            c.drawRoundRect(tmp, radius, radius, shadow);
-            scene.glass(c, r, radius, 0xFFFFFFFF, lightTint, 0, 0, 0.02f, 1, 1 - dk);
-        }
-        if (dk > 0.001f) scene.glass(c, r, radius, SMOKE, 0.4f, 0, 0, 0.02f, 1, dk);
-    }
-
-    private void drawerCard(Canvas c, RectF r) {
-        drawerGlass(c, r, 30 * k, 0.72f, 0x1A000000, 10 * k);
-    }
-
-    private void drawDrawer(Canvas c) {
-        if (drawerItems.isEmpty()) return;
-        rowTitle.setColor(tone(L_DIM, 0xB3FFFFFF));
-        cardTitle.setColor(tone(L_DIM, 0xB3FFFFFF));
-        cardText.setColor(drawerInk(0.95f));
-        cardDim.setColor(tone(L_DIM, 0xADFFFFFF));
-        cardDimRight.setColor(tone(L_FAINT, 0x99FFFFFF));
-        bigTemp.setColor(drawerInk(1));
-        hourPaint.setColor(tone(L_DIM, 0xADFFFFFF));
-        hourTemp.setColor(drawerInk(0.95f));
-        pricePaint.setColor(drawerInk(0.95f));
-        float titleBase = ROW_TITLE * k;
-        if (drawerInputs > 0) c.drawText("Entrées", drawerRects[0].left + 4 * k, titleBase, rowTitle);
-        if (drawerInputs < drawerItems.size()) c.drawText("Raccourcis", drawerRects[drawerInputs].left + 4 * k, titleBase, rowTitle);
-        int top = -1;
-        for (int i = 0; i < drawerItems.size(); i++) if (drawerFocus[i].value > 0.02f && (top < 0 || drawerFocus[i].value > drawerFocus[top].value)) top = i;
-        for (int i = 0; i < drawerItems.size(); i++) if (i != top) drawDrawerTile(c, i);
-        if (top >= 0) drawDrawerTile(c, top);
-        if (Prefs.weather()) drawWeatherCard(c, weatherCard);
-        if (Prefs.quotes() && HomeData.active().length > 0) drawQuotesCard(c, quotesCard);
-    }
-
-    /** Square drawer button: symbol and name; an input with no device is dimmed. Focused: white, with dark text. */
-    private void drawDrawerTile(Canvas c, int i) {
-        HomeApps.Item it = drawerItems.get(i);
-        float f = Ui.clamp(drawerFocus[i].value), s = 1 + 0.07f * f;
-        RectF base = drawerRects[i];
-        float cx = base.centerX(), cy = base.centerY();
-        cell.set(cx - base.width() * s / 2, cy - base.height() * s / 2, cx + base.width() * s / 2, cy + base.height() * s / 2);
-        float r = 20 * k * s;
-        if (f > 0.01f) {
-            tmp.set(cell);
-            tmp.offset(0, 12 * k * f);
-            shadow.setColor(Ui.alpha(0xFF000000, 0.45f * f));
-            c.drawRoundRect(tmp, r, r, shadow);
-        }
-        if (f < 0.99f) drawerGlass(c, cell, r, 0.7f, 0x14000000, 6 * k);
-        if (f > 0.01f) {
-            fill.setShader(null);
-            fill.setColor(Ui.alpha(WHITE, f));
-            c.drawRoundRect(cell, r, r, fill);
-        }
-        boolean off = it.kind == HomeApps.INPUT && !it.connected;
-        int ink = blend(tone(off ? 0xFF8E8E93 : L_INK, off ? 0x6BFFFFFF : 0xF2FFFFFF), INK, f);
-        Symbols.draw(getContext(), c, it.symbol, cx, cell.top + cell.height() * 0.4f, 34 * k * s, ink);
-        drawerLabel.setColor(ink);
-        drawerLabel.setTextSize(23 * k * s);
-        float room = cell.width() - 16 * k, wide = drawerLabel.measureText(it.label);
-        // A long name ("Home Settings", an input you renamed) shrinks a little before it gets cut.
-        if (wide > room) drawerLabel.setTextSize(Math.max(18 * k * s, 23 * k * s * room / wide));
-        String label = TextUtils.ellipsize(it.label, new TextPaint(drawerLabel), room, TextUtils.TruncateAt.END).toString();
-        c.drawText(label, cx, cell.top + cell.height() * 0.8f, drawerLabel);
-        drawerLabel.setTextSize(23 * k);
-    }
-
-    /** Weather for your location: now (large), the next 6 hours, and sunrise and sunset. */
-    private void drawWeatherCard(Canvas c, RectF r) {
-        drawerCard(c, r);
-        float x = r.left + 34 * k;
-        c.drawText(Prefs.city().isEmpty() ? Ui.tr("Clima", "Weather") : Prefs.city(), x, r.top + 54 * k, cardTitle);
-        HomeData.Weather wx = data.weather;
-        if (Double.isNaN(wx.temp)) {
-            c.drawText(Ui.tr("Sem dados do clima agora.", "No weather data right now."), x, r.top + 120 * k, cardDim);
-            return;
-        }
-        String symbol = Symbols.weather(wx.code, wx.isDay);
-        float sw = Symbols.width(getContext(), symbol, 52 * k);
-        Symbols.draw(getContext(), c, symbol, x + sw / 2, r.top + 132 * k, 52 * k, drawerInk(0.95f));
-        String now = HomeData.degrees(wx.temp);
-        c.drawText(now, x + sw + 18 * k - Ui.leftBearing(bigTemp, now), r.top + 170 * k, bigTemp);
-        c.drawText(HomeData.condition(wx.code, wx.isDay), x, r.top + 220 * k, cardText);
-        c.drawText("Max " + HomeData.degrees(wx.max) + "   Min " + HomeData.degrees(wx.min), x, r.top + 258 * k, cardDim);
-        float split = r.left + 392 * k;
+    /** A soft wash of the focused artwork behind the top of the screen (Infuse blurs its backdrop the same way). */
+    private void drawBackdrop(Canvas c) {
         fill.setShader(null);
-        fill.setColor(tone(0x1A000000, 0x24FFFFFF));
-        c.drawRoundRect(split - k, r.top + 34 * k, split + k, r.bottom - 34 * k, k, k, fill);
-        float hx = split + 30 * k, hw = (r.right - 30 * k - hx) / 6;
-        for (int i = 0; i < wx.hours.size() && i < 6; i++) {
-            float hc = hx + hw * (i + 0.5f);
-            c.drawText(HomeData.hour(wx.hours.get(i)), hc, r.top + 96 * k, hourPaint);
-            Symbols.draw(getContext(), c, Symbols.weather(wx.hourCode.get(i), wx.hourDay.get(i)), hc, r.top + 142 * k, 30 * k, drawerInk(0.9f));
-            c.drawText(HomeData.degrees(wx.hourTemp.get(i)), hc, r.top + 196 * k, hourTemp);
-        }
-        float sx = hx, base = r.top + 258 * k;
-        if (wx.sunrise != 0) sx = sunItem(c, "sunrise", "Lever " + Ui.time(wx.sunrise), sx, base) + 36 * k;
-        if (wx.sunset != 0) sunItem(c, "sunset", "Coucher " + Ui.time(wx.sunset), sx, base);
+        fill.setColor(BG);
+        c.drawRect(0, 0, w, h, fill);
+        if (rows.isEmpty() || zone != Z_ROW) return;
+        Row row = rows.get(rowIndex);
+        if (row.kind != R_HERO || row.col < 0 || row.col >= row.items.size()) return;
+        Bitmap soft = soft(row.items.get(row.col));
+        if (soft == null) return;
+        r2.set(0, 0, w, h * 0.78f);
+        art.setAlpha(44);
+        c.drawBitmap(soft, null, r2, art);
+        art.setAlpha(255);
+        heroShade.setShader(new LinearGradient(0, 0, 0, h * 0.88f, 0x00000000, BG, Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, w, h * 0.88f, heroShade);
+        heroShade.setShader(null);
     }
 
-    private float sunItem(Canvas c, String symbol, String label, float x, float base) {
-        float size = 22 * k, sw = Symbols.width(getContext(), symbol, size);
-        Symbols.draw(getContext(), c, symbol, x + sw / 2, base - Ui.halfCap(cardDim), size, tone(L_DIM, 0xB3FFFFFF));
-        c.drawText(label, x + sw + 10 * k, base, cardDim);
-        return x + sw + 10 * k + cardDim.measureText(label);
-    }
+    private void drawRow(Canvas c, Row row, int index, float y) {
+        float m = MARGIN * k;
+        rowTitle.setTextSize(34 * k);
+        rowTitle.setTextAlign(Paint.Align.LEFT);
+        float base = y + HEAD_H * k - 12 * k;
+        c.drawText(row.title, m, base, rowTitle);
 
-    /** Prices in the configured currency with the 24 h change (green/red, like Apple's Stocks app). */
-    private void drawQuotesCard(Canvas c, RectF r) {
-        drawerCard(c, r);
-        float x = r.left + 34 * k, right = r.right - 34 * k;
-        c.drawText(Ui.tr("Cotações", "Crypto"), x, r.top + 54 * k, cardTitle);
-        String stale = HomeData.staleness(data.pricesAt, 5 * 60_000L);
-        c.drawText(stale.isEmpty() ? Ui.tr("variação em 24 h", "24h change") : Ui.tr("de ", "", "de ") + stale, right, r.top + 54 * k, cardDimRight);
-        float cap = Ui.cap(cardText);
-        int[] coins = HomeData.active();
-        for (int j = 0; j < coins.length; j++) {
-            int i = coins[j];
-            float base = r.top + (110 + 52 * j) * k, mid = base - cap / 2;
-            float gw = Glyphs.width(getContext(), HomeData.COINS[i], cap);
-            Glyphs.coin(getContext(), c, HomeData.COINS[i], x + 14 * k, mid, cap, tone(L_DIM, 0xCCFFFFFF));
-            c.drawText(HomeData.coinName(i), x + Math.max(gw, 28 * k) / 2 + 30 * k, base, cardText);
-            c.drawText(HomeData.brl(data.prices[i]), right - 128 * k, base, pricePaint);
-            double change = data.changes[i];
-            if (Double.isNaN(change)) continue;
-            int color = change >= 0 ? tone(0xFF248A3D, UP_COLOR) : tone(0xFFD70015, DOWN_COLOR);
-            tmp.set(right - 108 * k, mid - 17 * k, right, mid + 17 * k);
-            fill.setShader(null);
-            fill.setColor(Ui.alpha(color, 0.2f));
-            c.drawRoundRect(tmp, 17 * k, 17 * k, fill);
-            changePaint.setColor(color);
-            c.drawText(HomeData.change(change), tmp.centerX(), mid + Ui.halfCap(changePaint), changePaint);
-        }
-    }
-
-    // MARK: - Focus
-
-    /** Sets the springs' targets from the current focus (snap: no animation). */
-    private void retarget(boolean snap) {
-        // Only the group whose focus changed is redrawn (moving along the shelf doesn't redraw the hero or capsule).
-        boolean tilesChanged = aim(tileFocus, !sheetOpen && zone == Z_SHELF ? shelfIndex : -1, snap);
-        boolean statusChanged = aim(statusFocus, !sheetOpen && zone == Z_STATUS ? statusIndex : -1, snap);
-        boolean drawerChanged = aim(drawerFocus, !sheetOpen && zone == Z_DRAWER ? drawerIndex : -1, snap);
-        boolean heroChanged = heroFocus.target != (!sheetOpen && zone == Z_HERO ? 1 : 0);
-        heroFocus.target = !sheetOpen && zone == Z_HERO ? 1 : 0;
-        if (snap) heroFocus.snap(heroFocus.target);
-        boolean topChanged = aim(topFocus, !sheetOpen && zone == Z_TOP ? topIndex : -1, snap);
-        heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
-        statusChanged |= topChanged;
-        tilesDirty |= snap || tilesChanged;
-        statusDirty |= snap || statusChanged;
-        heroDirty |= snap || heroChanged;
-        drawerDirty |= snap || drawerChanged;
-        spoken.focusMoved();
-    }
-
-    /** Aims a group's springs (only `focused` at 1); returns true if any target changed. */
-    private static boolean aim(Spring[] springs, int focused, boolean snap) {
-        boolean changed = false;
-        for (int i = 0; i < springs.length; i++) {
-            float target = i == focused ? 1 : 0;
-            changed |= springs[i].target != target;
-            springs[i].target = target;
-            if (snap) springs[i].snap(target);
-        }
-        return changed;
-    }
-
-    // MARK: - "All Apps" sheet
-
-    private void setOthers(List<HomeApps.Item> list) {
-        others = list;
-        gridFocus = new Spring[list.size()];
-        for (int i = 0; i < gridFocus.length; i++) gridFocus[i] = new Spring(0.3f, 0.82f, 0);
-        gridLabels = null;
-        gridIndex = Math.min(gridIndex, Math.max(0, list.size() - 1));
-        retargetGrid(true);
-        gridDirty = true;
-    }
-
-    private void openSheet() {
-        sheetOpen = true;
-        gridIndex = 0;
-        scroll.snap(0);
-        retargetGrid(true);
-        retarget(false);
-        sheet.target = 1;
-        gridDirty = true;
-    }
-
-    private void closeSheet() {
-        sheetOpen = false;
-        sheet.target = 0;
-        retarget(false);
-    }
-
-    private void retargetGrid(boolean snap) {
-        for (int i = 0; i < gridFocus.length; i++) {
-            gridFocus[i].target = sheetOpen && i == gridIndex ? 1 : 0;
-            if (snap) gridFocus[i].snap(gridFocus[i].target);
-        }
-        int rows = Math.max(1, (others.size() + COLUMNS - 1) / COLUMNS);
-        int visible = Math.min(rows, VISIBLE_ROWS);
-        int r = gridIndex / COLUMNS;
-        float target = scroll.target;
-        if (r < target) target = r;
-        else if (r > target + visible - 1) target = r - visible + 1;
-        scroll.target = Math.max(0, Math.min(rows - visible, target));
-        if (snap) scroll.snap(scroll.target);
-        spoken.focusMoved();
-    }
-
-    private void drawSheet(Canvas c) {
-        c.drawColor(0xA8000000);
-        float shift = scroll.value * GRID_ROW * k;
-        c.drawText(Ui.tr("Todos os Apps", "All Apps"), w / 2f, 124 * k - shift, sheetTitle);
-        int n = others.size();
-        if (gridLabels == null || gridLabels.length != n) {
-            gridLabels = new String[n];
-            for (int i = 0; i < n; i++) {
-                gridLabels[i] = TextUtils.ellipsize(others.get(i).label, gridLabel, (GRID_W - 10) * k, TextUtils.TruncateAt.END).toString();
+        boolean focusedRow = index == rowIndex && zone == Z_ROW;
+        if (row.seeTab >= 0) {
+            seeAll.setTextSize(24 * k);
+            seeAll.setTextAlign(Paint.Align.RIGHT);
+            boolean on = focusedRow && row.col == SEE_ALL;
+            float tw2 = seeAll.measureText("Tout voir");
+            if (on) {
+                r.set(w - m - tw2 - 22 * k, base - Ui.cap(seeAll) - 10 * k, w - m + 12 * k, base + 10 * k);
+                fill.setShader(null);
+                fill.setColor(0xF2FFFFFF);
+                c.drawRoundRect(r, 20 * k, 20 * k, fill);
+                seeAll.setColor(0xFF000000);
+            } else {
+                seeAll.setColor(ACCENT);
             }
+            c.drawText("Tout voir", w - m, base, seeAll);
+            seeAll.setColor(ACCENT);
         }
-        float gridWidth = COLUMNS * GRID_W + (COLUMNS - 1) * GRID_GAP;
-        float left = (1920 - gridWidth) / 2 * k;
-        float gridTop = GRID_TOP * k;
-        for (int i = 0; i < n; i++) {
-            int r = i / COLUMNS, col = i % COLUMNS;
-            float y = gridTop + r * GRID_ROW * k - shift;
-            if (y > h || y + GRID_ROW * k < 0) continue;
-            float x = left + col * (GRID_W + GRID_GAP) * k;
-            RectF base = new RectF(x, y, x + GRID_W * k, y + GRID_H * k);
-            float f = gridFocus[i].value;
-            drawCard(c, others.get(i).tile, base, GRID_RADIUS * k, f, 0.08f);
-            if (sheetOpen && i == gridIndex) focusedCell.set(cell);
-            gridLabel.setColor(blend(0x99FFFFFF, 0xFFFFFFFF, Ui.clamp(f)));
-            c.drawText(gridLabels[i], base.centerX(), base.bottom + (40 + 6 * f) * k, gridLabel);
+
+        int n = cols(row.kind);
+        float s = step(row.kind), tw = tw(row.kind), th = th(row.kind);
+        float tilesTop = y + HEAD_H * k;
+        for (int j = row.win; j < n + row.win && j < row.items.size(); j++) {
+            Tile t = row.items.get(j);
+            float x = m + j * s - row.slide;
+            r.set(x, tilesTop, x + tw, tilesTop + th);
+            if (r.right < m - 8 || r.left > w - m + 8) continue;
+            float f = j < row.focus.length ? row.focus[j] : 0;
+            drawTile(c, row.kind, r, t, f);
+            if (row.kind != R_HERO) drawCaption(c, row.kind, t, x, tilesTop + th + 8 * k, tw);
         }
     }
 
-    /** 16:9 sheet card. Focused (the shelf's subtle focus): it grows, with a shadow, a soft sheen and a thin border. */
-    private void drawCard(Canvas c, Bitmap image, RectF base, float radius, float f, float grow) {
-        float s = 1 + grow * f;
-        float cx = base.centerX(), cy = base.centerY();
-        cell.set(cx - base.width() * s / 2, cy - base.height() * s / 2, cx + base.width() * s / 2, cy + base.height() * s / 2);
-        float r = radius * s;
-        float fc = Ui.clamp(f);
-        if (f > 0.01f) {
-            tmp.set(cell);
-            tmp.offset(0, 16 * k * f);
-            shadow.setColor(Ui.alpha(0xFF000000, 0.55f * fc));
-            c.drawRoundRect(tmp, r, r, shadow);
+    private void drawTile(Canvas c, int kind, RectF box, Tile t, float f) {
+        float radius = (kind == R_HERO ? 20 : 14) * k;
+        float grow = 1 + 0.05f * f;
+        r2.set(box);
+        r2.inset(-box.width() * (grow - 1) / 2, -box.height() * (grow - 1) / 2);
+        float rad = radius * grow;
+
+        if (f > 0.02f) {
+            dst.set(r2);
+            dst.offset(0, 12 * k * f);
+            fill.setShader(null);
+            fill.setColor(Ui.alpha(0xFF000000, 0.45f * f));
+            c.drawRoundRect(dst, rad, rad, fill);
         }
+
         clip.reset();
-        clip.addRoundRect(cell, r, r, Path.Direction.CW);
+        clip.addRoundRect(r2, rad, rad, Path.Direction.CW);
         c.save();
         c.clipPath(clip);
-        if (image != null) c.drawBitmap(image, null, cell, bitmapPaint);
-        if (f > 0.01f) {
-            sheen.setShader(new LinearGradient(0, cell.top, 0, cell.top + cell.height() * 0.5f,
-                    Ui.alpha(0xFFFFFFFF, 0.1f * fc), 0x00FFFFFF, Shader.TileMode.CLAMP));
-            c.drawRect(cell, sheen);
+        fill.setShader(null);
+        fill.setColor(kind == R_APP || kind == R_LOGO ? 0xFF17171B : 0xFF101014);
+        c.drawRect(r2, fill);
+
+        Bitmap b = artOf(t);
+        if (kind == R_HERO) {
+            drawHeroCard(c, r2, t);
+        } else if (b != null) {
+            if (kind == R_POSTER || t.art != null) drawCover(c, b, r2);
+            else drawLogo(c, b, r2);
+        } else if (!t.symbol.isEmpty()) {
+            Symbols.draw(getContext(), c, t.symbol, r2.centerX(), r2.centerY() - 6 * k, 64 * k, DIM);
+        } else {
+            cardTitle.setTextSize((kind == R_POSTER ? 22 : 20) * k);
+            cardTitle.setTextAlign(Paint.Align.CENTER);
+            List<String> lines = wrap(t.title, cardTitle, r2.width() - 24 * k, kind == R_POSTER ? 3 : 2);
+            float ly = r2.centerY() - (lines.size() - 1) * 14 * k;
+            for (String line : lines) {
+                c.drawText(line, r2.centerX(), ly + Ui.halfCap(cardTitle), cardTitle);
+                ly += 28 * k;
+            }
+            cardTitle.setTextAlign(Paint.Align.LEFT);
         }
-        if (fc < 0.99f) {
-            veil.setColor(Ui.alpha(0xFF000000, 0.08f * (1 - fc)));
-            c.drawRect(cell, veil);
+
+        if (t.progress > 0.005f) {
+            float barY = r2.bottom - 3.5f * k;
+            fill.setColor(0x99000000);
+            c.drawRect(r2.left, barY - 3.5f * k, r2.right, barY, fill);
+            fill.setColor(ACCENT);
+            c.drawRect(r2.left, barY - 3.5f * k, r2.left + Math.max(10 * k, r2.width() * t.progress), barY, fill);
+        }
+        if (f > 0.02f) {
+            fill.setShader(new LinearGradient(0, r2.top, 0, r2.top + r2.height() * 0.45f,
+                    Ui.alpha(0xFFFFFFFF, 0.07f * f), 0x00FFFFFF, Shader.TileMode.CLAMP));
+            c.drawRect(r2, fill);
+            fill.setShader(null);
         }
         c.restore();
-        border.setColor(0x14FFFFFF);
-        c.drawRoundRect(cell, r, r, border);
-        if (f > 0.01f) {
-            rim.setShader(null);
-            rim.setColor(Ui.alpha(0xFFFFFFFF, 0.4f * fc));
-            rim.setStrokeWidth(1.5f * k);
-            c.drawRoundRect(cell, r, r, rim);
-            rim.setStrokeWidth(2.5f * k);
+
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth(1 * k);
+        stroke.setColor(0x1AFFFFFF);
+        c.drawRoundRect(r2, rad, rad, stroke);
+        if (f > 0.02f) {
+            stroke.setStrokeWidth(2 * k);
+            stroke.setColor(Ui.alpha(0xFFFFFFFF, 0.62f * f));
+            c.drawRoundRect(r2, rad, rad, stroke);
         }
     }
 
-    // MARK: - Toasts
-
-    void showToast(String text) {
-        toasts.add(text);
-        announceForAccessibility(text);
+    private Bitmap artOf(Tile t) {
+        if (t.art != null) return t.art;
+        if (t.image == null || t.image.isEmpty()) return null;
+        return Posters.get(getContext()).get(t.image, (url, bitmap) -> postInvalidateOnAnimation());
     }
 
-    /** Advances the toast queue; returns true while a toast fades in or out (animation). */
-    private boolean tickToast(long up) {
-        if (toast != null && up - toastAt > TOAST_MS) {
-            toast = null;
-            toastLayer.invalidate();
+    private void drawCover(Canvas c, Bitmap b, RectF box) {
+        float bw = b.getWidth(), bh = b.getHeight();
+        float scale = Math.max(box.width() / bw, box.height() / bh);
+        float sw = box.width() / scale, sh = box.height() / scale;
+        srcRect.set(Math.round((bw - sw) / 2), Math.round((bh - sh) / 2),
+                Math.round((bw + sw) / 2), Math.round((bh + sh) / 2));
+        c.drawBitmap(b, srcRect, box, art);
+    }
+
+    /**
+     * A hero card: the artwork on the left, its title, year and button on the right, over a blurred wash of the same
+     * artwork. Infuse shows fanart here; the panel only has posters, so the poster is shown whole instead.
+     */
+    private void drawHeroCard(Canvas c, RectF box, Tile t) {
+        Bitmap b = artOf(t);
+        Bitmap low = soft(t);
+        if (low != null) {
+            art.setAlpha(120);
+            c.drawBitmap(low, null, box, art);
+            art.setAlpha(255);
         }
-        if (toast == null && toastPaint != null) {
-            String next = toasts.poll();
-            if (next != null) {
-                toast = layout(next);
-                toastAt = up;
+        heroShade.setShader(new LinearGradient(box.left, box.top, box.right, box.top,
+                0xE6000000, 0x59000000, Shader.TileMode.CLAMP));
+        c.drawRect(box, heroShade);
+        heroShade.setShader(null);
+
+        float pad = 22 * k;
+        float artH = box.height() - 2 * pad;
+        float artW = artH * 2f / 3f;   // one text column for every card, whatever the artwork's shape
+        artBox.set(box.left + pad, box.top + pad, box.left + pad + artW, box.top + pad + artH);
+        if (b != null) {
+            drawContain(c, b, artBox);
+        } else if (!t.symbol.isEmpty()) {
+            Symbols.draw(getContext(), c, t.symbol, artBox.centerX(), artBox.centerY(), 70 * k, DIM);
+        }
+
+        float tx = artBox.right + 26 * k;
+        float maxW = box.right - pad - tx;
+        cardTitle.setTextSize(30 * k);
+        cardTitle.setTextAlign(Paint.Align.LEFT);
+        List<String> lines = wrap(t.title, cardTitle, maxW, 2);
+        float ty = box.top + pad + 8 * k;
+        for (String line : lines) {
+            c.drawText(line, tx, ty + Ui.cap(cardTitle), cardTitle);
+            ty += 38 * k;
+        }
+        cardMeta.setTextSize(20 * k);
+        cardMeta.setTextAlign(Paint.Align.LEFT);
+        String meta = t.meta == null ? "" : t.meta;
+        if (!meta.isEmpty()) c.drawText(fit(cardMeta, meta, maxW), tx, ty + Ui.cap(cardMeta) + 4 * k, cardMeta);
+
+        String label = t.series ? "Épisodes" : t.url.isEmpty() ? "" : t.live ? "En direct" : "Regarder";
+        if (!label.isEmpty()) {
+            cardTitle.setTextSize(20 * k);
+            float bw = cardTitle.measureText(label) + 58 * k;
+            float by = Math.min(box.bottom - pad - 44 * k, ty + Ui.cap(cardMeta) + 26 * k);
+            r.set(tx, by, tx + bw, by + 44 * k);
+            fill.setShader(null);
+            fill.setColor(0xF2FFFFFF);
+            c.drawRoundRect(r, 22 * k, 22 * k, fill);
+            Symbols.draw(getContext(), c, "play", r.left + 25 * k, r.centerY(), 22 * k, 0xFF000000);
+            cardTitle.setColor(0xFF000000);
+            c.drawText(label, r.left + 44 * k, r.centerY() + Ui.halfCap(cardTitle), cardTitle);
+            cardTitle.setColor(0xF2FFFFFF);
+        }
+    }
+
+    private void drawContain(Canvas c, Bitmap b, RectF box) {
+        float bw = b.getWidth(), bh = b.getHeight();
+        float scale = Math.min(box.width() / bw, box.height() / bh);
+        float dw = bw * scale, dh = bh * scale;
+        dst.set(box.centerX() - dw / 2, box.centerY() - dh / 2, box.centerX() + dw / 2, box.centerY() + dh / 2);
+        c.drawBitmap(b, null, dst, art);
+    }
+
+    private Bitmap soft(Tile t) {
+        if (t == null || t.image == null || t.image.isEmpty()) return null;
+        Bitmap s = softs.get(t.image);
+        if (s != null) return s;
+        Bitmap src = artOf(t);
+        if (src == null) return null;
+        int hh = 26;
+        int ww = Math.max(4, Math.round(hh * (float) src.getWidth() / Math.max(1, src.getHeight())));
+        s = Bitmap.createScaledBitmap(src, ww, hh, true);
+        if (softs.size() > 16) softs.clear();
+        softs.put(t.image, s);
+        return s;
+    }
+
+    private void drawLogo(Canvas c, Bitmap b, RectF box) {
+        float pad = 18 * k;
+        float bw = b.getWidth(), bh = b.getHeight();
+        float scale = Math.min((box.width() - 2 * pad) / bw, (box.height() - 2 * pad) / bh);
+        float dw = bw * scale, dh = bh * scale;
+        dst.set(box.centerX() - dw / 2, box.centerY() - dh / 2, box.centerX() + dw / 2, box.centerY() + dh / 2);
+        c.drawBitmap(b, null, dst, art);
+    }
+
+    private void drawCaption(Canvas c, int kind, Tile t, float x, float y, float width) {
+        cardTitle.setTextSize((kind == R_HERO ? 26 : kind == R_POSTER ? 22 : 21) * k);
+        cardTitle.setTextAlign(Paint.Align.LEFT);
+        cardMeta.setTextSize((kind == R_HERO ? 20 : 18) * k);
+        cardMeta.setTextAlign(Paint.Align.LEFT);
+        c.drawText(fit(cardTitle, t.title, width), x, y + Ui.cap(cardTitle), cardTitle);
+        String meta = t.meta == null ? "" : t.meta;
+        if (kind == R_LOGO && t.app != null && !t.app.connected) meta = "Débranché";
+        if (!meta.isEmpty()) c.drawText(fit(cardMeta, meta, width), x, y + Ui.cap(cardTitle) + 26 * k, cardMeta);
+    }
+
+    private void drawBar(Canvas c) {
+        float barH = BAR_H * k;
+        barShade.setShader(new LinearGradient(0, 0, 0, barH + 34 * k, 0xF20B0B0D, 0x000B0B0D, Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, w, barH + 34 * k, barShade);
+        barShade.setShader(null);
+
+        for (int i = 0; i <= GEAR; i++) {
+            boolean on = i == tab;
+            boolean focus = zone == Z_BAR && i == barIndex;
+            RectF box = barRects[i];
+            if (focus) {
+                fill.setColor(0x26FFFFFF);
+                c.drawRoundRect(box, 17 * k, 17 * k, fill);
+            }
+            if (i == GEAR) {
+                Symbols.draw(getContext(), c, "settings", box.centerX(), box.centerY(), 30 * k, focus ? INK : DIM);
+                continue;
+            }
+            tabInk.setTextSize(26 * k);
+            tabInk.setTextAlign(Paint.Align.CENTER);
+            tabInk.setColor(on ? INK : focus ? 0xE6FFFFFF : 0x73FFFFFF);
+            c.drawText(TABS[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk), tabInk);
+            if (on) {
+                fill.setColor(ACCENT);
+                c.drawCircle(box.centerX(), box.bottom - 6 * k, 3.2f * k, fill);
             }
         }
-        if (toast == null) return false;
-        long age = up - toastAt;
-        boolean fading = age < 350 || age > TOAST_MS - 450;
-        if (fading) toastLayer.invalidate();
-        return fading;
+        tabInk.setColor(INK);
+
+        clock.setTextSize(22 * k);
+        clock.setTextAlign(Paint.Align.RIGHT);
+        String time = new java.text.SimpleDateFormat("HH:mm", Locale.FRANCE)
+                .format(new java.util.Date(System.currentTimeMillis()));
+        c.drawText(time, barRects[GEAR].left - 34 * k,
+                BAR_H * k / 2 + Ui.halfCap(clock), clock);
     }
 
     private void drawToast(Canvas c) {
-        if (toast == null) return;
-        float age = (SystemClock.uptimeMillis() - toastAt) / 1000f;
-        float a = Math.min(Ui.clamp(age / 0.3f), Ui.clamp((TOAST_MS / 1000f - age) / 0.4f));
-        if (a <= 0) return;
-        float padX = 28 * k, padY = 18 * k, icon = 26 * k, iconW = Symbols.width(getContext(), "bell", icon);
-        float tw = toast.getWidth() + iconW + 16 * k, th = toast.getHeight();
-        float toastTop = 64 * k - (1 - a) * 16 * k;
-        tmp.set((w - tw) / 2f - padX, toastTop, (w + tw) / 2f + padX, toastTop + th + 2 * padY);
-        int save = c.saveLayerAlpha(tmp.left - 4, tmp.top - 4, tmp.right + 4, tmp.bottom + 4, Math.round(255 * a));
-        scene.glass(c, tmp, Math.min(tmp.height() / 2, 32 * k), SMOKE, 0.55f, 0, 0, 0.02f, 1);
-        Symbols.draw(getContext(), c, "bell", tmp.left + padX + iconW / 2, tmp.centerY(), icon, 0xEBFFFFFF);
-        c.translate(tmp.left + padX + iconW + 16 * k, tmp.top + padY);
-        toast.draw(c);
-        c.restoreToCount(save);
+        if (toastText == null || toastText.isEmpty()) return;
+        long age = System.currentTimeMillis() - toastAt;
+        if (age > 2600) {
+            toastText = "";
+            return;
+        }
+        float a = age < 200 ? age / 200f : age > 2200 ? 1 - (age - 2200) / 400f : 1f;
+        a = Ui.clamp(a);
+        toast.setTextSize(24 * k);
+        toast.setTextAlign(Paint.Align.CENTER);
+        toast.setAlpha((int) (255 * a));
+        fill.setShader(null);
+        fill.setColor(Ui.alpha(0xFF000000, 0.72f * a));
+        float tw = toast.measureText(toastText) + 60 * k;
+        r.set(w / 2 - tw / 2, h - 120 * k, w / 2 + tw / 2, h - 60 * k);
+        c.drawRoundRect(r, 30 * k, 30 * k, fill);
+        c.drawText(toastText, w / 2, r.centerY() + Ui.halfCap(toast), toast);
+        toast.setAlpha(255);
+        main.postDelayed(this::invalidate, 240);
     }
 
-    private StaticLayout layout(String text) {
-        int max = Math.round(720 * k);
-        int width = (int) Math.min(max, Math.ceil(Layout.getDesiredWidth(text, toastPaint)));
-        return StaticLayout.Builder.obtain(text, 0, text.length(), toastPaint, Math.max(1, width))
-                .setMaxLines(2)
-                .setEllipsize(TextUtils.TruncateAt.END)
-                .build();
-    }
-
-    /** New notices from the main process (mode switches, the check after the TV boots): those from the last 24 h. */
-    private void checkNotices() {
-        final Context c = getContext().getApplicationContext();
-        LOADER.execute(() -> {
-            JSONArray list = HomeMode.state(c).optJSONArray("notices");
-            if (list == null) return;
-            long seen = ui.getLong("seenNotice", 0), newest = seen;
-            long cutoff = System.currentTimeMillis() - 24 * 3600_000L;
-            final List<String> fresh = new ArrayList<>();
-            for (int i = list.length() - 1; i >= 0; i--) {   // the list comes newest first
-                JSONObject o = list.optJSONObject(i);
-                if (o == null) continue;
-                long at = o.optLong("at");
-                if (at <= seen || at < cutoff) continue;
-                fresh.add(o.optString("text"));
-                newest = Math.max(newest, at);
-            }
-            if (newest > seen) ui.edit().putLong("seenNotice", newest).apply();
-            if (!fresh.isEmpty()) handler.post(() -> { for (String t : fresh) showToast(t); });
-        });
-    }
-
-    // MARK: - Lists (in the background, so returning to the home screen isn't delayed)
-
-    private void reload() {
-        final Context c = getContext().getApplicationContext();
-        LOADER.execute(() -> {
-            final List<HomeApps.Item> s = HomeApps.shelf(c, true);
-            final List<HomeApps.Item> st = statusList(c);
-            final List<HomeApps.Item> d = drawerList(c);
-            final List<HomeApps.Item> o = HomeApps.others(c);
-            handler.post(() -> {
-                setShelf(s);
-                setStatusItems(st);
-                setDrawerItems(d);
-                if (!sheetOpen) setOthers(o);
-            });
-        });
-    }
-
-    // MARK: - Keys: only the arrows, OK and Back (system keys pass through to the system)
+    // MARK: - Keys
 
     boolean onKey(KeyEvent e) {
+        int code = e.getKeyCode();
+        if (e.getAction() == KeyEvent.ACTION_MULTIPLE) return false;
         boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
-        switch (e.getKeyCode()) {
+        switch (code) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (down) move(-1, 0);
+                if (down) move(-1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (down) move(1, 0);
+                if (down) move(1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_UP:
                 if (down) move(0, -1);
@@ -1698,659 +935,242 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                // Opens on release, and only if the press happened here: the release of an OK pressed inside another
-                // app opens nothing.
-                if (down) {
-                    if (e.getRepeatCount() == 0) okDown = true;
-                } else {
-                    if (okDown && !e.isCanceled() && spoken.keyClick()) activate();
-                    okDown = false;
-                }
+                if (down) activate();
                 return true;
             case KeyEvent.KEYCODE_BACK:
-                if (down) {
-                    if (e.getRepeatCount() == 0) backDown = true;
-                } else {
-                    if (backDown && !e.isCanceled()) back();
-                    backDown = false;
-                }
+                if (down) back();
+                return true;
+            case KeyEvent.KEYCODE_HOME:
+                // Already the home screen: the system does not re-deliver the intent, so take it here.
+                if (down) reset(true);
                 return true;
             default:
                 return false;
         }
     }
 
-    private void back() {
-        if (sheetOpen) {
-            closeSheet();
-        } else if (zone == Z_DRAWER) {
-            closeDrawer();
-            retarget(false);
-        } else if (zone != Z_SHELF) {
-            zone = Z_SHELF;
-            retarget(false);
-        } else {
+    private void move(int dx) {
+        if (zone == Z_BAR) {
+            barIndex = Math.max(0, Math.min(GEAR, barIndex + dx));
+            invalidate();
             return;
         }
-        click.move();
+        if (rows.isEmpty()) return;
+        Row row = rows.get(rowIndex);
+        if (row.items.isEmpty()) return;
+        int next = colIndex;
+        if (dx < 0) {
+            next = colIndex == SEE_ALL ? row.items.size() - 1 : Math.max(0, colIndex - 1);
+        } else {
+            if (colIndex == SEE_ALL) return;
+            next = colIndex >= row.items.size() - 1 ? (row.seeTab >= 0 ? SEE_ALL : colIndex) : colIndex + 1;
+        }
+        if (next != colIndex) {
+            colIndex = next;
+            row.col = next;
+            ensureWindow(row);
+            invalidate();
+            requestFrame();
+        }
     }
 
     private void move(int dx, int dy) {
-        moved = true;
-        if (sheetOpen) {
-            moveGrid(dx, dy);
-            return;
-        }
-        if (moveLight(dx, dy)) return;
-        switch (zone) {
-            case Z_SHELF:
-                if (dx != 0) {
-                    int next = Math.max(0, Math.min(shelf.size() - 1, shelfIndex + dx));
-                    if (next == shelfIndex) return;
-                    shelfIndex = next;
-                } else if (dy < 0) {
-                    if (hero != null && hero.button) {
-                        zone = Z_HERO;
-                    } else if (!statusItems.isEmpty()) {
-                        zone = Z_STATUS;
-                        statusIndex = shelf.isEmpty() ? 0 : nearest(statusRects, tileRects[shelfIndex].centerX());
-                    } else {
-                        return;
-                    }
-                } else {
-                    if (drawerItems.isEmpty()) return;
-                    openDrawer();
-                }
-                break;
-            case Z_HERO:
-                if (dx != 0) {
-                    if (!browse(dx)) return;
-                } else if (dy < 0) {
-                    if (statusItems.isEmpty()) return;
-                    zone = Z_STATUS;
-                    statusIndex = 0;
-                } else {
-                    if (!empty()) {
-                        zone = Z_ROW;
-                        shelfRow = 0;
-                    } else {
-                        zone = Z_SHELF;
-                    }
-                }
-                break;
-            case Z_ROW:
-                if (dx != 0) {
-                    List<Recs.Pick> row = shelfRow < shelves.size() ? shelves.get(shelfRow) : new ArrayList<>();
-                    int next = Math.max(0, Math.min(row.size() - 1, shelfCol[shelfRow] + dx));
-                    if (next == shelfCol[shelfRow]) return;
-                    shelfCol[shelfRow] = next;
-                } else if (dy < 0) {
-                    if (shelfRow > 0) shelfRow--;
-                    else {
-                        zone = Z_CARDS;
-                        cardIndex = nearest(cardRects, cardCount(), shelfRects[0][shelfCol[0]].centerX());
-                    }
-                } else {
-                    if (shelfRow < ROWS - 1 && shelfRow + 1 < shelves.size() && !shelves.get(shelfRow + 1).isEmpty()) shelfRow++;
-                    else {
-                        zone = Z_SHELF;
-                        if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, tileRects.length, shelfRects[shelfRow][shelfCol[shelfRow]].centerX());
-                    }
-                }
-                break;
-            case Z_STATUS:
-                if (dx != 0) {
-                    int next = Math.max(0, Math.min(statusItems.size() - 1, statusIndex + dx));
-                    if (next == statusIndex) return;
-                    statusIndex = next;
-                } else if (dy > 0) {
-                    if (hero != null && hero.button) {
-                        zone = Z_HERO;
-                    } else {
-                        zone = Z_SHELF;
-                        if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, statusRects[statusIndex].centerX());
-                    }
-                } else {
-                    return;
-                }
-                break;
-            default:
-                if (dx != 0) {
-                    int next = Math.max(0, Math.min(drawerItems.size() - 1, drawerIndex + dx));
-                    if (next == drawerIndex) return;
-                    drawerIndex = next;
-                } else if (dy > 0) {
-                    closeDrawer();
-                } else {
-                    return;
-                }
-                break;
-        }
-        retarget(false);
-        click.move();
-    }
-
-    private static int nearest(RectF[] rects, float x) {
-        int best = 0;
-        float bestDistance = Float.MAX_VALUE;
-        for (int i = 0; i < rects.length; i++) {
-            float d = Math.abs(rects[i].centerX() - x);
-            if (d < bestDistance) {
-                bestDistance = d;
-                best = i;
+        if (zone == Z_BAR) {
+            if (dy > 0 && !rows.isEmpty()) {
+                zone = Z_ROW;
+                rowIndex = 0;
+                enterRow();
+                invalidate();
             }
-        }
-        return best;
-    }
-
-    private void moveGrid(int dx, int dy) {
-        int n = others.size();
-        if (n == 0) return;
-        int r = gridIndex / COLUMNS, col = gridIndex % COLUMNS;
-        int rows = (n + COLUMNS - 1) / COLUMNS;
-        int next = gridIndex;
-        if (dx != 0) {
-            int candidate = gridIndex + dx;
-            if (candidate >= 0 && candidate < n && candidate / COLUMNS == r) next = candidate;
-        } else {
-            int targetRow = r + dy;
-            if (targetRow >= 0 && targetRow < rows) next = Math.min(n - 1, targetRow * COLUMNS + col);
-        }
-        if (next == gridIndex) return;
-        gridIndex = next;
-        retargetGrid(false);
-        click.move();
-        gridDirty = true;
-    }
-
-    /** The whole account: channels, films, series. */
-    private void openBrowse() {
-        click.open();
-        getContext().startActivity(new android.content.Intent(getContext(), Browse.class));
-    }
-
-    /** A card from the playlist: the stream opens full screen in the app's own player. */
-    private void play(Recs.Pick p) {
-        click.open();
-        if (p.url != null && p.url.startsWith("series:")) {
-            // A series has no single stream: open it so its episodes can be picked.
-            android.content.Intent s = new android.content.Intent(getContext(), Browse.class);
-            s.putExtra(Browse.EXTRA_SERIES, p.url.substring("series:".length()));
-            getContext().startActivity(s);
             return;
         }
-        android.content.Intent it = new android.content.Intent(getContext(), Player.class);
-        it.putExtra(Player.EXTRA_URL, p.url);
-        it.putExtra(Player.EXTRA_NAME, p.title);
-        getContext().startActivity(it);
+        if (rows.isEmpty()) return;
+        if (dy < 0) {
+            if (rowIndex == 0) {
+                zone = Z_BAR;
+                barIndex = tab;
+                invalidate();
+                return;
+            }
+            rowIndex--;
+            enterRow();
+            invalidate();
+            return;
+        }
+        if (rowIndex < rows.size() - 1) {
+            rowIndex++;
+            enterRow();
+            invalidate();
+        }
+    }
+
+    /** The focus lands on the shelf: same column as the shelf above, inside the window. */
+    private void enterRow() {
+        Row row = rows.get(rowIndex);
+        colIndex = Math.max(0, Math.min(colIndex, row.items.size() - 1));
+        row.col = colIndex;
+        ensureWindow(row);
+        reveal();
+    }
+
+    private void ensureWindow(Row row) {
+        int n = cols(row.kind);
+        if (row.col < 0) return;
+        if (row.col < row.win) row.win = row.col;
+        if (row.col >= row.win + n) row.win = row.col - n + 1;
+        row.win = Math.max(0, Math.min(row.win, Math.max(0, row.items.size() - n)));
+        row.slideTo = row.win * step(row.kind);
+        requestFrame();
     }
 
     private void activate() {
-        HomeApps.Item it;
-        RectF r;
-        if (sheetOpen) {
-            if (others.isEmpty()) return;
-            it = others.get(gridIndex);
-            r = focusedCell;
-        } else if (zone == Z_HERO) {
-            Recs.Pick p = currentPick();
-            if (p != null && p.url != null) { play(p); return; }
-            if (p == null || p.pkg == null) return;
-            it = HomeApps.app(p.pkg, Recs.serviceName(p));
-            r = heroButton;
-        } else if (zone == Z_STATUS) {
-            if (statusItems.isEmpty()) return;
-            it = statusItems.get(statusIndex);
-            r = statusRects[statusIndex];
-        } else if (zone == Z_DRAWER) {
-            if (drawerItems.isEmpty()) return;
-            it = drawerItems.get(drawerIndex);
-            r = drawerRects[drawerIndex];
-        } else if (zone == Z_TOP) {
-            selectTab(topIndex);              // the top row is the four tabs, nothing else
-            return;
-        } else if (zone == Z_ROW) {
-            List<Recs.Pick> row = shelfRow < shelves.size() ? shelves.get(shelfRow) : new ArrayList<>();
-            Recs.Pick p = shelfCol[shelfRow] < row.size() ? row.get(shelfCol[shelfRow]) : null;
-            if (p == null || p.url == null) return;
-            play(p);
-            return;
-        } else if (zone == Z_CARDS) {
-            Recs.Pick p = cardIndex < cards.size() ? cards.get(cardIndex) : null;
-            if (p != null && p.url != null) { play(p); return; }
-            if (p == null || p.pkg == null) return;
-            it = HomeApps.app(p.pkg, Recs.serviceName(p));
-            r = cardRects[cardIndex];
-        } else {
-            if (shelf.isEmpty()) return;
-            it = shelf.get(shelfIndex);
-            r = tileRects[shelfIndex];
-        }
-        click.open();
-        if (it.kind == HomeApps.ALL_APPS) {
-            openSheet();
-            return;
-        }
-        if (it.kind == HomeApps.INPUTS) {
-            openDrawer();
-            for (int i = 0; i < drawerItems.size(); i++) {
-                if (drawerItems.get(i).kind == HomeApps.INPUT) {
-                    drawerIndex = i;
-                    break;
-                }
-            }
-            retarget(false);
-            return;
-        }
-        boolean opened = HomeApps.open(activity, it, this, Math.round(r.left), Math.round(r.top),
-                Math.round(r.width()), Math.round(r.height()));
-        if (!opened) showToast(Ui.tr("Não deu para abrir ", "Couldn't open ") + it.label + ".");
-    }
-
-    // MARK: - TalkBack: every reachable item as a virtual node (Spoken). Id = group * 1000 + index + 1.
-
-    private static final int GRID = 9;
-
-    private static int a11yId(int group, int index) {
-        return group * 1000 + index + 1;
-    }
-
-    @Override public AccessibilityNodeProvider getAccessibilityNodeProvider() {
-        return spoken;
-    }
-
-    private void a11yItems(List<Integer> out) {
-        if (sheetOpen) {
-            for (int i = 0; i < others.size(); i++) out.add(a11yId(GRID, i));
-            return;
-        }
-        for (int i = 0; i < 3 + lightButtons.size(); i++) out.add(a11yId(Z_TOP, i));
-        for (int i = 0; i < Math.min(3, cards.size()); i++) out.add(a11yId(Z_CARDS, i));
-        for (int i = 0; i < shelf.size(); i++) out.add(a11yId(Z_SHELF, i));
-        for (int i = 0; i < drawerItems.size(); i++) out.add(a11yId(Z_DRAWER, i));
-    }
-
-    private String a11yText(int id) {
-        int group = (id - 1) / 1000, i = (id - 1) % 1000;
-        switch (group) {
-            case GRID:
-                if (i >= others.size()) return "";
-                return label(others, i) + ", " + (i + 1) + Ui.tr(" de ", " of ") + others.size();
-            case Z_TOP:
-                if (i >= TAB_COUNT) return i - TAB_COUNT < lightButtons.size() ? label(lightButtons, i - TAB_COUNT) : "";
-                return tabs()[i] + Ui.tr(", aba ", ", tab ") + (i + 1) + Ui.tr(" de 4", " of 4");
-            case Z_CARDS: return i < cards.size() ? pickText(cards.get(i)) : "";
-            case Z_SHELF: return label(shelf, i);
-            case Z_DRAWER: return label(drawerItems, i);
-            default: return "";
-        }
-    }
-
-    /**
-     * Where the item is now. Items off screen (the closed drawer, the sheet's hidden rows, the top while the drawer is
-     * open) get a thin strip at that edge, so TalkBack's arrows can still reach them; going there brings them in.
-     */
-    private boolean a11yBounds(int id, Rect out) {
-        int group = (id - 1) / 1000, i = (id - 1) % 1000;
-        float dy;
-        switch (group) {
-            case GRID: {
-                if (!sheetOpen || i >= others.size()) return false;
-                float gridWidth = COLUMNS * GRID_W + (COLUMNS - 1) * GRID_GAP;
-                float x = ((1920 - gridWidth) / 2 + (i % COLUMNS) * (GRID_W + GRID_GAP)) * k;
-                float y = (GRID_TOP + (i / COLUMNS - scroll.target) * GRID_ROW) * k;
-                a11yRect.set(x, y, x + GRID_W * k, y + GRID_H * k);
-                dy = 0;
-                break;
-            }
-            case Z_TOP:
-                if (i >= TAB_COUNT) return false;
-                a11yRect.set(topRects[i]);
-                dy = heroLayer.getTranslationY();
-                break;
-            case Z_CARDS:
-                if (i >= Math.min(3, cards.size())) return false;
-                a11yRect.set(cardRects[i]);
-                dy = heroLayer.getTranslationY();
-                break;
-            case Z_SHELF:
-                if (i >= tileRects.length) return false;
-                a11yRect.set(tileRects[i]);
-                dy = tiles.getTranslationY();
-                break;
-            case Z_DRAWER:
-                if (i >= drawerRects.length) return false;
-                a11yRect.set(drawerRects[i]);
-                dy = drawerOpen ? 0 : h;
-                break;
-            default:
-                return false;
-        }
-        a11yRect.offset(0, dy);
-        float edge = 24 * k;
-        if (a11yRect.top >= h - edge) a11yRect.set(a11yRect.left, h - edge, a11yRect.right, h);
-        else if (a11yRect.bottom <= edge) a11yRect.set(a11yRect.left, 0, a11yRect.right, edge);
-        a11yRect.round(out);
-        return out.width() > 0 && out.height() > 0;
-    }
-
-    private int a11yFocused() {
-        if (sheetOpen) return others.isEmpty() ? -1 : a11yId(GRID, gridIndex);
-        switch (zone) {
-            case Z_TOP: return a11yId(Z_TOP, topIndex);
-            case Z_CARDS: return cardIndex < cards.size() ? a11yId(Z_CARDS, cardIndex) : -1;
-            case Z_SHELF: return shelf.isEmpty() ? -1 : a11yId(Z_SHELF, shelfIndex);
-            case Z_DRAWER: return drawerItems.isEmpty() ? -1 : a11yId(Z_DRAWER, drawerIndex);
-            default: return -1;
-        }
-    }
-
-    /** TalkBack moved to an item: the remote's focus goes there (opening or closing the drawer on the way). */
-    private void a11yFocus(int id) {
-        int group = (id - 1) / 1000, i = (id - 1) % 1000;
-        if (group == GRID) {
-            if (!sheetOpen || i >= others.size()) return;
-            gridIndex = i;
-            retargetGrid(false);
-            gridDirty = true;
-            click.move();
-            return;
-        }
-        if (sheetOpen) return;
-        switch (group) {
-            case Z_DRAWER:
-                if (i >= drawerItems.size()) return;
-                if (!drawerOpen) openDrawer();
-                drawerIndex = i;
-                break;
-            case Z_TOP:
-                if (i >= 3 + lightButtons.size()) return;
-                if (drawerOpen) closeDrawer();
-                topIndex = i;
-                if (i < TAB_COUNT) selectTab(i);
-                break;
-            case Z_CARDS:
-                if (i >= cards.size()) return;
-                if (drawerOpen) closeDrawer();
-                cardIndex = i;
-                break;
-            case Z_SHELF:
-                if (i >= shelf.size()) return;
-                if (drawerOpen) closeDrawer();
-                shelfIndex = i;
-                break;
-            default:
+        if (zone == Z_BAR) {
+            if (barIndex == GEAR) {
+                RectF box = barRects[GEAR];
+                android.app.Activity a = activity();
+                if (a != null) HomeApps.open(a, HomeApps.settings(), this, Math.round(box.left), Math.round(box.top),
+                        Math.round(box.width()), Math.round(box.height()));
                 return;
+            }
+            selectTab(barIndex);
+            return;
         }
-        zone = group;
-        retarget(false);
-        click.move();
+        if (rows.isEmpty()) return;
+        Row row = rows.get(rowIndex);
+        if (colIndex == SEE_ALL) {
+            if (row.seeTab >= 0) selectTab(row.seeTab);
+            return;
+        }
+        if (colIndex < 0 || colIndex >= row.items.size()) return;
+        open(row.items.get(colIndex), row);
     }
 
-    private static String label(List<HomeApps.Item> list, int i) {
-        return i >= 0 && i < list.size() && list.get(i).label != null ? list.get(i).label : "";
+    private void open(Tile t, Row row) {
+        android.app.Activity a = activity();
+        if (t.app != null) {
+            if (a == null) return;
+            int i = Math.max(0, colIndex);
+            float x = MARGIN * k + i * step(row.kind) - row.slide;
+            float y = BAR_H * k + 16 * k + row.y + HEAD_H * k - offset;
+            if (!HomeApps.open(a, t.app, this, Math.round(x), Math.round(y),
+                    Math.round(tw(row.kind)), Math.round(th(row.kind)))) {
+                showToast("Impossible d'ouvrir " + t.title + ".");
+            }
+            return;
+        }
+        if (t.series && !t.seriesId.isEmpty()) {
+            Intent it = new Intent(getContext(), Browse.class);
+            it.putExtra(Browse.EXTRA_SERIES, t.seriesId);
+            getContext().startActivity(it);
+            return;
+        }
+        if (t.url.isEmpty()) return;
+        Intent it = new Intent(getContext(), Player.class);
+        it.putExtra(Player.EXTRA_URL, t.url);
+        it.putExtra(Player.EXTRA_NAME, t.title);
+        it.putExtra(Player.EXTRA_LOGO, t.image);
+        getContext().startActivity(it);
     }
 
-    /** A recommendation: title, details and the app that plays it. */
-    private static String pickText(Recs.Pick p) {
-        if (p == null) return "";
-        StringBuilder s = new StringBuilder(p.title == null ? "" : p.title);
-        if (p.meta != null && !p.meta.isEmpty()) s.append(", ").append(p.meta);
-        String app = Recs.serviceName(p);
-        if (app != null && !app.isEmpty()) s.append(". App: ").append(app);
-        return s.toString();
+    private void selectTab(int index) {
+        tab = Math.max(0, Math.min(TAB_COUNT - 1, index));
+        barIndex = tab;
+        zone = Z_ROW;
+        rowIndex = 0;
+        colIndex = 0;
+        offset = offsetTo = 0;
+        rows.clear();
+        rebuild();
+        requestFrame();
+        invalidate();
     }
 
-    // MARK: - Light design: title, tabs, cards and icon-only buttons
-
-    private void layoutLight() {
-        if (lTab == null) return;
-        // Tabs: plain text, the selected one inside a white pill (tvOS); the first tab starts on the margin.
-        float pad = 22 * k, tabTop = L_TABBAR_TOP * k, tabBottom = (L_TABBAR_TOP + L_TABBAR_H) * k;
-        float x = MARGIN * k - pad;
-        for (int i = 0; i < TAB_COUNT; i++) {
-            float tw = Math.max(lTabOn.measureText(tabs()[i]), lTab.measureText(tabs()[i]));
-            topRects[i].set(x, tabTop, x + tw + 2 * pad, tabBottom);
-            x = topRects[i].right + 8 * k;
+    private void back() {
+        if (zone == Z_BAR) return;
+        if (offsetTo > 2) {
+            offsetTo = 0;
+            offset = 0;
+            rowIndex = 0;
+            colIndex = 0;
+            if (!rows.isEmpty()) rows.get(0).col = 0;
+            invalidate();
+            return;
         }
-        float b = L_BUTTON * k, right = CONTENT_R * k, cy = L_BUTTON_CY * k;
-        for (int i = 2; i >= 0; i--) {
-            topRects[TAB_COUNT + i].set(right - b, cy - b / 2, right, cy + b / 2);
-            right -= b + L_BUTTON_GAP * k;
-        }
-        // Three equal 16:9 featured cards on the 1760 px content width (Apple's row of feature cards).
-        float top = L_CARDS_TOP * k, ch = L_CARD_H * k, g = L_CARD_GAP * k, left = MARGIN * k;
-        float cw = ((CONTENT_R - MARGIN) * k - 2 * g) / 3f;
-        for (int i = 0; i < 3; i++) cardRects[i].set(left + i * (cw + g), top, left + i * (cw + g) + cw, top + ch);
-        for (int r = 0; r < ROWS; r++) {
-            float ry = (L_ROW_TOP + r * L_ROW_STEP) * k;
-            // A poster row is 2:3 (14 of them); a channel row is 16:9 (6 of them, centred in the same band).
-            boolean channels = shelfChannels[r];
-            float gap = L_ROW_GAP * k;
-            float tw = (channels ? 230 : 100) * k, th = (channels ? 129 : 150) * k;
-            int cols = Math.min(shelfRects[r].length, channels ? 6 : 14);
-            shelfCols[r] = cols;
-            float ty = ry + (L_ROW_H * k - th) / 2;
-            for (int i = 0; i < shelfRects[r].length; i++) {
-                float x0 = left + i * (tw + gap);
-                if (i >= cols) { shelfRects[r][i].setEmpty(); continue; }
-                shelfRects[r][i].set(x0, ty, x0 + tw, ty + th);
-            }
-        }
-        heroDirty = statusDirty = true;
+        zone = Z_BAR;
+        barIndex = tab;
+        invalidate();
     }
 
-    /** The three cards of the current tab (Explore, Movies, Shows) and the background taken from the first one. */
-    /** The three big cards of the current tab, straight from the account. */
-    private void updateCards() {
-        List<Recs.Pick> list = new ArrayList<>();
-        if (Iptv.configured()) {
-            Iptv iptv = Iptv.get(getContext());
-            List<Iptv.Item> src = new ArrayList<>();
-            if (tab == 0) src.addAll(iptv.fresh("vod", 21, 3));
-            else if (tab == 1) src.addAll(iptv.best("vod", 3));
-            else if (tab == 2) src.addAll(iptv.best("series", 3));
-            else src.addAll(firstChannels(iptv, 6));
-            List<Iptv.Item> fill = new ArrayList<>(src);
-            if (tab == 3) {
-                fill.addAll(firstChannels(iptv, 40));       // channels only on the Live tab
-            } else {
-                String kind = tab == 2 ? "series" : "vod";
-                fill.addAll(iptv.fresh(kind, 90, 14));
-                fill.addAll(iptv.best(kind, 20));
-                List<Iptv.Item> all = tab == 2 ? iptv.series() : iptv.movies();
-                for (int k = 0; k < Math.min(all.size(), 40); k++) fill.add(all.get(k));
-            }
-            if (fill.size() < 3) {
-                List<Iptv.Item> all = tab == 2 ? iptv.series() : iptv.movies();
-                for (int k = 0; k < Math.min(all.size(), 40); k++) fill.add(all.get(k));
-            }
-            for (Iptv.Item i : fill) {
-                boolean seen = false;
-                for (Recs.Pick q : list) if (norm(q.title).equals(norm(i.name))) { seen = true; break; }
-                if (!seen) list.add(pick(i, tab == 2));
-                if (list.size() == 3) break;
-            }
+    private android.app.Activity activity() {
+        Context c = getContext();
+        while (c instanceof android.content.ContextWrapper) {
+            if (c instanceof android.app.Activity) return (android.app.Activity) c;
+            c = ((android.content.ContextWrapper) c).getBaseContext();
         }
-        if (!samePicks(list, cards)) {
-            cards = list;
-            cardIndex = Math.min(cardIndex, Math.max(0, list.size() - 1));
-            if (zone == Z_CARDS && list.isEmpty()) {
-                zone = Z_SHELF;
-                retarget(false);
-            }
-        }
-        updateRow();
-        if (!moved && !cards.isEmpty() && zone == Z_SHELF) zone = Z_CARDS;   // open on the first card
-        heroDirty = true;
-        spoken.focusMoved();
+        return null;
     }
 
-    /** French channels, in the order the panel lists them. */
-    private static List<Iptv.Item> channels(Iptv iptv, int max) {
-        List<Iptv.Item> out = new ArrayList<>();
-        for (Iptv.Category c : iptv.liveCategories()) {
-            String cat = c.name.toUpperCase(java.util.Locale.ROOT);
-            if (!(cat.contains("FRANCE") || cat.contains("FRENCH") || cat.contains("|FR|") || cat.contains("FR:")
-                    || cat.contains("TF1") || cat.contains("FRANCAIS") || cat.contains("FRANÇAIS"))) continue;
-            for (Iptv.Item i : iptv.live()) {
-                if (!i.group.equals(c.id) || i.url.isEmpty() || i.name.startsWith("─")) continue;
-                if (!contains(out, i)) out.add(i);
-                if (out.size() >= max) return out;
+    // MARK: - Text helpers
+
+    /** The string, cut with an ellipsis to fit the width. */
+    private static String fit(Paint p, String s, float maxWidth) {
+        if (s == null) return "";
+        if (p.measureText(s) <= maxWidth) return s;
+        float dots = p.measureText("…");
+        int n = p.breakText(s, true, Math.max(0, maxWidth - dots), null);
+        return s.substring(0, Math.max(0, n)).trim() + "…";
+    }
+
+    private static List<String> wrap(String s, Paint p, float maxWidth, int maxLines) {
+        List<String> out = new ArrayList<>();
+        if (s == null) return out;
+        String rest = s.trim();
+        while (!rest.isEmpty() && out.size() < maxLines) {
+            int n = p.breakText(rest, true, maxWidth, null);
+            if (n <= 0) break;
+            if (n < rest.length()) {
+                int space = rest.lastIndexOf(' ', n);
+                if (space > 0) n = space;
             }
+            out.add(rest.substring(0, n).trim());
+            rest = rest.substring(n).trim();
+        }
+        if (!rest.isEmpty() && !out.isEmpty()) {
+            int last = out.size() - 1;
+            out.set(last, fit(p, out.get(last) + "…", maxWidth));
         }
         return out;
     }
 
-    /** The first channels of the panel, all countries, one per name. */
-    private static List<Iptv.Item> firstChannels(Iptv iptv, int max) {
-        List<Iptv.Item> out = new ArrayList<>();
-        for (Iptv.Item i : iptv.live()) {
-            if (i.url.isEmpty() || i.name.startsWith("─")) continue;
-            out.add(i);
-            if (out.size() >= max * 3) break;                 // enough to survive the duplicates
-        }
-        return out;
-    }
+    // MARK: - Panel names
 
-    private static boolean contains(List<Iptv.Item> list, Iptv.Item item) {
-        for (Iptv.Item i : list) if (i.id.equals(item.id)) return true;
-        return false;
-    }
-
-    /** The first `max` items of one category. */
-    private static List<Iptv.Item> inCategory(List<Iptv.Item> all, String categoryId, int max) {
-        List<Iptv.Item> out = new ArrayList<>();
-        for (Iptv.Item i : all) {
-            if (!categoryId.equals(i.group)) continue;
-            out.add(i);
-            if (out.size() >= max) break;
-        }
-        return out;
-    }
-
-    /**
-     * Two rows under the cards, per tab: what is new (or unfinished), then the channels; for Films and Series, the
-     * first two categories of the panel; for Channels, two channel groups. Everything plays in the app.
-     */
-    private void updateRow() {
-        shelves.clear();
-        shelfTitles[0] = shelfTitles[1] = "";
-        shelfChannels[0] = shelfChannels[1] = false;
-        shelves.add(new ArrayList<>());
-        shelves.add(new ArrayList<>());
-        if (!Iptv.configured()) return;
-        Iptv iptv = Iptv.get(getContext());
-
-        if (tab == 0) {
-            List<Recs.Pick> resume = new ArrayList<>();
-            for (Iptv.Item i : Prefs.resume("vod")) resume.add(pick(i));
-            for (Iptv.Item i : Prefs.resume("series")) resume.add(pick(i));
-            List<Recs.Pick> first = new ArrayList<>();
-            List<Recs.Pick> pool = new ArrayList<>();
-            for (Iptv.Item i : iptv.fresh("vod", 21, 14)) pool.add(pick(i));
-            for (Recs.Pick p : resume) pool.add(0, p);
-            for (Recs.Pick p : pool) {
-                if (first.size() >= 14) break;
-                boolean seen = false;
-                for (Recs.Pick q : first) if (norm(q.title).equals(norm(p.title))) { seen = true; break; }
-                if (!seen) first.add(p);
-            }
-            shelfTitles[0] = resume.isEmpty() ? "Nouveautés" : "Reprendre la lecture";
-            shelves.set(0, first);
-            shelfChannels[0] = false;
-            shelfTitles[1] = "Chaînes";
-            shelves.set(1, picks(firstChannels(iptv, ROW_COLS)));
-            shelfChannels[1] = true;
-        } else if (tab == 1) {
-            List<Iptv.Item> films = iptv.movies();
-            int r = 0;
-            for (Iptv.Category c : iptv.movieCategories()) {
-                List<Iptv.Item> items = inCategory(films, c.id, 14);
-                if (items.size() < 3) continue;
-                shelfTitles[r] = clean(c.name);
-                shelves.set(r, picks(items));
-                if (++r == 2) break;
-            }
-        } else if (tab == 2) {
-            List<Iptv.Item> series = iptv.series();
-            int r = 0;
-            for (Iptv.Category c : iptv.seriesCategories()) {
-                List<Iptv.Item> items = inCategory(series, c.id, 14);
-                if (items.size() < 3) continue;
-                shelfTitles[r] = clean(c.name);
-                shelves.set(r, picks(items, true));
-                if (++r == 2) break;
-            }
-        } else {
-            shelfTitles[0] = "Chaînes françaises";
-            shelves.set(0, picks(channels(iptv, ROW_COLS)));
-            shelfChannels[0] = true;
-            List<Iptv.Item> others = new ArrayList<>();
-            for (Iptv.Category c : iptv.liveCategories()) {
-                if (c.name.toUpperCase(java.util.Locale.ROOT).contains("FRANCE")) continue;
-                for (Iptv.Item i : iptv.live()) {
-                    if (!i.group.equals(c.id) || i.url.isEmpty() || i.name.startsWith("─")) continue;
-                    others.add(i);
-                    if (others.size() >= 14) break;
-                }
-                if (others.size() >= 14) break;
-            }
-            shelfTitles[1] = "Autres pays";
-            shelves.set(1, picks(others));
-            shelfChannels[1] = true;
-        }
-
-        layoutLight();                     // the row kinds just changed: poster or channel geometry
-        for (int r = 0; r < ROWS; r++) {
-            List<Recs.Pick> row = shelves.get(r);
-            int max = Math.max(1, shelfCols[r]);
-            if (row.size() > max) shelves.set(r, new ArrayList<>(row.subList(0, max)));
-            shelfCol[r] = Math.min(shelfCol[r], Math.max(0, shelves.get(r).size() - 1));
-        }
-        if (empty() && zone == Z_ROW) zone = Z_SHELF;
-    }
-
-    /** One tile per channel or title: the panel lists the same channel several times (HD, FHD, backup). */
-    private static List<Recs.Pick> picks(List<Iptv.Item> items) {
-        return picks(items, false);
-    }
-
-    private static List<Recs.Pick> picks(List<Iptv.Item> items, boolean series) {
-        List<Recs.Pick> out = new ArrayList<>();
-        for (Iptv.Item i : items) {
-            String key = norm(i.name);
-            boolean seen = false;
-            for (Recs.Pick q : out) if (key.equals(norm(q.title))) { seen = true; break; }
-            if (!seen) out.add(pick(i, series));
-        }
-        return out;
-    }
-
-    /** A panel name made readable: "FR || TF1 [HEVC]" is a data label, not a title for the sofa. */
-    private static String pretty(String name) {
+    /** "FR || TF1 [HEVC]" is a data label, not a title for the sofa. */
+    static String pretty(String name) {
         if (name == null) return "";
         String t = name.replace("[#]", "").replace("|FR|", "").replace("FR ||", "").replace("FR||", "").replace("FR:", "").trim();
         t = t.replaceAll("\\s*\\[(HEVC|FHD|UHD|4K|HD|SD|RAW|BACKUP)]", "");
         t = t.replaceAll("\\s*\\((FHD|UHD|4K|HD|SD|RAW|BACKUP)\\)", "");
         t = t.replaceAll("\\s{2,}", " ").trim();
-        while (t.startsWith("#") || t.startsWith("-") || t.startsWith("·") || t.startsWith("[") || t.startsWith("]")) t = t.substring(1).trim();
+        while (t.startsWith("#") || t.startsWith("-") || t.startsWith("·") || t.startsWith("[") || t.startsWith("]")) {
+            t = t.substring(1).trim();
+        }
+        t = t.replaceAll("(?i)\\s+(FHD|UHD|4K|HD|SD|RAW|BACKUP|MULTI)\\s*$", "").trim();
         return t.isEmpty() ? name.trim() : t;
     }
 
     /** A channel name without its quality suffix, to spot the same channel twice. */
-    private static String norm(String name) {
+    static String norm(String name) {
         if (name == null) return "";
-        String t = name.toUpperCase(java.util.Locale.ROOT)
+        String t = name.toUpperCase(Locale.ROOT)
                 .replace("FULL HD", "").replace("FHD", "").replace("UHD", "").replace("4K", "")
                 .replace("HD", "").replace("SD", "").replace("RAW", "").replace("BACKUP", "")
                 .replace("FR:", "").replace("|FR|", "").replace("FR |", "");
-        t = t.replaceAll("[^A-Z0-9]", "");
-        return t;
+        return t.replaceAll("[^A-Z0-9]", "");
     }
 
     /** The panel decorates its category names: keep the word. */
-    private static String clean(String name) {
+    static String clean(String name) {
+        if (name == null) return "";
         String t = name.replace("✧", "").replace("･", "").replace("ﾟ", "").replace("─", "").replace("||", "");
         while (t.startsWith(":") || t.startsWith("*") || t.startsWith("-") || t.startsWith("◇") || t.startsWith("·")) {
             t = t.substring(1);
@@ -2359,367 +1179,37 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         return t.isEmpty() ? name.trim() : t;
     }
 
-    private static Recs.Pick pick(Iptv.Item i) {
-        return pick(i, false);
-    }
-
-    private static Recs.Pick pick(Iptv.Item i, boolean series) {
-        Recs.Pick p = new Recs.Pick();
-        p.title = pretty(i.name);
-        p.url = series || i.url == null || i.url.isEmpty() ? "series:" + i.id : i.url;
-        p.image = i.logo;
-        p.meta = i.group;
-        return p;
-    }
-
-    private int cardCount() {
-        return Math.min(3, cards.size());
-    }
-
-    private boolean empty() {
-        for (List<Recs.Pick> row : shelves) if (!row.isEmpty()) return false;
-        return true;
-    }
-
-    private void selectTab(int index) {
-        if (index == tab) return;
-        tab = index;
-        updateCards();
-        heroDirty = true;
-    }
-
-    /**
-     * Background: the first card's photo, heavily blurred and almost white; without it, a light gradient. At night, the
-     * same photo almost black (or a dark gradient), drawn on top during the transition.
-     */
-    private void drawLightSky(Canvas c) {
-        long up = SystemClock.uptimeMillis();
-        float e = bgFadeAt == 0 ? 1 : fadeEase(bgFadeAt, up);
-        boolean fading = bgFadeAt != 0;
-        float dk = dark();
-        // Drawer open: the background lightens (by day) or darkens (at night), as a filter on the drawing itself.
-        android.graphics.ColorFilter v = veil(tone(0.30f, 0.38f) * Ui.clamp(drawer.value), blend(0xFFFFFFFF, 0xFF000000, dk));
-        // The gradient is the floor of the design: drawn first, always, so a missing photo can never leave dark
-        // typography on a black screen (the bug that made the whole home unreadable).
-        if (lightGradient == null) lightGradient = new LinearGradient(0, 0, 0, h, 0xFFF7F7F9, 0xFFE6E6EC, Shader.TileMode.CLAMP);
-        if (nightGradient == null) nightGradient = new LinearGradient(0, 0, 0, h, 0xFF1A1A1E, 0xFF050506, Shader.TileMode.CLAMP);
-        fill.setColorFilter(v);
-        fill.setShader(dk > 0.5f ? nightGradient : lightGradient);
-        c.drawRect(screen, fill);
-        fill.setShader(null);
-        fill.setColorFilter(null);
-        imagePaint.setColorFilter(v);
-        if (fading && bgFrom != null) drawLightImage(c, bgFrom, bgTo == null ? 1 - e : 1);
-        if (bgTo != null) drawLightImage(c, bgTo, fading ? e : 1);
-        imagePaint.setColorFilter(null);
-    }
-
-    private void drawLightImage(Canvas c, Backdrop b, float alpha) {
-        if (dark() < 0.5f || b.nightImage == null) drawImage(c, b.lightImage, alpha);
-        if (dark() > 0.5f) drawImage(c, b.nightImage, alpha);
-    }
-
-    private void drawLightTop(Canvas c) {
-        applyTone();
-        // Tabs: the selected one always sits in a white pill (readable at a distance, like tvOS); when the focus is on
-        // the tab row the pill turns solid white and its label goes dark.
-        for (int i = 0; i < TAB_COUNT; i++) {
-            RectF r = topRects[i];
-            boolean on = i == tab;
-            float focus = on ? Ui.clamp(topFocus[i].value) : 0;
-            if (on) {
-                float s = 1 + 0.04f * focus;
-                cell.set(r.centerX() - r.width() * s / 2, r.centerY() - r.height() * s / 2,
-                        r.centerX() + r.width() * s / 2, r.centerY() + r.height() * s / 2);
-                float rr = cell.height() / 2;
-                if (focus > 0.01f) {
-                    tmp.set(cell);
-                    tmp.offset(0, 8 * k * focus);
-                    shadow.setColor(Ui.alpha(0xFF000000, tone(0.16f, 0.42f) * focus));
-                    c.drawRoundRect(tmp, rr, rr, shadow);
-                }
-                fill.setShader(null);
-                fill.setColor(Ui.alpha(0xFFFFFFFF, 0.13f + 0.87f * focus));
-                c.drawRoundRect(cell, rr, rr, fill);
-            }
-            Paint p = on ? lTabOn : lTab;
-            if (on) lTabOn.setColor(blend(0xFFFFFFFF, L_INK, focus));
-            c.drawText(tabs()[i], r.centerX() - p.measureText(tabs()[i]) / 2, r.centerY() + Ui.halfCap(p), p);
-        }
-        int top = -1;
-        for (int i = 0; i < cardCount(); i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
-        for (int i = 0; i < cardCount(); i++) if (i != top) drawLightCard(c, i);
-        if (top >= 0) drawLightCard(c, top);
-        drawRows(c);
-        if (HomeData.coinCount() > 0) drawQuotes(c);
-    }
-
-    /**
-     * Recommendation card: the title's photo (already at the focused card size, so it stays sharp), rounded corners and
-     * a soft shadow; when focused, it grows 5%, rises and lights up its border. Below it, the title (and on the large
-     * card, genre · runtime · service).
-     */
-    /** The posters under the cards: the account's own content, two rows. */
-    private void drawRows(Canvas c) {
-        if (lRowTitle == null) {
-            lRowTitle = Ui.text(Ui.semibold, 27 * k, 0xFF4A4A50);
-            lRowTitle.setTextAlign(Paint.Align.LEFT);
-            rowGlass = new Paint(Paint.ANTI_ALIAS_FLAG);
-            rowGlassOn = new Paint(Paint.ANTI_ALIAS_FLAG);
-            rowGlassOn.setStyle(Paint.Style.STROKE);
-            rowGlassOn.setStrokeWidth(3f * k);
-            rowGlassOn.setColor(tone(0x33000000, 0x99FFFFFF));
-            rowInk = Ui.text(Ui.medium, 11 * k, 0xFFFFFFFF);
-            rowFilter = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
-        }
-        lRowTitle.setColor(tone(0xFF3A3A3F, 0xFFFFFFFF));
-        for (int r = 0; r < ROWS && r < shelves.size(); r++) {
-            List<Recs.Pick> items = shelves.get(r);
-            if (items.isEmpty()) continue;
-            float titleBase = (L_ROW_TITLE + r * L_ROW_STEP) * k + Ui.halfCap(lRowTitle);
-            c.drawText(shelfTitles[r], MARGIN * k, titleBase, lRowTitle);
-            boolean channelRow = r < shelfChannels.length && shelfChannels[r];
-            for (int i = 0; i < items.size() && i < shelfCols[r]; i++) {
-                RectF rc = shelfRects[r][i];
-                boolean on = zone == Z_ROW && shelfRow == r && shelfCol[r] == i;
-                float rad = 14 * k;
-                rowGlass.setColor(tone(0x0F000000, 0x33FFFFFF));
-                c.drawRoundRect(rc, rad, rad, rowGlass);
-                Recs.Pick p = items.get(i);
-                Bitmap b = Posters.get(getContext()).get(p.image, (u, bmp) -> handler.post(this::invalidateAll));
-                if (b != null) {
-                    // A channel logo is drawn whole (never cropped: the "C" of CANAL+ disappeared); artwork fills.
-                    float sw = b.getWidth(), sh = b.getHeight();
-                    float scale = channelRow ? Math.min(rc.width() / sw, rc.height() / sh)
-                            : Math.max(rc.width() / sw, rc.height() / sh);
-                    float scale2 = channelRow ? scale * 0.78f : scale;
-                    float dw = sw * scale2, dh = sh * scale2;
-                    RectF dst = new RectF(rc.centerX() - dw / 2, rc.centerY() - dh / 2,
-                            rc.centerX() + dw / 2, rc.centerY() + dh / 2);
-                    clip.reset();
-                    clip.addRoundRect(rc, rad, rad, Path.Direction.CW);
-                    c.save();
-                    c.clipPath(clip);
-                    c.drawBitmap(b, null, dst, rowFilter);
-                    c.restore();
-                } else {
-                    // No artwork yet: the title, not a lone letter (a "B" tile reads as a bug).
-                    Paint cap = Ui.text(Ui.medium, 18 * k, tone(0x66000000, 0x99FFFFFF));
-                    cap.setTextAlign(Paint.Align.CENTER);
-                    String txt = p.title == null ? "" : p.title;
-                    String line1 = TextUtils.ellipsize(txt, new TextPaint(cap), rc.width() - 16 * k, TextUtils.TruncateAt.END).toString();
-                    c.drawText(line1, rc.centerX(), rc.centerY() + Ui.halfCap(cap) - 10 * k, cap);
-                }
-                if (on) c.drawRoundRect(rc, rad, rad, rowGlassOn);
+    /** The French channels first: the home screen should not open on a Belgian shopping channel. */
+    private static List<Iptv.Item> frenchChannels(Iptv iptv, int max) {
+        List<Iptv.Item> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        List<Iptv.Item> all = iptv.live();
+        for (Iptv.Category c : iptv.liveCategories()) {
+            if (!c.name.toUpperCase(Locale.ROOT).contains("FRANCE")) continue;
+            for (Iptv.Item i : all) {
+                if (!c.id.equals(i.group) || i.url.isEmpty()) continue;
+                if (i.name.startsWith("─") || i.name.startsWith("=") || i.name.contains("✧")) continue;
+                if (!seen.add(norm(i.name))) continue;
+                out.add(i);
+                if (out.size() >= max) return out;
             }
         }
-    }
-
-    private void drawLightCard(Canvas c, int i) {
-        if (i >= cards.size()) return;                 // an empty slot is not a card
-        RectF base = cardRects[i];
-        Recs.Pick p = cards.get(i);
-        float v = cardFocus[i].value, f = Ui.clamp(v), s = 1 + 0.04f * v;
-        float bw = base.width(), bh = base.height(), r0 = 18 * k;
-        float cx = base.centerX(), cy = base.centerY() - 8 * k * v;
-        cell.set(cx - bw * s / 2, cy - bh * s / 2, cx + bw * s / 2, cy + bh * s / 2);
-        float r = r0 * s;
-        c.save();
-        c.translate(cx, cy);
-        c.scale(s, s);
-        tmp.set(-bw / 2, -bh / 2, bw / 2, bh / 2);
-        tmp.offset(0, (10 + 16 * f) * k);
-        shadowDeep.setColor(Ui.alpha(0xFF000000, tone(0.12f, 0.42f) + tone(0.18f, 0.34f) * f));
-        c.drawRoundRect(tmp, r0, r0, shadowDeep);
-        c.restore();
-        clip.reset();
-        clip.addRoundRect(cell, r, r, Path.Direction.CW);
-        c.save();
-        c.clipPath(clip);
-        Backdrop b = p == null ? null : recs.backdrop(p);
-        Bitmap img = b == null ? null : b.wide;
-        if (img == null && p != null && p.image != null && !p.image.isEmpty()) {
-            // The account's own logo for this channel or film (no TMDB photo behind it).
-            Bitmap own = Posters.get(getContext()).get(p.image, (u, bmp) -> handler.post(this::invalidateAll));
-            if (own != null) img = own;
-        }
-        if (img != null) {
-            // Centre-crop: the artwork keeps its proportions instead of being stretched into the card.
-            float sw = img.getWidth(), sh = img.getHeight();
-            float scale = Math.max(cell.width() / sw, cell.height() / sh);
-            float dw = sw * scale, dh = sh * scale;
-            RectF dst = new RectF(cell.centerX() - dw / 2, cell.centerY() - dh / 2,
-                    cell.centerX() + dw / 2, cell.centerY() + dh / 2);
-            c.drawBitmap(img, null, dst, bitmapPaint);
-        } else {
-            fill.setShader(null);
-            fill.setColor(tone(0xFFDADADF, 0xFF2C2C2E));
-            c.drawRect(cell, fill);
-            // No artwork (a panel logo that 404s): the title over the card, never an empty frame.
-            if (p != null) {
-                Paint cap = Ui.text(Ui.semibold, 26 * k, tone(0xAA000000, 0xCCFFFFFF));
-                cap.setTextAlign(Paint.Align.CENTER);
-                String line = TextUtils.ellipsize(p.title, new TextPaint(cap), cell.width() - 40 * k, TextUtils.TruncateAt.END).toString();
-                c.drawText(line, cell.centerX(), cell.centerY() + Ui.halfCap(cap), cap);
+        if (out.isEmpty()) {
+            for (Iptv.Item i : all) {
+                if (i.url.isEmpty()) continue;
+                out.add(i);
+                if (out.size() >= max) break;
             }
         }
-        if (f > 0.01f) {
-            sheen.setShader(new LinearGradient(cell.left, cell.top, cell.left + cell.width() * 0.5f, cell.bottom,
-                    Ui.alpha(0xFFFFFFFF, 0.18f * f), 0x00FFFFFF, Shader.TileMode.CLAMP));
-            c.drawRect(cell, sheen);
-        }
-        c.restore();
-        if (f > 0.01f) {
-            rim.setShader(new LinearGradient(0, cell.top, 0, cell.bottom,
-                    Ui.alpha(0xFFFFFFFF, 0.9f * f), Ui.alpha(0xFFFFFFFF, 0.35f * f), Shader.TileMode.CLAMP));
-            c.drawRoundRect(cell, r, r, rim);
-        }
-        if (p == null) return;
-        TextPaint tp = new TextPaint(lCardTitle);
-        c.drawText(TextUtils.ellipsize(p.title, tp, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 40 * k, lCardTitle);
-        if (f > 0.4f && p.meta != null && !p.meta.isEmpty()) {
-            TextPaint mp = new TextPaint(lCardMeta);
-            mp.setAlpha(Math.round(255 * Ui.clamp((f - 0.4f) / 0.6f)));
-            c.drawText(TextUtils.ellipsize(p.meta, mp, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 72 * k, mp);
-        }
+        return out;
     }
 
-    /**
-     * Live TV, HDMI Inputs and Settings: icon-only glass circles (light by day, smoked at night); the focused one turns
-     * white with a dark icon (the tvOS focus) and its name appears below it.
-     */
-    private void drawLightButtons(Canvas c) {
-        applyTone();
-        for (int i = 0; i < lightButtons.size() && i < 3; i++) {
-            RectF r = topRects[TAB_COUNT + i];
-            float f = Ui.clamp(topFocus[TAB_COUNT + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
-            cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
-            tmp.set(cell);
-            tmp.offset(0, (6 + 8 * f) * k);
-            shadow.setColor(Ui.alpha(0xFF000000, tone(0.1f, 0.3f) + tone(0.14f, 0.2f) * f));
-            c.drawRoundRect(tmp, rad, rad, shadow);
-            scene.liquid(c, cell, rad, tone(0xFFFFFFFF, SMOKE), tone(0.55f, 0.5f), tone(0.02f, 0.01f), 12 * k, 8 * k,
-                    tone(0.6f, 0.45f), 1 - f);
-            if (f > 0.01f) {
-                fill.setShader(null);
-                fill.setColor(Ui.alpha(0xFFFFFFFF, f));
-                c.drawCircle(cell.centerX(), cell.centerY(), rad, fill);
-            }
-            Symbols.draw(getContext(), c, lightButtons.get(i).symbol, cell.centerX(), cell.centerY(), 24 * k * s,
-                    blend(tone(L_INK, 0xEBFFFFFF), L_INK, f));
-            if (f > 0.01f) {
-                String label = lightButtons.get(i).label;
-                float half = lTip.measureText(label) / 2;
-                float x = Math.min(r.centerX(), CONTENT_R * k - half);
-                lTip.setAlpha(Math.round(255 * f));
-                c.drawText(label, x, r.bottom + (40 + 4 * f) * k, lTip);
-            }
+    private static List<Iptv.Item> firstOf(List<Iptv.Item> items, int max) {
+        List<Iptv.Item> out = new ArrayList<>();
+        for (Iptv.Item i : items) {
+            out.add(i);
+            if (out.size() >= max) break;
         }
-    }
-
-    private boolean moveLight(int dx, int dy) {
-        switch (zone) {
-            case Z_SHELF:
-                if (shelf.isEmpty()) return false;
-                if (dy < 0) {                       // swipe up above Netflix: weather, HDMI, shortcuts
-                    openDrawer();
-                    break;
-                }
-                if (dy > 0) {                      // down: the tabs, then the account
-                    zone = Z_TOP;
-                    topIndex = tab;
-                    break;
-                }
-                return false;                      // left/right: the legacy switch moves between apps
-            case Z_CARDS:
-                if (dx != 0) {
-                    int next = Math.max(0, Math.min(cardCount() - 1, cardIndex + dx));
-                    if (next == cardIndex) return true;
-                    cardIndex = next;
-                } else if (dy < 0) {
-                    zone = Z_TOP;
-                    topIndex = tab;     // as on Apple TV: moving up to the tabs focuses the selected tab
-                } else if (!empty()) {
-                    zone = Z_ROW;       // the account's rows sit under the cards
-                    shelfRow = 0;
-                    shelfCol[0] = nearest(shelfRects[0], Math.min(shelves.get(0).size(), shelfCols[0]), cardRects[cardIndex].centerX());
-                } else {
-                    zone = Z_SHELF;
-                    if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, tileRects.length, cardRects[cardIndex].centerX());
-                }
-                break;
-            case Z_ROW: {
-                if (shelves.isEmpty()) return false;
-                List<Recs.Pick> row = shelves.get(shelfRow);
-                if (dx != 0) {
-                    int next = Math.max(0, Math.min(row.size() - 1, shelfCol[shelfRow] + dx));
-                    if (next == shelfCol[shelfRow]) return true;
-                    shelfCol[shelfRow] = next;
-                } else if (dy < 0) {
-                    if (shelfRow > 0) shelfRow--;
-                    else {
-                        zone = Z_CARDS;
-                        cardIndex = nearest(cardRects, cardCount(), shelfRects[0][shelfCol[0]].centerX());
-                    }
-                } else {
-                    if (shelfRow < ROWS - 1 && shelfRow + 1 < shelves.size() && !shelves.get(shelfRow + 1).isEmpty()) {
-                        shelfRow++;
-                    } else {
-                        return true;        // the app row is at the top now: down from the last row does nothing
-                    }
-                }
-                break;
-            }
-            case Z_TOP:
-                if (dx != 0) {
-                    int next = Math.max(0, Math.min(TAB_COUNT - 1, topIndex + dx));
-                    if (next == topIndex) return true;
-                    topIndex = next;
-                    if (topIndex < TAB_COUNT) selectTab(topIndex);   // like Apple TV tabs: focusing a tab selects it
-                } else if (dy > 0) {
-                    if (cards.isEmpty()) {
-                        zone = Z_SHELF;
-                    } else {
-                        zone = Z_CARDS;
-                        cardIndex = nearest(cardRects, cards.size(), topRects[topIndex].centerX());
-                    }
-                } else {
-                    zone = Z_SHELF;     // up from the tabs: the app row
-                    if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, shelf.size(), topRects[topIndex].centerX());
-                }
-                break;
-            default:
-                return false;
-        }
-        retarget(false);
-        click.move();
-        return true;
-    }
-
-    private static int nearest(RectF[] rects, int count, float x) {
-        int best = 0;
-        float bestDistance = Float.MAX_VALUE;
-        for (int i = 0; i < Math.min(count, rects.length); i++) {
-            float d = Math.abs(rects[i].centerX() - x);
-            if (d < bestDistance) {
-                bestDistance = d;
-                best = i;
-            }
-        }
-        return best;
-    }
-
-    // MARK: - Helpers
-
-    private static float smoothstep(float e0, float e1, float x) {
-        float t = Ui.clamp((x - e0) / (e1 - e0));
-        return t * t * (3 - 2 * t);
-    }
-
-    private static int blend(int a, int b, float f) {
-        int aa = a >>> 24, ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
-        int ba = b >>> 24, br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
-        return (Math.round(aa + (ba - aa) * f) << 24) | (Math.round(ar + (br - ar) * f) << 16)
-                | (Math.round(ag + (bg - ag) * f) << 8) | Math.round(ab + (bb - ab) * f);
+        return out;
     }
 }

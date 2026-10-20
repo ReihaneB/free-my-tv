@@ -82,6 +82,21 @@ final class Prefs {
         }
     }
 
+    /** Every saved position at once (one read of the store instead of one per card), url → fraction watched. */
+    static java.util.Map<String, Float> progressAll() {
+        java.util.Map<String, Float> out = new java.util.HashMap<>();
+        for (java.util.Map.Entry<String, ?> e : new java.util.ArrayList<>(play().getAll().entrySet())) {
+            String[] f = String.valueOf(e.getValue()).split("\t", -1);
+            if (f.length < 4) continue;
+            try {
+                long pos = Long.parseLong(f[1]), dur = Long.parseLong(f[2]);
+                if (dur > 0) out.put(f[3], Math.max(0f, Math.min(1f, (float) pos / dur)));
+            } catch (Exception ignored) {
+            }
+        }
+        return out;
+    }
+
     private static String key(String url) {
         return Integer.toHexString(url.hashCode());
     }

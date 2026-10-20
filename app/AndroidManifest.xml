@@ -126,6 +126,17 @@
                 android:resource="@xml/remote_key_service" />
         </service>
 
+        <!-- One stream, full screen (the home screen's cards and the playlist open this). -->
+        <activity
+            android:name=".Player"
+            android:process=":home"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|fontScale|locale|layoutDirection"
+            android:theme="@style/FreeMyTV.Home" />
+
         <receiver
             android:name=".HomeReceiver"
             android:exported="false">

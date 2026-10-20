@@ -35,7 +35,9 @@ import java.util.Map;
  */
 final class Iptv {
     static final class Item {
-        String name = "", logo = "", group = "", url = "";
+        String name = "", logo = "", group = "", url = "", id = "";
+        long added;             // when the panel added it: "new this week"
+        float rating;           // films and series only
         boolean live;
     }
 
@@ -116,6 +118,58 @@ final class Iptv {
         for (Item i : load(type)) if (categoryId.equals(i.group)) out.add(i);
         return out;
     }
+
+    /** Films added in the last `days` (the panel's own "new" shelf), newest first. */
+    List<Item> fresh(String type, int days, int max) {
+        List<Item> out = new ArrayList<>();
+        long since = System.currentTimeMillis() - days * 24 * 3600_000L;
+        for (Item i : load(type)) if (i.added >= since) out.add(i);
+        out.sort((a, b) -> Long.compare(b.added, a.added));
+        return out.size() > max ? new ArrayList<>(out.subList(0, max)) : out;
+    }
+
+    /** Best rated first (films and series carry a note). */
+    List<Item> best(String type, int max) {
+        List<Item> out = new ArrayList<>();
+        for (Item i : load(type)) if (i.rating > 0) out.add(i);
+        out.sort((a, b) -> Float.compare(b.rating, a.rating));
+        return out.size() > max ? new ArrayList<>(out.subList(0, max)) : out;
+    }
+
+    /** One series' episodes, fetched when the series is opened (a series has no single stream). */
+    List<Item> episodes(String seriesId) {
+        List<Item> out = new ArrayList<>();
+        try {
+            JSONObject root = new JSONObject(download(api("&action=get_series_info&series_id=" + enc(seriesId))));
+            JSONObject seasons = root.optJSONObject("episodes");
+            if (seasons == null) return out;
+            JSONArray names = seasons.names();
+            if (names == null) return out;
+            for (int s = 0; s < names.length(); s++) {
+                String season = names.getString(s);
+                JSONArray list = seasons.optJSONArray(season);
+                if (list == null) continue;
+                for (int i = 0; i < list.length(); i++) {
+                    JSONObject o = list.optJSONObject(i);
+                    if (o == null) continue;
+                    Item it = new Item();
+                    String num = o.optString("episode_num", String.valueOf(i + 1));
+                    String title = o.optString("title", "").trim();
+                    it.name = "S" + pad(season) + " E" + pad(num) + (title.isEmpty() ? "" : " · " + title);
+                    it.id = o.optString("id");
+                    it.group = season;
+                    String ext = o.optString("container_extension", "mp4");
+                    it.url = streamUrl("series", it.id, ext);
+                    if (!it.id.isEmpty()) out.add(it);
+                }
+            }
+        } catch (Exception e) {
+            AppLog.w("episodes: " + e.getMessage());
+        }
+        return out;
+    }
+
+    private static String pad(String n) { return n.length() == 1 ? "0" + n : n; }
 
     void refreshIfStale() {
         if (!configured() || loading) return;
@@ -209,7 +263,10 @@ final class Iptv {
             it.group = o.optString("category_id");
             it.live = "live".equals(type);
             String ext = "live".equals(type) ? "ts" : o.optString("container_extension", "mp4");
-            it.url = streamUrl(type, o.optString("stream_id"), ext);
+            it.id = o.optString("stream_id");
+            it.url = streamUrl(type, it.id, ext);
+            it.added = epoch(o.optString("added"));
+            it.rating = (float) o.optDouble("rating", 0);
             if (!it.name.isEmpty()) out.add(it);
         }
         return out;
@@ -225,6 +282,9 @@ final class Iptv {
             it.name = o.optString("name").trim();
             it.logo = o.optString("cover", "");
             it.group = o.optString("category_id");
+            it.id = o.optString("series_id");
+            it.rating = (float) o.optDouble("rating", 0);
+            it.added = epoch(o.optString("last_modified", o.optString("added")));
             it.url = "";
             if (!it.name.isEmpty()) out.add(it);
         }
@@ -246,7 +306,7 @@ final class Iptv {
 
     // MARK: - Files
 
-    private File itemsFile(String type) { return new File(dir, "items-" + type + ".tsv"); }
+    private File itemsFile(String type) { return new File(dir, "items2-" + type + ".tsv"); }
 
     private File catsFile(String type) { return new File(dir, "cats-" + type + ".tsv"); }
 
@@ -258,13 +318,16 @@ final class Iptv {
             String line;
             while ((line = r.readLine()) != null) {
                 String[] c = line.split("\t", -1);
-                if (c.length < 5) continue;
+                if (c.length < 8) continue;
                 Item i = new Item();
                 i.live = "1".equals(c[0]);
                 i.group = c[1];
                 i.name = c[2];
                 i.logo = c[3];
                 i.url = c[4];
+                i.id = c[5];
+                i.added = epoch(c[6]);
+                try { i.rating = Float.parseFloat(c[7]); } catch (Exception ignored) { }
                 out.add(i);
             }
         } catch (IOException e) {
@@ -276,19 +339,22 @@ final class Iptv {
     private void writeItems(String type, List<Item> list) {
         try (OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(itemsFile(type)), StandardCharsets.UTF_8)) {
             for (Item i : list) {
-                w.write((i.live ? "1" : "0") + "\t" + clean(i.group) + "\t" + clean(i.name) + "\t"
-                        + clean(i.logo) + "\t" + clean(i.url) + "\n");
+                w.write(line(i));
             }
         } catch (IOException e) {
             AppLog.w("iptv cache: " + e.getMessage());
         }
     }
 
+    private static String line(Item i) {
+        return (i.live ? "1" : "0") + "\t" + clean(i.group) + "\t" + clean(i.name) + "\t" + clean(i.logo) + "\t"
+                + clean(i.url) + "\t" + clean(i.id) + "\t" + i.added + "\t" + i.rating + "\n";
+    }
+
     private void appendItems(String type, List<Item> list) {
         try (OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(itemsFile(type), true), StandardCharsets.UTF_8)) {
             for (Item i : list) {
-                w.write((i.live ? "1" : "0") + "\t" + clean(i.group) + "\t" + clean(i.name) + "\t"
-                        + clean(i.logo) + "\t" + clean(i.url) + "\n");
+                w.write(line(i));
             }
         } catch (IOException e) {
             AppLog.w("iptv cache: " + e.getMessage());
@@ -326,6 +392,11 @@ final class Iptv {
 
     private static String clean(String s) {
         return s == null ? "" : s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ');
+    }
+
+    /** Xtream dates come as epoch seconds, as text. */
+    private static long epoch(String v) {
+        try { return Long.parseLong(v.trim()) * 1000L; } catch (Exception e) { return 0; }
     }
 
     private static String enc(String s) {

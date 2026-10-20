@@ -1817,6 +1817,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         gridDirty = true;
     }
 
+    /** The whole account: channels, films, series. */
+    private void openBrowse() {
+        click.open();
+        getContext().startActivity(new android.content.Intent(getContext(), Browse.class));
+    }
+
     /** A card from the playlist: the stream opens full screen in the app's own player. */
     private void play(Recs.Pick p) {
         click.open();
@@ -1828,6 +1834,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void activate() {
         HomeApps.Item it;
+        if (!sheetOpen && zone == Z_TOP && topIndex >= 3) {
+            HomeApps.Item top = lightButtons.get(topIndex - 3);
+            if ("live".equals(top.key)) { openBrowse(); return; }   // the account's channels, not the antenna
+        }
         RectF r;
         if (sheetOpen) {
             if (others.isEmpty()) return;

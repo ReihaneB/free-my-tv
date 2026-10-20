@@ -28,7 +28,7 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
     private SurfaceView surface;
     private TextView title, status;
     private MediaPlayer player;
-    private String url = "";
+    private String url = "", name = "";
     private boolean prepared, paused;
 
     @Override protected void onCreate(Bundle state) {
@@ -36,7 +36,8 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         Intent intent = getIntent();
         url = intent.getStringExtra(EXTRA_URL);
-        String name = intent.getStringExtra(EXTRA_NAME);
+        name = intent.getStringExtra(EXTRA_NAME);
+        if (name == null) name = "";
         if (url == null || url.isEmpty()) { finish(); return; }
 
         FrameLayout root = new FrameLayout(this);
@@ -113,12 +114,20 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
         if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
                 || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
             if (player != null && prepared) {
-                if (player.isPlaying()) { player.pause(); paused = true; }
+                if (player.isPlaying()) { player.pause(); paused = true; remember(); }
                 else { player.start(); paused = false; }
                 return true;
             }
         }
         return super.onKeyDown(keyCode, event);
+    }
+
+    /** Remembers where this stream stopped, so the film or episode comes back where it was left. */
+    private void remember() {
+        if (player == null || !prepared) return;
+        try {
+            Prefs.saveProgress(url, name, "", player.getCurrentPosition(), player.getDuration());
+        } catch (IllegalStateException ignored) { }
     }
 
     private void release() {
@@ -132,6 +141,7 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
 
     @Override protected void onStop() {
         super.onStop();
+        remember();
         if (!paused) release();
         if (isFinishing()) finish();
     }

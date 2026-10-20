@@ -32,6 +32,46 @@ final class Prefs {
         return app.getSharedPreferences("settings", Context.MODE_PRIVATE);
     }
 
+    private static SharedPreferences play() {
+        return app.getSharedPreferences("playback", Context.MODE_PRIVATE);
+    }
+
+    /**
+     * Where the player stopped, per stream. A film or an episode keeps its place for two weeks; a live channel is
+     * never "resumed". Entries are stored as name \t position \t duration \t url \t logo.
+     */
+    static void saveProgress(String url, String name, String logo, long position, long duration) {
+        if (url == null || url.isEmpty()) return;
+        if (duration <= 0 || position < 45_000 || position > duration * 0.96) {
+            play().edit().remove(key(url)).apply();
+            return;
+        }
+        play().edit().putString(key(url), name + "\t" + position + "\t" + duration + "\t" + url + "\t"
+                + (logo == null ? "" : logo)).apply();
+    }
+
+    static List<Iptv.Item> resume(String type) {
+        List<Iptv.Item> out = new ArrayList<>();
+        for (java.util.Map.Entry<String, ?> e : new ArrayList<>(play().getAll().entrySet())) {
+            String[] f = String.valueOf(e.getValue()).split("\t", -1);
+            if (f.length < 4) continue;
+            String url = f[3];
+            boolean movie = url.contains("/movie/"), series = url.contains("/series/"), live = url.contains("/live/");
+            if (("vod".equals(type) && !movie) || ("series".equals(type) && !series) || ("live".equals(type) && !live))
+                continue;
+            Iptv.Item it = new Iptv.Item();
+            it.name = f[0];
+            it.url = url;
+            it.logo = f.length > 4 ? f[4] : "";
+            out.add(it);
+        }
+        return out;
+    }
+
+    private static String key(String url) {
+        return Integer.toHexString(url.hashCode());
+    }
+
     private static void put(String key, String value) {
         sp().edit().putString(key, value).apply();
         version++;

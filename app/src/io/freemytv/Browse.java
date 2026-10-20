@@ -106,7 +106,10 @@ public final class Browse extends Activity implements Iptv.Listener {
         head.addView(search, slp);
         search.setOnKeyListener((v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) { tabs.getChildAt(0).requestFocus(); return true; }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                if (firstCard != null) firstCard.requestFocus(); else tabs.getChildAt(0).requestFocus();
+                return true;
+            }
             return false;
         });
         search.addTextChangedListener(new android.text.TextWatcher() {
@@ -355,7 +358,8 @@ public final class Browse extends Activity implements Iptv.Listener {
                         this.row("", new ArrayList<>(hits.subList(from, Math.min(from + 20, hits.size()))));
                     }
                 }
-                if (firstFocus != null) firstFocus.requestFocus();
+                // Never steal the focus while the field has it: every letter would close the keyboard.
+                if (firstFocus != null && !search.hasFocus()) firstFocus.requestFocus();
             });
         }, "search").start();
     }

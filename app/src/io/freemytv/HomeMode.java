@@ -293,12 +293,21 @@ final class HomeMode {
         }
     }
 
-    /** The recorded home screen; without one, Google TV's; without that, the system picks (we leave the role). */
+    /** Other home screens to fall back on when the recorded one is gone (we may have removed it ourselves). */
+    private static final String[] HOMES = {
+        GOOGLE_HOME,                                    // Google TV
+        "com.google.android.tvlauncher/.MainActivity",   // Android TV, the one Philips 2020–2021 ships
+    };
+
+    /** The recorded home screen; without one (or if it's gone), another one the TV has; else the system picks. */
     private static boolean restoreHome(Adb adb, String home) throws IOException {
-        if (home.isEmpty() && adb.shell("pm path " + packageOf(GOOGLE_HOME)).contains("package:")) home = GOOGLE_HOME;
-        if (!home.isEmpty()) {
-            adb.shell("pm enable " + packageOf(home));
-            if (adb.shell("cmd package set-home-activity " + home).contains("Success")) return true;
+        List<String> candidates = new ArrayList<>();
+        if (!home.isEmpty()) candidates.add(home);
+        Collections.addAll(candidates, HOMES);
+        for (String one : candidates) {
+            if (!adb.shell("pm path " + packageOf(one)).contains("package:")) continue;
+            adb.shell("pm enable " + packageOf(one));
+            if (adb.shell("cmd package set-home-activity " + one).contains("Success")) return true;
         }
         adb.shell("cmd role remove-role-holder --user 0 android.app.role.HOME " + PKG);
         return !homeHolder(adb).contains(PKG);

@@ -18,6 +18,8 @@ MAP = {
     "check": ("check", 0), "play": ("play_arrow", 1), "tv_settings": ("display_settings", 1),
     "chevron_down": ("keyboard_arrow_down", 0), "sunrise": ("wb_twilight", 1), "sunset": ("wb_twilight", 1),
     "live_tv": ("live_tv", 1), "bitcoin": ("currency_bitcoin", 0),
+    "subtitles": ("subtitles", 0), "audio": ("graphic_eq", 0), "aspect": ("aspect_ratio", 0),
+    "pause": ("pause", 1), "replay_10": ("replay_10", 0), "forward_10": ("forward_10", 0),
 }
 
 

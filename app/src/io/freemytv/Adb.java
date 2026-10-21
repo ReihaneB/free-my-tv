@@ -64,7 +64,10 @@ final class Adb implements Closeable {
         out = socket.getOutputStream();
     }
 
-    /** Connects and authenticates. If the TV doesn't know our key yet, waits up to `approvalMs` for you to accept. */
+    /**
+     * Connects and authenticates. If the TV doesn't know our key yet, waits up to `approvalMs` for you to accept;
+     * with `approvalMs` ≤ 0 it fails instead, without the TV ever showing the prompt.
+     */
     static Adb connect(Context c, int approvalMs, Approval approval) throws IOException {
         KeyPair keys = keys(c);
         Socket s = new Socket();
@@ -95,6 +98,9 @@ final class Adb implements Closeable {
                 if (!signed) {
                     adb.send(AUTH, AUTH_SIGNATURE, 0, sign(keys.getPrivate(), m.data));
                     signed = true;
+                } else if (approvalMs <= 0) {
+                    // a quiet connection never makes the TV ask: no key known, no command
+                    throw new IOException("the TV doesn't know the app's key yet");
                 } else if (!offeredKey) {
                     // Unknown key: send the public one; the TV shows "Allow USB debugging?".
                     adb.send(AUTH, AUTH_RSAPUBLICKEY, 0, publicKeyBlob(keys.getPublic()));

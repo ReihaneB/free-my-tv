@@ -25,7 +25,7 @@ import android.graphics.Shader;
 final class Liquid {
     private Liquid() {}
 
-    static final int PLATE = 0, CLEAR = 1, LIT = 2, WELL = 3, DARK = 4, FOCUS = 5;
+    static final int PLATE = 0, CLEAR = 1, LIT = 2, WELL = 3, DARK = 4, FOCUS = 5, PANEL = 6;
 
     /** Ink for each material. */
     static final int INK_ON_GLASS = 0xFFFFFFFF, INK_ON_LIT = 0xFF0B1116;
@@ -94,6 +94,7 @@ final class Liquid {
             case PLATE: p.setColor(0x0DFFFFFF); break;
             case CLEAR: p.setColor(0x1AFFFFFF); break;
             case FOCUS: p.setColor(0x2EFFFFFF); break;   // clear glass, lit: what has the focus in the bar
+            case PANEL: p.setColor(0xE05A6168); break;   // frosted grey glass over a picture: popovers, bubbles
             case LIT: p.setShader(new LinearGradient(0, 0, 0, h, 0xF5FFFFFF, 0xE6E4EAEE, Shader.TileMode.CLAMP)); break;
             case WELL: p.setColor(0x2E000000); break;
             default: p.setColor(0xE00B1116); break;
@@ -120,7 +121,8 @@ final class Liquid {
         }
         // light from above: a faint sheen on the upper half, and the 1 px specular edge (brightest along the top,
         // a touch on the top-left curve, almost nothing below). No inner glow: that is what read as a halo.
-        float sheen = material == FOCUS ? 0.26f : material == CLEAR ? 0.07f : material == PLATE ? 0.06f : 0.05f;
+        float sheen = material == FOCUS ? 0.26f : material == PANEL ? 0.09f : material == CLEAR ? 0.07f
+                : material == PLATE ? 0.06f : 0.05f;
         p.setShader(new LinearGradient(0, 0, 0, h * 0.45f, Ui.alpha(0xFFFFFFFF, sheen), 0x00FFFFFF, Shader.TileMode.CLAMP));
         c.drawRect(box, p);
         p.setShader(null);

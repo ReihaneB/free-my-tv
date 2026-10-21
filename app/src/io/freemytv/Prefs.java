@@ -82,6 +82,19 @@ final class Prefs {
         }
     }
 
+    /** Where this stream was left, in milliseconds (0 when it was never started or was finished). */
+    static long positionOf(String url) {
+        Object v = play().getAll().get(key(url));
+        if (v == null) return 0;
+        String[] f = String.valueOf(v).split("\t", -1);
+        if (f.length < 3) return 0;
+        try {
+            return Math.max(0, Long.parseLong(f[1]));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     /** Every saved position at once (one read of the store instead of one per card), url → fraction watched. */
     static java.util.Map<String, Float> progressAll() {
         java.util.Map<String, Float> out = new java.util.HashMap<>();

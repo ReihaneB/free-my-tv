@@ -124,13 +124,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
-    private static final float BLUR = 6f;       // the band under the bar, drawn 6× smaller
-    private static final float LENS_SCALE = 3f; // and a finer strip for the lens at its bottom edge
-    private static final float LENS_H = 34f;    // height of that lens, at 1080p
-    private Bitmap blurBmp, lensBmp;
-    private Canvas blurCanvas, lensCanvas;
-    private int[] stripPx, stripTmp, lensPx, lensTmp;
+    private static final float BLUR = 4f;       // the band under the bar, drawn 4× smaller
+    private static final float LENS_EXTRA = 26f; // rows below the edge the lens may look at
+
+    private Bitmap blurBmp;
+    private Canvas blurCanvas;
+    private int[] stripPx, stripTmp;
     private float blurLag = -1;
+    private Glass glass;
+    private Bitmap glassBmp;
+    private boolean glassTried;
     private final Paint blurPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final RectF blurDst = new RectF();
     private long sheenAt;
@@ -740,9 +743,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         blurOffset = blurLag;
         blurKey = backdropKey;
         float barH = BAR_H * k;
-        float bandH = barH + 2 * k;
+        float bandH = barH + LENS_EXTRA * k;   // the extra rows are what the lens bends up into the glass
 
-        // 1. the band, 6× smaller, then a separable blur: a real gaussian, not a stretched thumbnail
+        // the band, 4× smaller
         int bw = Math.max(8, Math.round(w / BLUR));
         int bh = Math.max(8, Math.round(bandH / BLUR));
         if (blurBmp == null || blurBmp.getWidth() != bw || blurBmp.getHeight() != bh) {
@@ -758,11 +761,24 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         blurCanvas.translate(0, blurLag - offset);
         drawScene(blurCanvas);
         blurCanvas.restore();
-        blurBmp.getPixels(stripPx, 0, bw, 0, 0, bw, bh);
-        box(stripPx, stripTmp, bw, bh, 2);
-        box(stripPx, stripTmp, bw, bh, 2);
-        blurBmp.setPixels(stripPx, 0, bw, 0, 0, bw, bh);
-
+        // the GPU does the rest: blur, the bend at the edge, the red/blue split and the saturation, one pass
+        if (!glassTried) {
+            glassTried = true;
+            glass = new Glass();
+            boolean ok = glass.init();
+            AppLog.w("glass: shader " + (ok ? "ready" : "failed, falling back to the CPU blur"));
+            if (!ok) glass = null;
+        }
+        glassBmp = null;
+        if (glass != null) {
+            glassBmp = glass.render(blurBmp, barH / bandH, 22 * k / BLUR, 1.75f);
+        }
+        if (glassBmp == null) {
+            blurBmp.getPixels(stripPx, 0, bw, 0, 0, bw, bh);
+            box(stripPx, stripTmp, bw, bh, 2);
+            box(stripPx, stripTmp, bw, bh, 2);
+            blurBmp.setPixels(stripPx, 0, bw, 0, 0, bw, bh);
+        }
     }
 
     /** Separable box blur: three passes of it is a gaussian to the eye, and it costs nothing at this size. */
@@ -797,13 +813,21 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     /** The bar: the blurred band, a frosted tint, a lit top edge, a hairline and a soft shadow under it. */
     private void drawBar(Canvas c) {
         float barH = BAR_H * k;
-        float bandH = barH + 2 * k;
+        float bandH = barH + LENS_EXTRA * k;
         updateBlur();
 
-        blurDst.set(0, 0, w, bandH);
-        blurPaint.setColorFilter(SATURATE);   // Liquid Glass keeps the colours behind it alive
-        c.drawBitmap(blurBmp, null, blurDst, blurPaint);
-        blurPaint.setColorFilter(null);
+        if (glassBmp != null) {
+            // the shader already blurred, bent and saturated it: crop the band to the bar and draw
+            int gh = glassBmp.getHeight();
+            srcRect.set(0, 0, glassBmp.getWidth(), Math.max(1, Math.round(gh * (barH / bandH))));
+            blurDst.set(0, 0, w, barH);
+            c.drawBitmap(glassBmp, srcRect, blurDst, blurPaint);
+        } else {
+            blurDst.set(0, 0, w, bandH);
+            blurPaint.setColorFilter(SATURATE);   // Liquid Glass keeps behind it alive
+            c.drawBitmap(blurBmp, null, blurDst, blurPaint);
+            blurPaint.setColorFilter(null);
+        }
 
         fill.setAlpha(255);
         fill.setShader(null);

@@ -59,7 +59,7 @@ final class Glass {
             "  vec3 s = vec3(0.0);\n" +
             "  for (int i = -1; i <= 1; i++)\n" +
             "    for (int j = -1; j <= 1; j++)\n" +
-            "      s += texture2D(uTex, uv + vec2(float(i) * uTexel.x * 1.7, float(j) * uTexel.y * 1.7)).rgb;\n" +
+            "      s += texture2D(uTex, uv + vec2(float(i) * uTexel.x * 3.2, float(j) * uTexel.y * 3.2)).rgb;\n" +
             "  return s * (1.0 / 9.0);\n" +
             "}\n" +
             "\n" +

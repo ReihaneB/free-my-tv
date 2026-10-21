@@ -124,7 +124,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
-    private static final float BLUR = 4f;       // the band under the bar, drawn 4× smaller
+    private static final float BLUR = 2f;       // the band under the bar, drawn 2× smaller
     private static final float LENS_EXTRA = 26f; // rows below the edge the lens may look at
 
     private Bitmap blurBmp;
@@ -156,7 +156,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Path clip = new Path();
     private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
     private final android.graphics.Rect srcRect = new android.graphics.Rect();
-    private final Map<String, Bitmap> softs = new HashMap<>();   // url → tiny copy, used as a soft wash
+    private final Map<String, Bitmap> softs = new HashMap<>();
+    private final Map<String, Bitmap> washes = new HashMap<>();   // url → tiny copy, used as a soft wash
     private String toastText = "";
     private long toastAt;
 
@@ -674,7 +675,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             if (row.col >= 0 && row.col < row.items.size()) {
                 Tile t = row.items.get(row.col);
                 key = rowIndex + ":" + row.col + ":" + t.image;
-                low = soft(t);
+                low = wash(t);
             }
         }
         int bw = Math.max(4, Math.round(w / 4)), bh = Math.max(4, Math.round(h / 4));
@@ -701,6 +702,34 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             bc.drawRect(0, 0, w, h * 0.62f, fill);
             fill.setShader(null);
         }
+    }
+
+    /**
+     * The wash behind everything: the artwork, downscaled to 160x90 and blurred there, where it costs nothing.
+     * Stretching it afterwards is smooth because there is no hard edge left in it — a 26-row thumbnail stretched
+     * over 200 rows was the pixel soup this replaces.
+     */
+    private Bitmap wash(Tile t) {
+        if (t == null || t.image == null || t.image.isEmpty()) return null;
+        Bitmap c = washes.get(t.image);
+        if (c != null) return c;
+        Bitmap low = soft(t);
+        if (low == null) return null;
+        int bw = 160, bh = 90;
+        c = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+        Canvas cc = new Canvas(c);
+        float sc = Math.max(bw / (float) low.getWidth(), bh / (float) low.getHeight());
+        float dw = low.getWidth() * sc, dh = low.getHeight() * sc;
+        srcRect.set(0, 0, low.getWidth(), low.getHeight());
+        cc.drawBitmap(low, srcRect, new RectF((bw - dw) / 2, (bh - dh) / 2, (bw + dw) / 2, (bh + dh) / 2), art);
+        int[] p = new int[bw * bh], tmp = new int[bw * bh];
+        c.getPixels(p, 0, bw, 0, 0, bw, bh);
+        box(p, tmp, bw, bh, 3);
+        box(p, tmp, bw, bh, 3);
+        c.setPixels(p, 0, bw, 0, 0, bw, bh);
+        if (washes.size() > 8) washes.clear();
+        washes.put(t.image, c);
+        return c;
     }
 
     private void drawScene(Canvas c) {
@@ -1201,7 +1230,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (s != null) return s;
         Bitmap src = artOf(t);
         if (src == null) return null;
-        int hh = 26;
+        int hh = 96;
         int ww = Math.max(4, Math.round(hh * (float) src.getWidth() / Math.max(1, src.getHeight())));
         s = Bitmap.createScaledBitmap(src, ww, hh, true);
         if (softs.size() > 12) softs.clear();

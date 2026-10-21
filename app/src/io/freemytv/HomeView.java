@@ -124,9 +124,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
-    private static final float BLUR = 12f;      // the tiny band the bar blurs
-    private Bitmap blurBmp;
-    private Canvas blurCanvas;
+    private static final float BLUR = 6f;       // the band under the bar, drawn 6× smaller
+    private static final float LENS_SCALE = 3f; // and a finer strip for the lens at its bottom edge
+    private static final float LENS_H = 34f;    // height of that lens, at 1080p
+    private Bitmap blurBmp, lensBmp;
+    private Canvas blurCanvas, lensCanvas;
+    private int[] stripPx, stripTmp, lensPx, lensTmp;
+    private float blurLag = -1;
     private final Paint blurPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final RectF blurDst = new RectF();
     private long sheenAt;
@@ -134,7 +138,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private String backdropKey = "";
     private float blurOffset = -1;    // the strip is only redrawn when what it covers changes
     private String blurKey = "";
-    private static final ColorMatrixColorFilter SATURATE = saturation(1.55f);
+    private static final ColorMatrixColorFilter SATURATE = saturation(1.75f);
 
     private static ColorMatrixColorFilter saturation(float s) {
         ColorMatrix m = new ColorMatrix();
@@ -610,6 +614,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         float dt = lastFrame == 0 ? 0.016f : Math.min(0.05f, (now - lastFrame) / 1000f);
         lastFrame = now;
         boolean moving = false;
+        if (blurLag < 0) blurLag = offset;
+        if (Math.abs(offset - blurLag) > 0.3f) {
+            blurLag += (offset - blurLag) * Math.min(1f, dt * 20f);   // the material follows a beat late
+            moving = true;
+        } else {
+            blurLag = offset;
+        }
         if (Math.abs(offsetTo - offset) > 0.35f) {
             offset += (offsetTo - offset) * Math.min(1f, dt * 13f);
             moving = true;
@@ -725,28 +736,68 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
      * bar covers is drawn once into a bitmap 12× smaller and stretched back: a cheap, honest gaussian-ish blur.
      */
     private void updateBlur() {
-        if (blurBmp != null && Math.abs(offset - blurOffset) < 0.4f && backdropKey.equals(blurKey)) return;
-        blurOffset = offset;
+        if (blurBmp != null && Math.abs(blurLag - blurOffset) < 0.4f && backdropKey.equals(blurKey)) return;
+        blurOffset = blurLag;
         blurKey = backdropKey;
-        float bandH = BAR_H * k + 56 * k;
+        float barH = BAR_H * k;
+        float bandH = barH + 2 * k;
+
+        // 1. the band, 6× smaller, then a separable blur: a real gaussian, not a stretched thumbnail
         int bw = Math.max(8, Math.round(w / BLUR));
         int bh = Math.max(8, Math.round(bandH / BLUR));
         if (blurBmp == null || blurBmp.getWidth() != bw || blurBmp.getHeight() != bh) {
             if (blurBmp != null) blurBmp.recycle();
             blurBmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
             blurCanvas = new Canvas(blurBmp);
+            stripPx = new int[bw * bh];
+            stripTmp = new int[bw * bh];
         }
         blurCanvas.save();
         blurCanvas.scale(1f / BLUR, 1f / BLUR);
         blurCanvas.clipRect(0, 0, w, bandH);
+        blurCanvas.translate(0, blurLag - offset);
         drawScene(blurCanvas);
         blurCanvas.restore();
+        blurBmp.getPixels(stripPx, 0, bw, 0, 0, bw, bh);
+        box(stripPx, stripTmp, bw, bh, 2);
+        box(stripPx, stripTmp, bw, bh, 2);
+        blurBmp.setPixels(stripPx, 0, bw, 0, 0, bw, bh);
+
+    }
+
+    /** Separable box blur: three passes of it is a gaussian to the eye, and it costs nothing at this size. */
+    private static void box(int[] px, int[] tmp, int bw, int bh, int r) {
+        for (int y = 0; y < bh; y++) {
+            int row = y * bw;
+            for (int x = 0; x < bw; x++) {
+                int a = 0, rr = 0, gg = 0, bb = 0, n = 0;
+                for (int d = -r; d <= r; d++) {
+                    int xx = x + d;
+                    if (xx < 0) xx = 0; else if (xx >= bw) xx = bw - 1;
+                    int c = px[row + xx];
+                    a += c >>> 24; rr += (c >> 16) & 255; gg += (c >> 8) & 255; bb += c & 255; n++;
+                }
+                tmp[row + x] = ((a / n) << 24) | ((rr / n) << 16) | ((gg / n) << 8) | (bb / n);
+            }
+        }
+        for (int x = 0; x < bw; x++) {
+            for (int y = 0; y < bh; y++) {
+                int a = 0, rr = 0, gg = 0, bb = 0, n = 0;
+                for (int d = -r; d <= r; d++) {
+                    int yy = y + d;
+                    if (yy < 0) yy = 0; else if (yy >= bh) yy = bh - 1;
+                    int c = tmp[yy * bw + x];
+                    a += c >>> 24; rr += (c >> 16) & 255; gg += (c >> 8) & 255; bb += c & 255; n++;
+                }
+                px[y * bw + x] = ((a / n) << 24) | ((rr / n) << 16) | ((gg / n) << 8) | (bb / n);
+            }
+        }
     }
 
     /** The bar: the blurred band, a frosted tint, a lit top edge, a hairline and a soft shadow under it. */
     private void drawBar(Canvas c) {
         float barH = BAR_H * k;
-        float bandH = barH + 56 * k;
+        float bandH = barH + 2 * k;
         updateBlur();
 
         blurDst.set(0, 0, w, bandH);
@@ -764,14 +815,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         fill.setShader(null);
         fill.setColor(0x73FFFFFF);
         c.drawRect(0, 0, w, 1.4f * k, fill);
-        // the lens edge: the last two pixels of the bar catch the light and bend the content
-        fill.setColor(0x2EFFFFFF);
-        c.drawRect(0, barH - 2 * k, w, barH, fill);
-        fill.setColor(0x59FFFFFF);
-        c.drawRect(0, barH - 1 * k, w, barH, fill);
-        // and the shadow it casts on the content below
-        fill.setShader(new LinearGradient(0, barH, 0, barH + 30 * k, 0x66000000, 0x00000000, Shader.TileMode.CLAMP));
-        c.drawRect(0, barH, w, barH + 30 * k, fill);
+        // the lens edge catches the light on its last pixel
+        fill.setColor(0x40FFFFFF);
+        c.drawRect(0, barH - 1.4f * k, w, barH, fill);
+        // and the soft shadow it casts on the content below (a hard band would read as a separator)
+        fill.setShader(new LinearGradient(0, barH, 0, barH + 26 * k,
+                new int[] {0x40000000, 0x1A000000, 0x00000000}, new float[] {0f, 0.35f, 1f}, Shader.TileMode.CLAMP));
+        c.drawRect(0, barH, w, barH + 26 * k, fill);
         fill.setShader(null);
 
         drawPill(c, chromeRects[CH_SEARCH], focused(CH_SEARCH));

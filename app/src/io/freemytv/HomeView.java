@@ -576,7 +576,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         int pw = Math.round(barBox.width()), ph = Math.round(barBox.height());
         plateFace = Liquid.face(Liquid.PLATE, pw, ph, barRadius, k);
         platePad = Math.round(28 * k);
-        plateShadow = Liquid.shadow(pw, ph, barRadius, platePad, 20 * k, 0.55f, 0.5f);
+        plateShadow = Liquid.shadow(pw, ph, barRadius, platePad, 22 * k, 0.42f, 0.5f, -10 * k);   // under, not around
 
         cardPad = Math.round(34 * k);
         int cw = Math.round(CARD_W * k), chh = Math.round(CARD_H * k);
@@ -923,8 +923,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
      */
     private void drawBar(Canvas c) {
         shadowPaint.setAlpha(255);
-        dst.set(barBox.left - platePad, barBox.top - platePad + 6 * k, barBox.right + platePad,
-                barBox.bottom + platePad + 6 * k);
+        dst.set(barBox.left - platePad, barBox.top - platePad + 12 * k, barBox.right + platePad,
+                barBox.bottom + platePad + 12 * k);
         c.drawBitmap(plateShadow, null, dst, shadowPaint);
         if (refreshBackdropShaders()) {
             // the lights through the glass, bent more and more towards the rim: the edge shows what lies just
@@ -956,7 +956,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             float stretch = Math.max(0, lens.width() / Math.max(1, lensTo.width()) - 1);
             float squash = Math.min(0.14f, stretch * 0.12f) * lensTo.height();
             lensBox.set(lens.left, lens.top + squash / 2, lens.right, lens.bottom - squash / 2);
-            Liquid.draw(c, kitLit, lensBox, glassPaint, lensA, true, 5 * k);
+            lensBox.inset(-3 * k * lensA, -2 * k * lensA);   // the focused item is lifted a little, like on tvOS
+            Liquid.draw(c, kitLit, lensBox, glassPaint, lensA, true, 7 * k);
         }
 
         RectF pill = chromeRects[CH_SEARCH];

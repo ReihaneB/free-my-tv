@@ -147,6 +147,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private final Path clip = new Path();
     private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
+    private final RectF barBox = new RectF();
+    private float barRadius, sepA, sepB;
     private final android.graphics.Rect srcRect = new android.graphics.Rect();
     private final Map<String, Integer> accents = new HashMap<>();   // url → the artwork's average colour
     private Bitmap lightsBmp;
@@ -559,12 +561,18 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void layoutBar() {
         float top = 26 * k, hh = PILL_H * k, m = MARGIN * k;
+        // one floating plate, inset from the edges, the chrome sits inside it with its own padding
+        float pad = 12 * k;
+        barBox.set(m, top - pad, w - m, top + hh + pad);
+        barRadius = barBox.height() / 2;
+        float inL = m + pad + 4 * k, inR = w - m - pad - 4 * k;
         chromeCount = 0;
-        chromeRects[CH_SEARCH].set(m, top, m + PILL_W * k, top + hh);
+        chromeRects[CH_SEARCH].set(inL, top, inL + PILL_W * k, top + hh);
         chromeOrder[chromeCount++] = CH_SEARCH;
 
         tabInk.setTextSize(20 * k);
-        float tx = m + PILL_W * k + 44 * k;
+        sepA = inL + PILL_W * k + 20 * k;
+        float tx = inL + PILL_W * k + 40 * k;
         for (int i = 0; i < TAB_COUNT; i++) {
             float twi = tabInk.measureText(LIBRARIES[i]) + 30 * k;
             tabRects[i].set(tx, top, tx + twi, top + hh);
@@ -572,7 +580,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             chromeOrder[chromeCount++] = CH_TAB + i;
         }
 
-        float bw = BUTTON_W * k, right = w - m;
+        float bw = BUTTON_W * k, right = inR;
+        sepB = right - 3 * bw - 2 * BUTTON_GAP * k - 22 * k;
         chromeRects[CH_GEAR].set(right - bw, top, right, top + hh);
         chromeRects[CH_SYNC].set(right - 2 * bw - BUTTON_GAP * k, top, right - bw - BUTTON_GAP * k, top + hh);
         chromeRects[CH_APPS].set(right - 3 * bw - 2 * BUTTON_GAP * k, top, right - 2 * bw - 2 * BUTTON_GAP * k, top + hh);
@@ -788,6 +797,31 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
      * reads as a browser chrome bar, which is exactly what this home is not.
      */
     private void drawBar(Canvas c) {
+        // the plate: a floating glass panel with a black contour, the signature of that style
+        if (focused(CH_SEARCH)) { }   // the sheen is per element; the plate stays still
+        dst.set(barBox);
+        dst.offset(0, 8 * k);
+        fill.setShader(null);
+        fill.setAlpha(255);
+        fill.setColor(0x4D000000);
+        c.drawRoundRect(dst, barRadius, barRadius, fill);
+        fill.setShader(new LinearGradient(0, barBox.top, 0, barBox.bottom, 0x33FFFFFF, 0x0DFFFFFF,
+                Shader.TileMode.CLAMP));
+        c.drawRoundRect(barBox, barRadius, barRadius, fill);
+        fill.setShader(null);
+        fill.setColor(0x2EFFFFFF);
+        c.drawRect(sepA, barBox.top + 20 * k, sepA + 1.5f * k, barBox.bottom - 20 * k, fill);
+        c.drawRect(sepB, barBox.top + 20 * k, sepB + 1.5f * k, barBox.bottom - 20 * k, fill);
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth(1.6f * k);
+        stroke.setColor(0xE6000000);
+        c.drawRoundRect(barBox, barRadius, barRadius, stroke);
+        dst.set(barBox);
+        dst.inset(1.7f * k, 1.7f * k);
+        stroke.setStrokeWidth(1 * k);
+        stroke.setColor(0x24FFFFFF);
+        c.drawRoundRect(dst, barRadius - 1.7f * k, barRadius - 1.7f * k, stroke);
+
         drawPill(c, chromeRects[CH_SEARCH], focused(CH_SEARCH));
         for (int i = 0; i < TAB_COUNT; i++) drawTab(c, i, focused(CH_TAB + i));
         drawCapsule(c, chromeRects[CH_APPS], "apps", focused(CH_APPS));
@@ -868,7 +902,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private void drawPill(Canvas c, RectF box, boolean on) {
-        drawGlass(c, box, box.height() / 2, on, 0x1FFFFFFF);
+        drawGlass(c, box, 18 * k, on, 0x38000000);
 
         float cx = box.left + 30 * k, cy = box.centerY();
         stroke.setStyle(Paint.Style.STROKE);
@@ -891,7 +925,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (focus) drawGlass(c, box, 18 * k, true, 0x1FFFFFFF);
         tabInk.setTextSize(20 * k);
         tabInk.setTextAlign(Paint.Align.CENTER);
-        tabInk.setColor(i == tab ? INK : focus ? 0xFFFFFFFF : 0x8CFFFFFF);
+        tabInk.setColor(i == tab ? INK : focus ? 0xFFFFFFFF : 0xB4FFFFFF);
         c.drawText(LIBRARIES[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk) - 2 * k, tabInk);
         if (i == tab) {
             fill.setShader(null);
@@ -902,7 +936,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private void drawCapsule(Canvas c, RectF box, String symbol, boolean on) {
-        drawGlass(c, box, 20 * k, on, 0x1FFFFFFF);
+        drawGlass(c, box, 20 * k, on, 0x33000000);
         if (!symbol.isEmpty()) Symbols.draw(getContext(), c, symbol, box.centerX(), box.centerY(), 28 * k, on ? INK : DIM);
     }
 

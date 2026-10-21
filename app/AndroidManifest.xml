@@ -127,17 +127,6 @@
                 android:resource="@xml/remote_key_service" />
         </service>
 
-        <!-- Everything the account has: rows of posters for channels, films and series. -->
-        <activity
-            android:name=".Browse"
-            android:process=":home"
-            android:exported="false"
-            android:launchMode="singleTask"
-            android:excludeFromRecents="true"
-            android:screenOrientation="landscape"
-            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|fontScale|locale|layoutDirection"
-            android:theme="@style/FreeMyTV.Home" />
-
         <!-- One stream, full screen (the home screen's cards and the playlist open this). -->
         <activity
             android:name=".Player"

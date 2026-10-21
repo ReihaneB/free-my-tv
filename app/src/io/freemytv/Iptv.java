@@ -155,11 +155,18 @@ final class Iptv {
                     Item it = new Item();
                     String num = o.optString("episode_num", String.valueOf(i + 1));
                     String title = o.optString("title", "").trim();
+                    // Panels often send "Serie - S01E02 - Title": keep only the episode's own title.
+                    title = title.replaceFirst("(?i)^.*S\\d+\\s*[Ee]\\d+\\s*[-–·:]\\s*", "").trim();
                     it.name = "S" + pad(season) + " E" + pad(num) + (title.isEmpty() ? "" : " · " + title);
                     it.id = o.optString("id");
                     it.group = season;
                     String ext = o.optString("container_extension", "mp4");
                     it.url = streamUrl("series", it.id, ext);
+                    org.json.JSONObject info = o.optJSONObject("info");
+                    if (info != null) {
+                        String still = info.optString("movie_image", "");
+                        if (!still.isEmpty()) it.logo = still;
+                    }
                     if (!it.id.isEmpty()) out.add(it);
                 }
             }

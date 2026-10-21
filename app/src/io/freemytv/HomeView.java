@@ -853,14 +853,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         fill.setShader(new LinearGradient(0, 0, 0, 30 * k, 0x26FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
         c.drawRect(0, 0, w, 30 * k, fill);
         fill.setShader(null);
-        fill.setColor(0x73FFFFFF);
-        c.drawRect(0, 0, w, 1.4f * k, fill);
-        // the lens edge catches the light on its last pixel
-        fill.setColor(0x40FFFFFF);
-        c.drawRect(0, barH - 1.4f * k, w, barH, fill);
+        // no hairlines: the two rules the bar used to draw read as a frame, not as glass
         // and the soft shadow it casts on the content below (a hard band would read as a separator)
         fill.setShader(new LinearGradient(0, barH, 0, barH + 26 * k,
-                new int[] {0x40000000, 0x1A000000, 0x00000000}, new float[] {0f, 0.35f, 1f}, Shader.TileMode.CLAMP));
+                new int[] {0x33000000, 0x14000000, 0x00000000}, new float[] {0f, 0.35f, 1f}, Shader.TileMode.CLAMP));
         c.drawRect(0, barH, w, barH + 26 * k, fill);
         fill.setShader(null);
 

@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.ColorMatrix;
+import android.graphics.ColorMatrixColorFilter;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -121,6 +123,24 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+
+    private static final float BLUR = 12f;      // the tiny band the bar blurs
+    private Bitmap blurBmp;
+    private Canvas blurCanvas;
+    private final Paint blurPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final RectF blurDst = new RectF();
+    private long sheenAt;
+    private Bitmap backdrop;          // the slate background + the focused artwork's wash, at 1/4: cheap to blit
+    private String backdropKey = "";
+    private float blurOffset = -1;    // the strip is only redrawn when what it covers changes
+    private String blurKey = "";
+    private static final ColorMatrixColorFilter SATURATE = saturation(1.55f);
+
+    private static ColorMatrixColorFilter saturation(float s) {
+        ColorMatrix m = new ColorMatrix();
+        m.setSaturation(s);
+        return new ColorMatrixColorFilter(m);
+    }
 
     private final Path clip = new Path();
     private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
@@ -617,20 +637,60 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             }
         }
         invalidate();
+        if (sheenAt != 0 && System.currentTimeMillis() - sheenAt < 640) moving = true;
         if (moving) requestFrame();
     }
 
     // MARK: - Drawing
 
-    @Override protected void onDraw(Canvas c) {
+    /**
+     * The slate background, warmed by the focused artwork's wash. It only changes when the focus moves or a poster
+     * lands, so it is built once into a quarter-size bitmap and blitted: stretching the whole wash every frame is
+     * what made the shelves stutter.
+     */
+    private void ensureBackdrop() {
+        String key = "";
+        Bitmap low = null;
+        if (!rows.isEmpty() && zone == Z_ROW) {
+            Row row = rows.get(rowIndex);
+            if (row.col >= 0 && row.col < row.items.size()) {
+                Tile t = row.items.get(row.col);
+                key = rowIndex + ":" + row.col + ":" + t.image;
+                low = soft(t);
+            }
+        }
+        int bw = Math.max(4, Math.round(w / 4)), bh = Math.max(4, Math.round(h / 4));
+        if (backdrop == null || backdrop.getWidth() != bw || backdrop.getHeight() != bh) {
+            if (backdrop != null) backdrop.recycle();
+            backdrop = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+            backdropKey = "";
+        }
+        if (key.equals(backdropKey)) return;
+        backdropKey = key;
+        Canvas bc = new Canvas(backdrop);
+        bc.scale(1f / 4, 1f / 4);
         fill.setAlpha(255);
         fill.setShader(bg);
-        c.drawRect(0, 0, w, h, fill);
+        bc.drawRect(0, 0, w, h, fill);
         fill.setShader(null);
+        if (low != null) {
+            blurDst.set(0, 0, w, h * 0.72f);
+            art.setAlpha(170);
+            bc.drawBitmap(low, null, blurDst, art);
+            art.setAlpha(255);
+            fill.setAlpha(255);
+            fill.setShader(new LinearGradient(0, 0, 0, h * 0.62f, 0x00000000, BG_BOTTOM, Shader.TileMode.CLAMP));
+            bc.drawRect(0, 0, w, h * 0.62f, fill);
+            fill.setShader(null);
+        }
+    }
+
+    private void drawScene(Canvas c) {
+        ensureBackdrop();
+        blurDst.set(0, 0, w, h);
+        c.drawBitmap(backdrop, null, blurDst, art);
 
         float barH = BAR_H * k;
-        c.save();
-        c.clipRect(0, barH, w, h);
         float top = barH + 18 * k - offset;
         if (rows.isEmpty()) {
             empty.setTextSize(24 * k);
@@ -652,9 +712,175 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 drawRow(c, row, i, y);
             }
         }
-        c.restore();
+    }
+
+    @Override protected void onDraw(Canvas c) {
+        drawScene(c);
         drawBar(c);
         drawToast(c);
+    }
+
+    /**
+     * Liquid Glass needs a real blur of what is behind the chrome. Android 11 has no RenderEffect, so the band the
+     * bar covers is drawn once into a bitmap 12× smaller and stretched back: a cheap, honest gaussian-ish blur.
+     */
+    private void updateBlur() {
+        if (blurBmp != null && Math.abs(offset - blurOffset) < 0.4f && backdropKey.equals(blurKey)) return;
+        blurOffset = offset;
+        blurKey = backdropKey;
+        float bandH = BAR_H * k + 56 * k;
+        int bw = Math.max(8, Math.round(w / BLUR));
+        int bh = Math.max(8, Math.round(bandH / BLUR));
+        if (blurBmp == null || blurBmp.getWidth() != bw || blurBmp.getHeight() != bh) {
+            if (blurBmp != null) blurBmp.recycle();
+            blurBmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+            blurCanvas = new Canvas(blurBmp);
+        }
+        blurCanvas.save();
+        blurCanvas.scale(1f / BLUR, 1f / BLUR);
+        blurCanvas.clipRect(0, 0, w, bandH);
+        drawScene(blurCanvas);
+        blurCanvas.restore();
+    }
+
+    /** The bar: the blurred band, a frosted tint, a lit top edge, a hairline and a soft shadow under it. */
+    private void drawBar(Canvas c) {
+        float barH = BAR_H * k;
+        float bandH = barH + 56 * k;
+        updateBlur();
+
+        blurDst.set(0, 0, w, bandH);
+        blurPaint.setColorFilter(SATURATE);   // Liquid Glass keeps the colours behind it alive
+        c.drawBitmap(blurBmp, null, blurDst, blurPaint);
+        blurPaint.setColorFilter(null);
+
+        fill.setAlpha(255);
+        fill.setShader(null);
+        // smoked glass: the colour of the blur stays alive under a slight dark tint (a white veil would wash it out)
+        fill.setColor(0x40090F14);
+        c.drawRect(0, 0, w, barH, fill);
+        fill.setShader(new LinearGradient(0, 0, 0, 30 * k, 0x26FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, w, 30 * k, fill);
+        fill.setShader(null);
+        fill.setColor(0x73FFFFFF);
+        c.drawRect(0, 0, w, 1.4f * k, fill);
+        // the lens edge: the last two pixels of the bar catch the light and bend the content
+        fill.setColor(0x2EFFFFFF);
+        c.drawRect(0, barH - 2 * k, w, barH, fill);
+        fill.setColor(0x59FFFFFF);
+        c.drawRect(0, barH - 1 * k, w, barH, fill);
+        // and the shadow it casts on the content below
+        fill.setShader(new LinearGradient(0, barH, 0, barH + 30 * k, 0x66000000, 0x00000000, Shader.TileMode.CLAMP));
+        c.drawRect(0, barH, w, barH + 30 * k, fill);
+        fill.setShader(null);
+
+        drawPill(c, chromeRects[CH_SEARCH], focused(CH_SEARCH));
+        for (int i = 0; i < TAB_COUNT; i++) drawTab(c, i, focused(CH_TAB + i));
+        drawCapsule(c, chromeRects[CH_APPS], "apps", focused(CH_APPS));
+        drawCapsule(c, chromeRects[CH_SYNC], "sync", focused(CH_SYNC));
+        drawCapsule(c, chromeRects[CH_GEAR], "settings", focused(CH_GEAR));
+    }
+
+    private boolean focused(int id) {
+        if (zone != Z_BAR) return false;
+        return chromeOrder[Math.max(0, Math.min(chromeIndex, chromeCount - 1))] == id;
+    }
+
+    /**
+     * One Liquid Glass surface: a soft shadow, the backdrop showing through a light tint, the specular crescent of a
+     * lit top edge, a moving highlight when it takes the focus, and a hairline rim.
+     */
+    private void drawGlass(Canvas c, RectF box, float radius, boolean on, int tint) {
+        float rad = radius;
+        if (on) {
+            dst.set(box);
+            dst.offset(0, 8 * k);
+            fill.setShader(null);
+            fill.setAlpha(255);
+            fill.setColor(0x4D000000);
+            c.drawRoundRect(dst, rad, rad, fill);
+        }
+        clip.reset();
+        clip.addRoundRect(box, rad, rad, Path.Direction.CW);
+        c.save();
+        c.clipPath(clip);
+        fill.setShader(null);
+        fill.setColor(on ? 0x38FFFFFF : tint);
+        c.drawRect(box, fill);
+        fill.setAlpha(255);
+        fill.setShader(new LinearGradient(0, box.top, 0, box.top + box.height() * 0.55f,
+                0x73FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
+        c.drawRect(box, fill);
+        fill.setShader(null);
+        fill.setColor(0x5CFFFFFF);
+        c.drawRect(box.left, box.top, box.right, box.top + 1.2f * k, fill);
+        fill.setShader(new LinearGradient(0, box.bottom - box.height() * 0.35f, 0, box.bottom,
+                0x00000000, 0x26000000, Shader.TileMode.CLAMP));
+        c.drawRect(box, fill);
+        fill.setShader(null);
+        if (on) {
+            float phase = sheen();
+            if (phase >= 0) {
+                float cx = box.left - box.width() * 0.4f + box.width() * 1.8f * phase;
+                fill.setAlpha(255);
+                fill.setShader(new LinearGradient(cx - box.width() * 0.45f, box.top, cx + box.width() * 0.45f, box.bottom,
+                        new int[] {0x00FFFFFF, 0x3DFFFFFF, 0x00FFFFFF}, new float[] {0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
+                c.drawRect(box, fill);
+                fill.setShader(null);
+            }
+        }
+        c.restore();
+
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth((on ? 1.8f : 1f) * k);
+        stroke.setColor(on ? 0xD9FFFFFF : 0x38FFFFFF);
+        c.drawRoundRect(box, rad, rad, stroke);
+    }
+
+    /** 0..1 while a focus highlight sweeps across a surface, -1 when it is done (keeps the CPU quiet at rest). */
+    private float sheen() {
+        long age = System.currentTimeMillis() - sheenAt;
+        if (sheenAt == 0 || age < 0 || age > 620) return -1;
+        return age / 620f;
+    }
+
+    private void drawPill(Canvas c, RectF box, boolean on) {
+        drawGlass(c, box, box.height() / 2, on, 0x1FFFFFFF);
+
+        float cx = box.left + 30 * k, cy = box.centerY();
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth(2.2f * k);
+        stroke.setColor(on ? INK : DIM);
+        c.drawCircle(cx, cy - 1 * k, 9 * k, stroke);
+        c.drawLine(cx + 6.5f * k, cy + 6 * k, cx + 13 * k, cy + 12.5f * k, stroke);
+
+        if (!searchOpen) {   // the EditText laid over the pill draws the hint itself when it is up
+            pillInk.setTextSize(22 * k);
+            pillInk.setTextAlign(Paint.Align.LEFT);
+            pillInk.setColor(on ? 0xFFFFFFFF : 0xFFB0BCC1);
+            c.drawText("Rechercher", box.left + 54 * k, box.centerY() + Ui.halfCap(pillInk), pillInk);
+        }
+    }
+
+    /** A library name in the top bar: the one shown is white with an orange dot, the focused one becomes glass. */
+    private void drawTab(Canvas c, int i, boolean focus) {
+        RectF box = tabRects[i];
+        if (focus) drawGlass(c, box, 18 * k, true, 0x1FFFFFFF);
+        tabInk.setTextSize(20 * k);
+        tabInk.setTextAlign(Paint.Align.CENTER);
+        tabInk.setColor(i == tab ? INK : focus ? 0xFFFFFFFF : 0x8CFFFFFF);
+        c.drawText(LIBRARIES[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk) - 2 * k, tabInk);
+        if (i == tab) {
+            fill.setShader(null);
+            fill.setAlpha(255);
+            fill.setColor(ACCENT);
+            c.drawCircle(box.centerX(), box.bottom - 9 * k, 3 * k, fill);
+        }
+    }
+
+    private void drawCapsule(Canvas c, RectF box, String symbol, boolean on) {
+        drawGlass(c, box, 20 * k, on, 0x1FFFFFFF);
+        if (!symbol.isEmpty()) Symbols.draw(getContext(), c, symbol, box.centerX(), box.centerY(), 28 * k, on ? INK : DIM);
     }
 
     private void drawRow(Canvas c, Row row, int index, float y) {
@@ -737,11 +963,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
 
         if (t.progress > 0.005f) {
-            float barY = r2.bottom;
-            fill.setColor(0x59000000);
-            c.drawRect(r2.left, barY - 4 * k, r2.right, barY, fill);
+            // A track across the card so a sliver of progress reads as progress, not as a stray dot.
+            float barH = 4 * k, barY = r2.bottom - 3 * k;
+            fill.setColor(0x4D000000);
+            c.drawRect(r2.left, barY - barH, r2.right, barY, fill);
+            fill.setColor(0x26FFFFFF);
+            c.drawRect(r2.left, barY - barH, r2.right, barY - barH + 1 * k, fill);
+            dst.set(r2.left, barY - barH, r2.left + Math.max(16 * k, r2.width() * t.progress), barY);
             fill.setColor(ACCENT);
-            c.drawRect(r2.left, barY - 4 * k, r2.left + Math.max(10 * k, r2.width() * t.progress), barY, fill);
+            c.drawRoundRect(dst, barH / 2, barH / 2, fill);
         }
         if (f > 0.02f) {
             fill.setAlpha(255);
@@ -912,76 +1142,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     // MARK: - Top bar
 
-    private void drawBar(Canvas c) {
-        float barH = BAR_H * k;
-        fill.setAlpha(255);
-        fill.setShader(new LinearGradient(0, 0, 0, barH + 40 * k,
-                Ui.alpha(BG_TOP, 1f), Ui.alpha(BG_TOP, 0f), Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, barH + 40 * k, fill);
-        fill.setShader(null);
-
-        drawPill(c, chromeRects[CH_SEARCH], zone == Z_BAR && focused(CH_SEARCH));
-        for (int i = 0; i < TAB_COUNT; i++) drawTab(c, i, zone == Z_BAR && focused(CH_TAB + i));
-        drawCapsule(c, chromeRects[CH_APPS], "apps", zone == Z_BAR && focused(CH_APPS));
-        drawCapsule(c, chromeRects[CH_SYNC], "sync", zone == Z_BAR && focused(CH_SYNC));
-        drawCapsule(c, chromeRects[CH_GEAR], "settings", zone == Z_BAR && focused(CH_GEAR));
-    }
-
-    /** A library name in the top bar: the one shown is white with an orange dot, the focused one gets a pill. */
-    private void drawTab(Canvas c, int i, boolean focus) {
-        RectF box = tabRects[i];
-        fill.setShader(null);
-        fill.setAlpha(255);
-        if (focus) {
-            fill.setColor(0x1FFFFFFF);
-            c.drawRoundRect(box, 18 * k, 18 * k, fill);
-        }
-        tabInk.setTextSize(20 * k);
-        tabInk.setTextAlign(Paint.Align.CENTER);
-        tabInk.setColor(i == tab ? INK : focus ? 0xF2FFFFFF : 0x8CFFFFFF);
-        c.drawText(LIBRARIES[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk) - 2 * k, tabInk);
-        if (i == tab) {
-            fill.setColor(ACCENT);
-            c.drawCircle(box.centerX(), box.bottom - 9 * k, 3 * k, fill);
-        }
-    }
-
-    private boolean focused(int id) {
-        return chromeOrder[Math.max(0, Math.min(chromeIndex, chromeCount - 1))] == id;
-    }
-
-    private void drawPill(Canvas c, RectF box, boolean on) {
-        fill.setColor(on ? GLASS_ON : GLASS);
-        c.drawRoundRect(box, box.height() / 2, box.height() / 2, fill);
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth((on ? 2 : 1) * k);
-        stroke.setColor(on ? 0xE6FFFFFF : HAIR);
-        c.drawRoundRect(box, box.height() / 2, box.height() / 2, stroke);
-
-        float cx = box.left + 30 * k, cy = box.centerY();
-        stroke.setStrokeWidth(2.2f * k);
-        stroke.setColor(on ? INK : DIM);
-        c.drawCircle(cx, cy - 1 * k, 9 * k, stroke);
-        c.drawLine(cx + 6.5f * k, cy + 6 * k, cx + 13 * k, cy + 12.5f * k, stroke);
-
-        if (!searchOpen) {   // the EditText laid over the pill draws the hint itself when it is up
-            pillInk.setTextSize(22 * k);
-            pillInk.setTextAlign(Paint.Align.LEFT);
-            pillInk.setColor(on ? 0xFFFFFFFF : 0xFFB0BCC1);
-            c.drawText("Rechercher", box.left + 54 * k, box.centerY() + Ui.halfCap(pillInk), pillInk);
-        }
-    }
-
-    private void drawCapsule(Canvas c, RectF box, String symbol, boolean on) {
-        fill.setColor(on ? GLASS_ON : GLASS);
-        c.drawRoundRect(box, 20 * k, 20 * k, fill);
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth((on ? 2 : 1) * k);
-        stroke.setColor(on ? 0xE6FFFFFF : HAIR);
-        c.drawRoundRect(box, 20 * k, 20 * k, stroke);
-        if (!symbol.isEmpty()) Symbols.draw(getContext(), c, symbol, box.centerX(), box.centerY(), 28 * k, on ? INK : DIM);
-    }
-
     private void drawToast(Canvas c) {
         if (toastText == null || toastText.isEmpty()) return;
         long age = System.currentTimeMillis() - toastAt;
@@ -1047,7 +1207,12 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void move(int dx) {
         if (zone == Z_BAR) {
+            int before = chromeIndex;
             chromeIndex = Math.max(0, Math.min(chromeCount - 1, chromeIndex + dx));
+            if (chromeIndex != before) {
+                sheenAt = System.currentTimeMillis();
+                requestFrame();
+            }
             invalidate();
             return;
         }
@@ -1085,6 +1250,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             if (rowIndex == 0) {
                 zone = Z_BAR;
                 chromeIndex = 0;
+                sheenAt = System.currentTimeMillis();
+                requestFrame();
                 invalidate();
                 return;
             }

@@ -8,6 +8,8 @@ import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.RadialGradient;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Shader;
@@ -83,7 +85,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private static final float LIB_TITLE_H = 96;      // the library's name above its shelves
 
     // Infuse 8's slate background, not black.
-    private static final int BG_TOP = 0xFF2E3A41, BG_BOTTOM = 0xFF1A242C;
+    private static final int BG_TOP = 0xFF0E1418, BG_BOTTOM = 0xFF05080A;
     private static final int INK = 0xFFFFFFFF, DIM = 0xFFB8C4C9, FAINT = 0xFF8798A0, ACCENT = 0xFFFF8A00;
     private static final int GLASS = 0x1FFFFFFF, GLASS_ON = 0x33FFFFFF, HAIR = 0x33FFFFFF;
 
@@ -158,6 +160,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
     private final android.graphics.Rect srcRect = new android.graphics.Rect();
     private final Map<String, Integer> accents = new HashMap<>();   // url → the artwork's average colour
+    private Bitmap lightsBmp;
+    private Canvas lightsCanvas;
+    private long lightsAt;
+    private final Paint blobPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint lightsPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private String toastText = "";
     private long toastAt;
 
@@ -684,10 +691,71 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         fill.setShader(null);
     }
 
+    /**
+     * The ambient lights: three big, soft blobs tinted by the focused artwork, drifting on slow Lissajous paths.
+     * They are painted into a bitmap 8× smaller and stretched back, so the blur is free and the edges can never
+     * be hard; the picture is only rebuilt ~10 times a second, which is invisible on shapes this size.
+     */
+    private void updateLights() {
+        long now = SystemClock.uptimeMillis();
+        if (lightsBmp != null && now - lightsAt < 90) return;
+        lightsAt = now;
+        int lw = Math.max(32, Math.round(w / 8f)), lh = Math.max(18, Math.round(h / 8f));
+        if (lightsBmp == null || lightsBmp.getWidth() != lw || lightsBmp.getHeight() != lh) {
+            if (lightsBmp != null) lightsBmp.recycle();
+            lightsBmp = Bitmap.createBitmap(lw, lh, Bitmap.Config.ARGB_8888);
+            lightsCanvas = new Canvas(lightsBmp);
+        }
+        lightsCanvas.drawColor(0, PorterDuff.Mode.CLEAR);
+        int accent = vivid(accentOf(focusedTile()));
+        float sec = now / 1000f;
+        blob(lightsCanvas, lw, lh, sec * 0.085f + 0.6f, sec * 0.062f + 1.4f, 0.95f, accent, 0.95f);
+        blob(lightsCanvas, lw, lh, sec * 0.061f + 2.4f, sec * 0.079f + 0.3f, 0.78f, vivid(hue(accent, 46f)), 0.78f);
+        blob(lightsCanvas, lw, lh, sec * 0.047f + 4.1f, sec * 0.054f + 3.2f, 0.88f, vivid(hue(accent, -62f)), 0.70f);
+        blob(lightsCanvas, lw, lh, sec * 0.038f + 5.4f, sec * 0.091f + 2.1f, 0.72f, 0xFF2E6C8E, 0.55f);
+    }
+
+    private void blob(Canvas c, int lw, int lh, float px, float py, float radiusRatio, int color, float alpha) {
+        float cx = lw * (0.5f + 0.38f * (float) Math.sin(px));
+        float cy = lh * (0.5f + 0.36f * (float) Math.cos(py));
+        float r = Math.max(lw, lh) * radiusRatio;
+        blobPaint.setShader(new RadialGradient(cx, cy, r,
+                Ui.alpha(color, alpha), Ui.alpha(color, 0f), Shader.TileMode.CLAMP));
+        c.drawCircle(cx, cy, r, blobPaint);
+        blobPaint.setShader(null);
+    }
+
+    /** Push a colour towards the saturated side: an average is always muddy, and muddy glows read as grey. */
+    private static int vivid(int color) {
+        float[] hsv = new float[3];
+        android.graphics.Color.colorToHSV(color, hsv);
+        hsv[1] = Math.min(0.95f, Math.max(0.55f, hsv[1] * 1.4f));
+        hsv[2] = Math.min(0.80f, Math.max(0.38f, hsv[2] * 1.15f + 0.10f));
+        return android.graphics.Color.HSVToColor(hsv);
+    }
+
+    private static int hue(int color, float deg) {
+        float[] hsv = new float[3];
+        android.graphics.Color.colorToHSV(color, hsv);
+        hsv[0] = (hsv[0] + deg + 360f) % 360f;
+        return android.graphics.Color.HSVToColor(hsv);
+    }
+
+    /** The tile that has the focus, if any: the one whose artwork tints the lights and the hero card. */
+    private Tile focusedTile() {
+        if (rows.isEmpty() || zone != Z_ROW) return null;
+        if (rowIndex < 0 || rowIndex >= rows.size()) return null;
+        Row row = rows.get(rowIndex);
+        if (row.col < 0 || row.col >= row.items.size()) return null;
+        return row.items.get(row.col);
+    }
+
     private void drawScene(Canvas c) {
         ensureBackdrop();
         blurDst.set(0, 0, w, h);
         c.drawBitmap(backdrop, null, blurDst, art);
+        updateLights();
+        if (lightsBmp != null) c.drawBitmap(lightsBmp, null, blurDst, lightsPaint);
 
         float barH = BAR_H * k;
         float top = barH + 18 * k - offset;
@@ -720,6 +788,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         drawScene(c);
         drawBar(c);
         drawToast(c);
+        // the lights never stop moving: one cheap frame every 110 ms keeps the background breathing when the
+        // shelves are still, and costs nothing while an animation is already posting frames.
+        postInvalidateDelayed(110);
     }
 
     /**
@@ -1029,7 +1100,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private void drawCard(Canvas c, RectF box, Tile t, float f) {
-        float radius = 14 * k;
+        float radius = 30 * k;
         float grow = 1 + 0.055f * f;
         r2.set(box);
         r2.inset(-box.width() * (grow - 1) / 2, -box.height() * (grow - 1) / 2);
@@ -1102,7 +1173,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
      * artwork. It is the hero of the first shelf, kept from the earlier design.
      */
     private void drawHero(Canvas c, RectF box, Tile t, float f) {
-        float radius = 16 * k;
+        float radius = 34 * k;
         float grow = 1 + 0.045f * f;
         r2.set(box);
         r2.inset(-box.width() * (grow - 1) / 2, -box.height() * (grow - 1) / 2);

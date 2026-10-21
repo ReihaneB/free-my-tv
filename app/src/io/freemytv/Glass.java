@@ -16,15 +16,19 @@ import java.nio.FloatBuffer;
 /**
  * Liquid Glass, done the way the GPU does it.
  *
- * One fragment shader takes the band that sits behind the bar and returns it blurred, bent at the bottom edge
- * (refraction), split a hair between red and blue on that edge (chromatic aberration) and with its colours
- * lifted. The result comes back as a bitmap, so the rest of the home stays plain Canvas: no GLSurfaceView,
- * no second window, nothing the DPAD has to fight with.
+ * The band behind the chrome is uploaded once, and a fragment shader turns it into glass for up to six rounded
+ * shapes at the same time: the top bar, the search pill, the three capsules, the focused tab. Every shape gets the
+ * same treatment — a blur, a lens that bends the picture along its border (sampling *outside* it, so the world
+ * around the glass slides into the glass), a red/blue split on that border, and a rim light where the edge faces
+ * the light.
  *
- * Everything happens on the thread that draws, in a private EGL context on a 1x1 pbuffer; the real target is a
- * framebuffer object the size of the band (480x51 at 1080p), which keeps glReadPixels down to ~100 KB.
+ * It all comes back as a bitmap, so the rest of the home stays plain Canvas: no GLSurfaceView, no second window,
+ * nothing the DPAD has to fight with. A private EGL context on a 1x1 pbuffer owns a framebuffer object the size of
+ * the band, which keeps glReadPixels small.
  */
 final class Glass {
+    static final int MAX_SHAPES = 6;
+
     private static final String VERT =
             "attribute vec2 aPos;\n" +
             "attribute vec2 aTex;\n" +
@@ -39,10 +43,17 @@ final class Glass {
             "varying vec2 vTex;\n" +
             "uniform sampler2D uTex;\n" +
             "uniform vec2 uTexel;\n" +
-            "uniform float uEdge;\n" +   // y of the bar's bottom edge (0 = top of the band, 1 = its bottom)
-            "uniform float uLens;\n" +   // height of the lens, in texels
-            "uniform float uPix;\n" +    // height of the band, in texels
+            "uniform vec2 uSize;\n" +
+            "uniform vec4 uRect[" + MAX_SHAPES + "];\n" +   // cx, cy, half width, half height, in pixels
+            "uniform float uRad[" + MAX_SHAPES + "];\n" +
+            "uniform int uCount;\n" +
+            "uniform float uEdge;\n" +    // width of the lens band along every border, in pixels
             "uniform float uSat;\n" +
+            "\n" +
+            "float sdRound(vec2 p, vec2 b, float r) {\n" +
+            "  vec2 q = abs(p) - b + r;\n" +
+            "  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;\n" +
+            "}\n" +
             "\n" +
             "vec3 blur(vec2 uv) {\n" +
             "  vec3 s = vec3(0.0);\n" +
@@ -53,23 +64,44 @@ final class Glass {
             "}\n" +
             "\n" +
             "void main() {\n" +
-            "  float d = (uEdge - vTex.y) * uPix;      // texels above the bar's edge, negative below it\n" +
-            "  float bend = 0.0;\n" +
-            "  if (d > 0.0 && d < uLens) {\n" +
-            "    float t = 1.0 - d / uLens;            // 0 far from the edge, 1 right on it\n" +
-            "    bend = t * t * uLens * 0.55;          // the edge looks *down*: content slides up into the glass\n" +
+            "  vec2 px = vTex * uSize;\n" +
+            "  float best = 1e9;\n" +
+            "  vec4 sel = vec4(0.0);\n" +
+            "  float selR = 0.0;\n" +
+            "  for (int i = 0; i < " + MAX_SHAPES + "; i++) {\n" +
+            "    if (i >= uCount) break;\n" +
+            "    float d = sdRound(px - uRect[i].xy, uRect[i].zw, uRad[i]);\n" +
+            "    if (d < best) { best = d; sel = uRect[i]; selR = uRad[i]; }\n" +
             "  }\n" +
-            "  vec3 c;\n" +
-            "  if (bend < 0.15) {\n" +
-            "    c = blur(vTex);\n" +
-            "  } else {\n" +
-            "    vec2 up = vec2(0.0, uTexel.y);\n" +
-            "    c.r = blur(vTex + up * bend * 1.10).r;\n" +
-            "    c.g = blur(vTex + up * bend).g;\n" +
-            "    c.b = blur(vTex + up * bend * 0.90).b;\n" +
+            "  vec3 c = blur(vTex);\n" +
+            "  if (best < 0.0) {                       // inside a shape: this pixel is glass\n" +
+            "    float e = -best;                      // distance to its border\n" +
+            "    vec2 n = vec2(0.0);\n" +
+            "    float bend = 0.0;\n" +
+            "    if (e < uEdge) {\n" +
+            "      float dx = sdRound(px + vec2(1.0, 0.0) - sel.xy, sel.zw, selR)\n" +
+            "               - sdRound(px - vec2(1.0, 0.0) - sel.xy, sel.zw, selR);\n" +
+            "      float dy = sdRound(px + vec2(0.0, 1.0) - sel.xy, sel.zw, selR)\n" +
+            "               - sdRound(px - vec2(0.0, 1.0) - sel.xy, sel.zw, selR);\n" +
+            "      n = normalize(vec2(dx, dy) + vec2(1e-5));\n" +
+            "      float t = 1.0 - e / uEdge;\n" +
+            "      bend = t * t * uEdge * 0.9;        // the border looks outwards: the picture slides in\n" +
+            "    }\n" +
+            "    if (bend > 0.2) {\n" +
+            "      vec2 dir = n * uTexel * bend;\n" +
+            "      c.r = blur(vTex + dir * 1.08).r;\n" +
+            "      c.g = blur(vTex + dir).g;\n" +
+            "      c.b = blur(vTex + dir * 0.92).b;\n" +
+            "    }\n" +
+            "    if (e < 1.4) {                       // the lit edge, only where it faces up\n" +
+            "      c += vec3((1.0 - e / 1.4) * max(0.0, -n.y) * 0.5);\n" +
+            "    }\n" +
             "  }\n" +
             "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));\n" +
             "  c = mix(vec3(l), c, uSat);\n" +
+            "  // a hair of noise: it kills the banding a TV shows on long, quiet gradients\n" +
+            "  float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);\n" +
+            "  c += (n - 0.5) * (1.6 / 255.0);\n" +
             "  gl_FragColor = vec4(c, 1.0);\n" +
             "}\n";
 
@@ -77,14 +109,13 @@ final class Glass {
     private EGLContext ctx = EGL14.EGL_NO_CONTEXT;
     private EGLSurface surf = EGL14.EGL_NO_SURFACE;
     private int prog, tex, fbo, outTex;
-    private int uTex, uTexel, uEdge, uLens, uPix, uSat;
+    private int uTex, uTexel, uSize, uRect, uRad, uCount, uEdge, uSat;
     private int vw, vh;
     private ByteBuffer px;
     private Bitmap out;
     private int[] id = new int[1];
     private boolean ok;
 
-    /** A 2-triangle quad and its uv. */
     private static FloatBuffer quad() {
         float[] v = {-1f, -1f, 0f, 0f,  1f, -1f, 1f, 0f,  -1f, 1f, 0f, 1f,  1f, 1f, 1f, 1f};
         FloatBuffer b = ByteBuffer.allocateDirect(v.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -124,9 +155,11 @@ final class Glass {
             if (linked[0] == 0) return false;
             uTex = GLES20.glGetUniformLocation(prog, "uTex");
             uTexel = GLES20.glGetUniformLocation(prog, "uTexel");
+            uSize = GLES20.glGetUniformLocation(prog, "uSize");
+            uRect = GLES20.glGetUniformLocation(prog, "uRect");
+            uRad = GLES20.glGetUniformLocation(prog, "uRad");
+            uCount = GLES20.glGetUniformLocation(prog, "uCount");
             uEdge = GLES20.glGetUniformLocation(prog, "uEdge");
-            uLens = GLES20.glGetUniformLocation(prog, "uLens");
-            uPix = GLES20.glGetUniformLocation(prog, "uPix");
             uSat = GLES20.glGetUniformLocation(prog, "uSat");
             GLES20.glGenTextures(1, id, 0);
             tex = id[0];
@@ -157,11 +190,12 @@ final class Glass {
     }
 
     /**
-     * @param src  the band behind the bar, already small; its last rows are what the lens will look at
-     * @param edge 0..1, where the bar's bottom edge is inside that band
-     * @param lens how many texels of the bar's bottom are bent
+     * @param src    the band behind the chrome, already small
+     * @param shapes cx, cy, half width, half height, radius — five floats per shape, in the bitmap's own pixels
+     * @param count  how many shapes are filled in
+     * @param edge   width of the lens along each border, in pixels
      */
-    Bitmap render(Bitmap src, float edge, float lens, float sat) {
+    Bitmap render(Bitmap src, float[] shapes, int count, float edge, float sat) {
         if (!ok) return null;
         try {
             if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return null;
@@ -210,10 +244,25 @@ final class Glass {
             GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 16, q);
             GLES20.glUniform1i(uTex, 0);
             GLES20.glUniform2f(uTexel, 1f / w, 1f / h);
+            GLES20.glUniform2f(uSize, w, h);
+            int n = Math.max(1, Math.min(count, MAX_SHAPES));
+            GLES20.glUniform1i(uCount, n);
             GLES20.glUniform1f(uEdge, edge);
-            GLES20.glUniform1f(uLens, lens);
-            GLES20.glUniform1f(uPix, h);
             GLES20.glUniform1f(uSat, sat);
+
+            float[] rects = new float[MAX_SHAPES * 4];
+            float[] radii = new float[MAX_SHAPES];
+            for (int i = 0; i < n; i++) {
+                int s = i * 5;
+                rects[i * 4] = shapes[s];
+                rects[i * 4 + 1] = shapes[s + 1];
+                rects[i * 4 + 2] = Math.max(1f, shapes[s + 2]);
+                rects[i * 4 + 3] = Math.max(1f, shapes[s + 3]);
+                radii[i] = Math.max(0f, Math.min(shapes[s + 4], Math.min(shapes[s + 2], shapes[s + 3])));
+            }
+            GLES20.glUniform4fv(uRect, MAX_SHAPES, rects, 0);
+            GLES20.glUniform1fv(uRad, MAX_SHAPES, radii, 0);
+
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
             GLES20.glFinish();
 

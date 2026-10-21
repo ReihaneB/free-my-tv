@@ -131,9 +131,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private Canvas blurCanvas;
     private int[] stripPx, stripTmp;
     private float blurLag = -1;
+    private int lastShapeSum = -1;
     private Glass glass;
     private Bitmap glassBmp;
     private boolean glassTried;
+    private final float[] shapes = new float[Glass.MAX_SHAPES * 5];
+    private int shapeCount;
+    private int shapeSum;
     private final Paint blurPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final RectF blurDst = new RectF();
     private long sheenAt;
@@ -739,7 +743,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
      * bar covers is drawn once into a bitmap 12× smaller and stretched back: a cheap, honest gaussian-ish blur.
      */
     private void updateBlur() {
-        if (blurBmp != null && Math.abs(blurLag - blurOffset) < 0.4f && backdropKey.equals(blurKey)) return;
+        if (blurBmp != null && Math.abs(blurLag - blurOffset) < 0.4f && backdropKey.equals(blurKey)
+                && shapeSum == lastShapeSum) return;
+        lastShapeSum = shapeSum;
         blurOffset = blurLag;
         blurKey = backdropKey;
         float barH = BAR_H * k;
@@ -771,7 +777,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
         glassBmp = null;
         if (glass != null) {
-            glassBmp = glass.render(blurBmp, barH / bandH, 22 * k / BLUR, 1.75f);
+            glassBmp = glass.render(blurBmp, shapes, shapeCount, 18 * k / BLUR, 1.75f);
         }
         if (glassBmp == null) {
             blurBmp.getPixels(stripPx, 0, bw, 0, 0, bw, bh);
@@ -814,6 +820,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private void drawBar(Canvas c) {
         float barH = BAR_H * k;
         float bandH = barH + LENS_EXTRA * k;
+        // everything that is glass in the chrome: the bar, the search pill, the capsules, the focused tab
+        shapeCount = 0;
+        addShape(w / 2, (barH - 4000 * k) / 2, w, (barH + 4000 * k) / 2, 0);
+        addShape(chromeRects[CH_SEARCH], chromeRects[CH_SEARCH].height() / 2);
+        addShape(chromeRects[CH_APPS], 20 * k);
+        addShape(chromeRects[CH_SYNC], 20 * k);
+        addShape(chromeRects[CH_GEAR], 20 * k);
+        for (int i = 0; i < TAB_COUNT; i++) if (focused(CH_TAB + i)) addShape(tabRects[i], 18 * k);
+        shapeSum = 0;
+        for (int i = 0; i < shapeCount * 5; i++) shapeSum = shapeSum * 31 + Math.round(shapes[i]);
         updateBlur();
 
         if (glassBmp != null) {
@@ -855,6 +871,21 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         drawCapsule(c, chromeRects[CH_GEAR], "settings", focused(CH_GEAR));
     }
 
+    private void addShape(RectF b, float rad) {
+        addShape(b.centerX(), b.centerY(), b.width() / 2, b.height() / 2, rad);
+    }
+
+    private void addShape(float cx, float cy, float hw, float hh, float rad) {
+        if (shapeCount >= Glass.MAX_SHAPES) return;
+        int o = shapeCount * 5;
+        shapes[o] = cx / BLUR;
+        shapes[o + 1] = cy / BLUR;
+        shapes[o + 2] = hw / BLUR;
+        shapes[o + 3] = hh / BLUR;
+        shapes[o + 4] = rad / BLUR;
+        shapeCount++;
+    }
+
     private boolean focused(int id) {
         if (zone != Z_BAR) return false;
         return chromeOrder[Math.max(0, Math.min(chromeIndex, chromeCount - 1))] == id;
@@ -878,20 +909,23 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         clip.addRoundRect(box, rad, rad, Path.Direction.CW);
         c.save();
         c.clipPath(clip);
+        boolean real = glassBmp != null;   // the shader put the backdrop inside this shape, only brighten it
         fill.setShader(null);
-        fill.setColor(on ? 0x38FFFFFF : tint);
+        fill.setColor(real ? (on ? 0x3DFFFFFF : 0x14FFFFFF) : (on ? 0x38FFFFFF : tint));
         c.drawRect(box, fill);
-        fill.setAlpha(255);
-        fill.setShader(new LinearGradient(0, box.top, 0, box.top + box.height() * 0.55f,
-                0x73FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
-        c.drawRect(box, fill);
-        fill.setShader(null);
-        fill.setColor(0x5CFFFFFF);
-        c.drawRect(box.left, box.top, box.right, box.top + 1.2f * k, fill);
-        fill.setShader(new LinearGradient(0, box.bottom - box.height() * 0.35f, 0, box.bottom,
-                0x00000000, 0x26000000, Shader.TileMode.CLAMP));
-        c.drawRect(box, fill);
-        fill.setShader(null);
+        if (!real) {
+            fill.setAlpha(255);
+            fill.setShader(new LinearGradient(0, box.top, 0, box.top + box.height() * 0.55f,
+                    0x73FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
+            c.drawRect(box, fill);
+            fill.setShader(null);
+            fill.setColor(0x5CFFFFFF);
+            c.drawRect(box.left, box.top, box.right, box.top + 1.2f * k, fill);
+            fill.setShader(new LinearGradient(0, box.bottom - box.height() * 0.35f, 0, box.bottom,
+                    0x00000000, 0x26000000, Shader.TileMode.CLAMP));
+            c.drawRect(box, fill);
+            fill.setShader(null);
+        }
         if (on) {
             float phase = sheen();
             if (phase >= 0) {
@@ -906,8 +940,17 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         c.restore();
 
         stroke.setStyle(Paint.Style.STROKE);
+        if (on) {
+            // a halo so the focus reads from the sofa, not only from close up
+            stroke.setStrokeWidth(9 * k);
+            stroke.setColor(0x14FFFFFF);
+            c.drawRoundRect(box, rad, rad, stroke);
+            stroke.setStrokeWidth(4 * k);
+            stroke.setColor(0x26FFFFFF);
+            c.drawRoundRect(box, rad, rad, stroke);
+        }
         stroke.setStrokeWidth((on ? 1.8f : 1f) * k);
-        stroke.setColor(on ? 0xD9FFFFFF : 0x38FFFFFF);
+        stroke.setColor(on ? 0xDBFFFFFF : 0x38FFFFFF);
         c.drawRoundRect(box, rad, rad, stroke);
     }
 

@@ -158,7 +158,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
     private final android.graphics.Rect srcRect = new android.graphics.Rect();
     private final Map<String, Bitmap> softs = new HashMap<>();
-    private final Map<String, Bitmap> washes = new HashMap<>();   // url → tiny copy, used as a soft wash
     private String toastText = "";
     private long toastAt;
 
@@ -669,68 +668,20 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
      * what made the shelves stutter.
      */
     private void ensureBackdrop() {
-        String key = "";
-        Bitmap low = null;
-        if (!rows.isEmpty() && zone == Z_ROW) {
-            Row row = rows.get(rowIndex);
-            if (row.col >= 0 && row.col < row.items.size()) {
-                Tile t = row.items.get(row.col);
-                key = rowIndex + ":" + row.col + ":" + t.image;
-                low = wash(t);
-            }
-        }
         int bw = Math.max(4, Math.round(w / 4)), bh = Math.max(4, Math.round(h / 4));
         if (backdrop == null || backdrop.getWidth() != bw || backdrop.getHeight() != bh) {
             if (backdrop != null) backdrop.recycle();
             backdrop = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
             backdropKey = "";
         }
-        if (key.equals(backdropKey)) return;
-        backdropKey = key;
+        if (FLAT.equals(backdropKey)) return;
+        backdropKey = FLAT;
         Canvas bc = new Canvas(backdrop);
         bc.scale(1f / 4, 1f / 4);
         fill.setAlpha(255);
         fill.setShader(bg);
         bc.drawRect(0, 0, w, h, fill);
         fill.setShader(null);
-        if (low != null) {
-            blurDst.set(0, 0, w, h * 0.72f);
-            art.setAlpha(170);
-            bc.drawBitmap(low, null, blurDst, art);
-            art.setAlpha(255);
-            fill.setAlpha(255);
-            fill.setShader(new LinearGradient(0, 0, 0, h * 0.62f, 0x00000000, BG_BOTTOM, Shader.TileMode.CLAMP));
-            bc.drawRect(0, 0, w, h * 0.62f, fill);
-            fill.setShader(null);
-        }
-    }
-
-    /**
-     * The wash behind everything: the artwork, downscaled to 160x90 and blurred there, where it costs nothing.
-     * Stretching it afterwards is smooth because there is no hard edge left in it — a 26-row thumbnail stretched
-     * over 200 rows was the pixel soup this replaces.
-     */
-    private Bitmap wash(Tile t) {
-        if (t == null || t.image == null || t.image.isEmpty()) return null;
-        Bitmap c = washes.get(t.image);
-        if (c != null) return c;
-        Bitmap low = soft(t);
-        if (low == null) return null;
-        int bw = 160, bh = 90;
-        c = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
-        Canvas cc = new Canvas(c);
-        float sc = Math.max(bw / (float) low.getWidth(), bh / (float) low.getHeight());
-        float dw = low.getWidth() * sc, dh = low.getHeight() * sc;
-        srcRect.set(0, 0, low.getWidth(), low.getHeight());
-        cc.drawBitmap(low, srcRect, new RectF((bw - dw) / 2, (bh - dh) / 2, (bw + dw) / 2, (bh + dh) / 2), art);
-        int[] p = new int[bw * bh], tmp = new int[bw * bh];
-        c.getPixels(p, 0, bw, 0, 0, bw, bh);
-        box(p, tmp, bw, bh, 3);
-        box(p, tmp, bw, bh, 3);
-        c.setPixels(p, 0, bw, 0, 0, bw, bh);
-        if (washes.size() > 8) washes.clear();
-        washes.put(t.image, c);
-        return c;
     }
 
     private void drawScene(Canvas c) {
@@ -762,6 +713,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
     }
 
+    private static final String FLAT = "flat";
     private long lastGlassAt;
 
     @Override protected void onDraw(Canvas c) {

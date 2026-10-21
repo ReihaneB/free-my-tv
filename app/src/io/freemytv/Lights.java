@@ -10,6 +10,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Process;
 import android.os.SystemClock;
+import android.view.Choreographer;
 import android.view.View;
 
 /**
@@ -32,7 +33,29 @@ final class Lights {
     private volatile int generation;
     private volatile int target = 0xFF23323C;
     private volatile boolean running;
-    private float cr = -1, cg, cb;
+
+    // Each light fades its own final colour (never the accent before it is re-saturated: half-way between two tones
+    // the accent can be grey, its hue undefined, and the side lights jumped). Worker thread only.
+    private static final float[] ALPHA = {0.74f, 0.58f, 0.52f, 0.50f};
+    private final float[][] cur = new float[4][3], vel = new float[4][3];
+    private final int[] tgt = new int[4];
+    private int paletteOf;
+    private boolean painted, fading;
+    private long lastStep;
+    private long fadeAt, prevStep, fadeGap;   // Perf only
+    private int fadeSteps;
+    private float fadeJump;
+    // A critically damped spring per channel: it leaves at zero speed, arrives without overshoot, and a new target
+    // mid-way keeps the current speed — no step, ever. ω = 10 rad/s settles a change in about half a second.
+    private static final float OMEGA = 10f;
+    // While a colour fades, the worker paints on vsync (its own Choreographer) so every frame gets a new tone;
+    // at rest it goes back to 15 pictures a second for the slow drift.
+    private Choreographer choreo;
+    private boolean vsyncPosted;
+    private final Choreographer.FrameCallback vsync = n -> {
+        vsyncPosted = false;
+        step();
+    };
 
     private final Canvas canvas = new Canvas();
     private final Paint blob = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -68,8 +91,16 @@ final class Lights {
     /** Changes every time a new picture is published (shaders built on the old one must be rebuilt). */
     int generation() { return generation; }
 
-    /** The colour the lights drift towards; they cross-fade to it over about a second. */
-    void accent(int color) { target = color; }
+    /** The colour the lights fade to (eased, ~0.4 s, at the display's rate). Starts on the very next frame. */
+    void accent(int color) {
+        if (color == target) return;
+        target = color;
+        Handler h = worker;
+        if (h != null && running) {
+            h.removeCallbacks(step);
+            h.post(step);
+        }
+    }
 
     synchronized void start() {
         if (running) return;
@@ -86,6 +117,7 @@ final class Lights {
     synchronized void stop() {
         running = false;
         if (worker != null) worker.removeCallbacks(step);
+        lastStep = 0;
     }
 
     synchronized void release() {
@@ -99,12 +131,51 @@ final class Lights {
         if (!running) return;
         long started = SystemClock.uptimeMillis();
         int t = target;
-        float tr = (t >> 16) & 255, tg = (t >> 8) & 255, tb = t & 255;
-        if (cr < 0) { cr = tr; cg = tg; cb = tb; }
-        cr += (tr - cr) * 0.14f;
-        cg += (tg - cg) * 0.14f;
-        cb += (tb - cb) * 0.14f;
-        int accent = 0xFF000000 | (Math.round(cr) << 16) | (Math.round(cg) << 8) | Math.round(cb);
+        if (!painted || t != paletteOf) {
+            paletteOf = t;
+            int main = vivid(t);
+            tgt[0] = main;
+            tgt[1] = vivid(hue(t, 30f));
+            tgt[2] = vivid(hue(t, -30f));
+            tgt[3] = deep(main);
+        }
+        float dt = lastStep == 0 ? 0.016f : Math.min(0.1f, (started - lastStep) / 1000f);
+        lastStep = started;
+        boolean wasFading = fading;
+        float jump = 0;
+        fading = false;
+        int sub = Math.max(1, (int) Math.ceil(dt / 0.017f));
+        float h = dt / sub;
+        for (int i = 0; i < 4; i++) {
+            int c = tgt[i];
+            float[] x = cur[i], v = vel[i];
+            for (int ch = 0; ch < 3; ch++) {
+                float to = (c >> (16 - 8 * ch)) & 255;
+                if (!painted) { x[ch] = to; v[ch] = 0; continue; }
+                float before = x[ch];
+                for (int n = 0; n < sub; n++) {
+                    v[ch] += (OMEGA * OMEGA * (to - x[ch]) - 2 * OMEGA * v[ch]) * h;
+                    x[ch] += v[ch] * h;
+                }
+                jump = Math.max(jump, Math.abs(x[ch] - before));
+                if (Math.abs(to - x[ch]) > 0.4f || Math.abs(v[ch]) > 3f) fading = true;
+                else { x[ch] = to; v[ch] = 0; }
+            }
+        }
+        painted = true;
+        if (Perf.ON) {
+            if (fading && !wasFading) { fadeAt = started; fadeSteps = 0; fadeJump = 0; fadeGap = 0; }
+            if (fading || wasFading) {
+                fadeSteps++;
+                fadeJump = Math.max(fadeJump, jump);
+                if (wasFading) fadeGap = Math.max(fadeGap, started - prevStep);
+            }
+            if (wasFading && !fading) {
+                AppLog.w("lights fade: " + fadeSteps + " frames in " + (started - fadeAt) + " ms, biggest step "
+                        + Math.round(fadeJump * 10) / 10f + "/255, longest gap " + fadeGap + " ms");
+            }
+            prevStep = started;
+        }
 
         int f = front;
         int b = f < 0 ? 0 : (f + 1) % buf.length;
@@ -113,21 +184,38 @@ final class Lights {
         float sec = started / 1000f;
         // an analogous palette only: two hues 30° either side of the accent and a deep version of it. Mixing a
         // colour with its opposite (the old fixed teal under an orange accent) is what turned corners olive.
-        int main = vivid(accent);
-        paint(sec * 0.085f + 0.6f, sec * 0.062f + 1.4f, 0.82f, main, 0.74f);
-        paint(sec * 0.061f + 2.4f, sec * 0.079f + 0.3f, 0.66f, vivid(hue(accent, 30f)), 0.58f);
-        paint(sec * 0.047f + 4.1f, sec * 0.054f + 3.2f, 0.74f, vivid(hue(accent, -30f)), 0.52f);
-        paint(sec * 0.038f + 5.4f, sec * 0.091f + 2.1f, 0.62f, deep(main), 0.50f);
+        paint(sec * 0.085f + 0.6f, sec * 0.062f + 1.4f, 0.82f, color(0), ALPHA[0]);
+        paint(sec * 0.061f + 2.4f, sec * 0.079f + 0.3f, 0.66f, color(1), ALPHA[1]);
+        paint(sec * 0.047f + 4.1f, sec * 0.054f + 3.2f, 0.74f, color(2), ALPHA[2]);
+        paint(sec * 0.038f + 5.4f, sec * 0.091f + 2.1f, 0.62f, color(3), ALPHA[3]);
         // and the foot of the screen stays dark: captions and posters read on it
         canvas.drawRect(0, 0, lw, lh, vignette);
         canvas.setBitmap(null);
         front = b;
         generation++;
         view.postInvalidateOnAnimation();
-        if (running && worker != null) {
+
+        if (!running || worker == null) return;
+        worker.removeCallbacks(step);
+        if (fading) {
+            if (choreo == null) choreo = Choreographer.getInstance();   // this thread's own (it has a Looper)
+            if (!vsyncPosted) {
+                vsyncPosted = true;
+                choreo.postFrameCallback(vsync);
+            }
+        } else {
             long spent = SystemClock.uptimeMillis() - started;
             worker.postDelayed(step, Math.max(16, PERIOD_MS - spent));
         }
+    }
+
+    private int color(int i) {
+        float[] v = cur[i];
+        return 0xFF000000 | (clamp8(v[0]) << 16) | (clamp8(v[1]) << 8) | clamp8(v[2]);
+    }
+
+    private static int clamp8(float v) {
+        return Math.max(0, Math.min(255, Math.round(v)));
     }
 
     private void paint(float px, float py, float radiusRatio, int color, float alpha) {

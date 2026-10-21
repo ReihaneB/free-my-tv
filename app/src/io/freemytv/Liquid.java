@@ -25,7 +25,7 @@ import android.graphics.Shader;
 final class Liquid {
     private Liquid() {}
 
-    static final int PLATE = 0, CLEAR = 1, LIT = 2, WELL = 3, DARK = 4;
+    static final int PLATE = 0, CLEAR = 1, LIT = 2, WELL = 3, DARK = 4, FOCUS = 5;
 
     /** Ink for each material. */
     static final int INK_ON_GLASS = 0xFFFFFFFF, INK_ON_LIT = 0xFF0B1116;
@@ -35,6 +35,8 @@ final class Liquid {
         final Bitmap face, shadow;
         final int h, pad;
         final float shadowScale;
+        /** > 0: the shadow was baked with the shape cut out at this offset, so it must be drawn at exactly it. */
+        float cutDy;
 
         Kit(Bitmap face, Bitmap shadow, int h, int pad, float shadowScale) {
             this.face = face;
@@ -60,9 +62,21 @@ final class Liquid {
             // Apple's lift (`0 10px 30px -14px`): a negative spread keeps the shadow *under* the element, drawn a
             // few px lower by the caller; it never rings it. The old one (16 px all round) read as a dark halo.
             pad = Math.round(12 * k);
-            shadow = shadow(w, h, h / 2f, pad, 8 * k, material == LIT ? 0.48f : 0.32f, s, -3 * k);
+            shadow = shadow(w, h, h / 2f, pad, 8 * k, material == LIT ? 0.48f : 0.32f, s,
+                    material == LIT ? -3 * k : -5 * k);
         }
-        return new Kit(face, shadow, h, pad, s);
+        Kit kit = new Kit(face, shadow, h, pad, s);
+        if (shadow != null && material == FOCUS) {
+            // see-through glass must not show its own shadow through it: cut the shape out where it will sit
+            float dy = 7 * k;
+            Canvas c = new Canvas(shadow);
+            Paint clear = new Paint(Paint.ANTI_ALIAS_FLAG);
+            clear.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR));
+            RectF box = new RectF(pad * s, (pad - dy) * s, (pad + w) * s, (pad - dy + h) * s);
+            c.drawRoundRect(box, h / 2f * s, h / 2f * s, clear);
+            kit.cutDy = dy;
+        }
+        return kit;
     }
 
     /** One surface of w×h with corner radius r, everything but the shadow. */
@@ -79,6 +93,7 @@ final class Liquid {
         switch (material) {
             case PLATE: p.setColor(0x0DFFFFFF); break;
             case CLEAR: p.setColor(0x1AFFFFFF); break;
+            case FOCUS: p.setColor(0x2EFFFFFF); break;   // clear glass, lit: what has the focus in the bar
             case LIT: p.setShader(new LinearGradient(0, 0, 0, h, 0xF5FFFFFF, 0xE6E4EAEE, Shader.TileMode.CLAMP)); break;
             case WELL: p.setColor(0x2E000000); break;
             default: p.setColor(0xE00B1116); break;
@@ -105,10 +120,15 @@ final class Liquid {
         }
         // light from above: a faint sheen on the upper half, and the 1 px specular edge (brightest along the top,
         // a touch on the top-left curve, almost nothing below). No inner glow: that is what read as a halo.
-        float sheen = material == CLEAR ? 0.07f : material == PLATE ? 0.06f : 0.05f;
+        float sheen = material == FOCUS ? 0.26f : material == CLEAR ? 0.07f : material == PLATE ? 0.06f : 0.05f;
         p.setShader(new LinearGradient(0, 0, 0, h * 0.45f, Ui.alpha(0xFFFFFFFF, sheen), 0x00FFFFFF, Shader.TileMode.CLAMP));
         c.drawRect(box, p);
         p.setShader(null);
+        if (material == FOCUS) {
+            // a brighter, crisper edge than the quiet pills: the light runs all along the top, the curve catches it
+            rim(c, w, h, r, k, 1.3f * k, 0f, 0.30f, 0.72f, 0.85f, 0.45f, false);
+            return b;
+        }
         float spec = material == PLATE ? 1f : material == CLEAR ? 0.9f : 0.8f;
         rim(c, w, h, r, k, 1f * k, 0f, spec * 0.10f, spec * 0.32f, spec * 0.40f, spec * 0.18f, false);
         return b;
@@ -169,6 +189,7 @@ final class Liquid {
         paint.setAlpha(Math.round(255 * Math.min(1f, alpha)));
         if (shadow && kit.shadow != null) {
             float pad = kit.pad;
+            if (kit.cutDy > 0) dy = kit.cutDy;
             DST.set(box.left - pad, box.top - pad + dy, box.right + pad, box.bottom + pad + dy);
             slices(c, kit.shadow, (pad + kit.h / 2f) * kit.shadowScale, DST, pad + box.height() / 2f, paint);
         }

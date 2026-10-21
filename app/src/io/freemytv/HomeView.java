@@ -567,10 +567,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private void bake() {
         int ch = Math.round(PILL_H * k);
         kitClear = Liquid.capsule(Liquid.CLEAR, ch, k, false);
-        kitLit = Liquid.capsule(Liquid.LIT, ch, k, true);
+        kitLit = Liquid.capsule(Liquid.FOCUS, ch, k, true);
         kitWell = Liquid.capsule(Liquid.WELL, ch, k, false);
         kitButton = Liquid.capsule(Liquid.CLEAR, Math.round(44 * k), k, false);
-        kitSee = Liquid.capsule(Liquid.LIT, Math.round(40 * k), k, true);
+        kitSee = Liquid.capsule(Liquid.FOCUS, Math.round(40 * k), k, true);
         kitToast = Liquid.capsule(Liquid.DARK, Math.round(56 * k), k, true);
 
         int pw = Math.round(barBox.width()), ph = Math.round(barBox.height());
@@ -814,7 +814,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             lens.set(lensTo);
             return moving;
         }
-        float fast = Math.min(1f, dt * 21f), slow = Math.min(1f, dt * 12.5f);
+        float fast = Math.min(1f, dt * 18f), slow = Math.min(1f, dt * 13f);   // a calm drop, not a rubber band
         boolean right = lensTo.centerX() >= lens.centerX();
         float l = lens.left + (lensTo.left - lens.left) * (right ? slow : fast);
         float rr = lens.right + (lensTo.right - lens.right) * (right ? fast : slow);
@@ -954,7 +954,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (lensA > 0.003f) {
             // a drop stretched by its speed gets a little thinner, like a liquid would
             float stretch = Math.max(0, lens.width() / Math.max(1, lensTo.width()) - 1);
-            float squash = Math.min(0.14f, stretch * 0.12f) * lensTo.height();
+            float squash = Math.min(0.08f, stretch * 0.08f) * lensTo.height();
             lensBox.set(lens.left, lens.top + squash / 2, lens.right, lens.bottom - squash / 2);
             lensBox.inset(-3 * k * lensA, -2 * k * lensA);   // the focused item is lifted a little, like on tvOS
             Liquid.draw(c, kitLit, lensBox, glassPaint, lensA, true, 7 * k);
@@ -965,13 +965,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         float cx = pill.left + 30 * k, cy = pill.centerY();
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeWidth(2.2f * k);
-        stroke.setColor(blend(DIM, Liquid.INK_ON_LIT, on));
+        stroke.setColor(blend(DIM, INK, on));
         c.drawCircle(cx, cy - 1 * k, 9 * k, stroke);
         c.drawLine(cx + 6.5f * k, cy + 6 * k, cx + 13 * k, cy + 12.5f * k, stroke);
         if (!searchOpen) {   // the EditText laid over the pill draws the hint itself when it is up
             pillInk.setTextSize(22 * k);
             pillInk.setTextAlign(Paint.Align.LEFT);
-            pillInk.setColor(blend(0xFFB0BCC1, Liquid.INK_ON_LIT, on));
+            pillInk.setColor(blend(0xFFB0BCC1, INK, on));
             c.drawText("Rechercher", pill.left + 54 * k, cy + Ui.halfCap(pillInk), pillInk);
         }
 
@@ -979,7 +979,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         tabInk.setTextAlign(Paint.Align.CENTER);
         for (int i = 0; i < TAB_COUNT; i++) {
             RectF box = tabRects[i];
-            tabInk.setColor(blend(i == tab ? INK : 0xB8FFFFFF, Liquid.INK_ON_LIT, cover(box)));
+            float on2 = cover(box);
+            // under the glass the label brightens and is magnified a little, as through a drop of water
+            tabInk.setTextSize(21 * k * (1 + 0.07f * on2));
+            tabInk.setColor(blend(i == tab ? INK : 0xB8FFFFFF, INK, on2));
             c.drawText(LIBRARIES[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk), tabInk);
         }
         icon(c, CH_APPS, "apps");
@@ -989,7 +992,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void icon(Canvas c, int id, String symbol) {
         RectF box = chromeRects[id];
-        Symbols.draw(getContext(), c, symbol, box.centerX(), box.centerY(), 28 * k, blend(DIM, Liquid.INK_ON_LIT, cover(box)));
+        float on = cover(box);
+        Symbols.draw(getContext(), c, symbol, box.centerX(), box.centerY(), 28 * k * (1 + 0.08f * on), blend(DIM, INK, on));
     }
 
     /** How much of `box` the focus drop covers right now (0..1, faded with it): the ink follows the glass. */
@@ -1034,7 +1038,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 r.set(w - m - tw2 - 20 * k, cy - 20 * k, w - m + 20 * k, cy + 20 * k);
                 Liquid.draw(c, kitSee, r, glassPaint, 1f, true, 4 * k);
             }
-            seeAll.setColor(on ? Liquid.INK_ON_LIT : 0xFFB8C4C9);
+            seeAll.setColor(on ? INK : 0xFFB8C4C9);
             c.drawText("Tout voir", w - m, base, seeAll);
             seeAll.setColor(0xFFB8C4C9);
         }

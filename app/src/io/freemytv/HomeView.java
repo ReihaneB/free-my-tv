@@ -157,7 +157,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Path clip = new Path();
     private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
     private final android.graphics.Rect srcRect = new android.graphics.Rect();
-    private final Map<String, Bitmap> softs = new HashMap<>();
+    private final Map<String, Integer> accents = new HashMap<>();   // url → the artwork's average colour
     private String toastText = "";
     private long toastAt;
 
@@ -1126,15 +1126,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         c.drawRect(r2, fill);
 
         Bitmap b = artOf(t);
-        Bitmap low = soft(t);
-        if (low != null) {
-            art.setAlpha(140);
-            c.drawBitmap(low, null, r2, art);
-            art.setAlpha(255);
-        }
+        // No stretched picture behind the text: the card is tinted with the artwork's own average colour, which
+        // cannot pixelate because it is one flat tone, and it still makes each card feel like its film.
+        int tint = accentOf(t);
         fill.setAlpha(255);
+        fill.setShader(new LinearGradient(r2.left, r2.top, r2.right, r2.bottom,
+                Ui.alpha(tint, 0.34f), Ui.alpha(tint, 0.86f), Shader.TileMode.CLAMP));
+        c.drawRect(r2, fill);
         fill.setShader(new LinearGradient(r2.left, r2.top, r2.right, r2.top,
-                0xE60B1116, 0x4D0B1116, Shader.TileMode.CLAMP));
+                0xB30B1116, 0x000B1116, Shader.TileMode.CLAMP));
         c.drawRect(r2, fill);
         fill.setShader(null);
 
@@ -1185,19 +1185,26 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         c.drawRoundRect(r2, rad, rad, stroke);
     }
 
-    /** A tiny copy of the artwork, stretched as a soft wash behind the hero card. */
-    private Bitmap soft(Tile t) {
-        if (t == null || t.image == null || t.image.isEmpty()) return null;
-        Bitmap s = softs.get(t.image);
-        if (s != null) return s;
+    /**
+     * The artwork's average colour, cached per URL: one flat tone, computed by scaling the picture to a single
+     * pixel. It tints a card without ever showing a stretched, blocky copy of the picture behind the text.
+     */
+    private int accentOf(Tile t) {
+        if (t == null || t.image == null || t.image.isEmpty()) return 0xFF23323C;
+        Integer a = accents.get(t.image);
+        if (a != null) return a;
         Bitmap src = artOf(t);
-        if (src == null) return null;
-        int hh = 96;
-        int ww = Math.max(4, Math.round(hh * (float) src.getWidth() / Math.max(1, src.getHeight())));
-        s = Bitmap.createScaledBitmap(src, ww, hh, true);
-        if (softs.size() > 12) softs.clear();
-        softs.put(t.image, s);
-        return s;
+        if (src == null) return 0xFF23323C;
+        Bitmap one = Bitmap.createScaledBitmap(src, 1, 1, true);
+        int c = one.getPixel(0, 0);
+        one.recycle();
+        int r = Math.min(255, Math.round(((c >> 16) & 255) * 1.25f) + 14);
+        int g = Math.min(255, Math.round(((c >> 8) & 255) * 1.25f) + 14);
+        int b = Math.min(255, Math.round((c & 255) * 1.25f) + 14);
+        int out = 0xFF000000 | (r << 16) | (g << 8) | b;
+        if (accents.size() > 32) accents.clear();
+        accents.put(t.image, out);
+        return out;
     }
 
     private Bitmap artOf(Tile t) {

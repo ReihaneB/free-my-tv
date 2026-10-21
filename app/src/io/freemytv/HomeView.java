@@ -127,28 +127,17 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
-    private static final float BLUR = 2f;       // the band under the bar, drawn 2× smaller
-    private static final float LENS_EXTRA = 26f; // rows below the edge the lens may look at
 
     private Bitmap blurBmp;
     private Canvas blurCanvas;
     private int[] stripPx, stripTmp;
     private float blurLag = -1;
-    private int lastShapeSum = -1;
-    private Glass glass;
-    private Bitmap glassBmp;
-    private boolean glassTried;
-    private final float[] shapes = new float[Glass.MAX_SHAPES * 5];
-    private int shapeCount;
-    private int shapeSum;
-    private final Paint blurPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final RectF blurDst = new RectF();
     private long sheenAt;
     private Bitmap backdrop;          // the slate background + the focused artwork's wash, at 1/4: cheap to blit
     private String backdropKey = "";
     private float blurOffset = -1;    // the strip is only redrawn when what it covers changes
     private String blurKey = "";
-    private static final ColorMatrixColorFilter SATURATE = saturation(1.75f);
 
     private static ColorMatrixColorFilter saturation(float s) {
         ColorMatrix m = new ColorMatrix();
@@ -794,154 +783,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     /**
-     * Liquid Glass needs a real blur of what is behind the chrome. Android 11 has no RenderEffect, so the band the
-     * bar covers is drawn once into a bitmap 12× smaller and stretched back: a cheap, honest gaussian-ish blur.
+     * No bar. The chrome floats straight on the lights: a search pill and three capsules, each with its own glass,
+     * and the tabs as bare text. There is no band, no tint, no shadow under it — anything rectangular up there
+     * reads as a browser chrome bar, which is exactly what this home is not.
      */
-    private void updateBlur() {
-        boolean dirty = !backdropKey.equals(blurKey) || shapeSum != lastShapeSum;
-        boolean moved = Math.abs(blurLag - blurOffset) >= 0.4f;
-        boolean atRest = Math.abs(blurLag - offset) < 0.6f;
-        long now = SystemClock.uptimeMillis();
-        // While the shelves are moving the bar keeps the glass it already has: behind it the picture is a blur,
-        // so a strip that is one frame (or ten) old is invisible — and this pass is the most expensive thing on
-        // the frame. At most one refresh every 120 ms in motion, and one the moment it settles.
-        if (blurBmp != null && !dirty && (!moved || !atRest)) return;
-        lastShapeSum = shapeSum;
-        blurOffset = blurLag;
-        blurKey = backdropKey;
-        lastGlassAt = now;
-        float barH = BAR_H * k;
-        float bandH = barH + LENS_EXTRA * k;   // the extra rows are what the lens bends up into the glass
-
-        // the band, 4× smaller
-        int bw = Math.max(8, Math.round(w / BLUR));
-        int bh = Math.max(8, Math.round(bandH / BLUR));
-        if (blurBmp == null || blurBmp.getWidth() != bw || blurBmp.getHeight() != bh) {
-            if (blurBmp != null) blurBmp.recycle();
-            blurBmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
-            blurCanvas = new Canvas(blurBmp);
-            stripPx = new int[bw * bh];
-            stripTmp = new int[bw * bh];
-        }
-        blurCanvas.save();
-        blurCanvas.scale(1f / BLUR, 1f / BLUR);
-        blurCanvas.clipRect(0, 0, w, bandH);
-        blurCanvas.translate(0, blurLag - offset);
-        drawScene(blurCanvas);
-        blurCanvas.restore();
-        // the GPU does the rest: blur, the bend at the edge, the red/blue split and the saturation, one pass
-        if (!glassTried) {
-            glassTried = true;
-            glass = new Glass();
-            boolean ok = glass.init();
-            AppLog.w("glass: shader " + (ok ? "ready" : "failed, falling back to the CPU blur"));
-            if (!ok) glass = null;
-        }
-        glassBmp = null;
-        if (glass != null) {
-            glassBmp = glass.render(blurBmp, shapes, shapeCount, 18 * k / BLUR, 1.75f);
-        }
-        if (glassBmp == null) {
-            blurBmp.getPixels(stripPx, 0, bw, 0, 0, bw, bh);
-            box(stripPx, stripTmp, bw, bh, 2);
-            box(stripPx, stripTmp, bw, bh, 2);
-            blurBmp.setPixels(stripPx, 0, bw, 0, 0, bw, bh);
-        }
-    }
-
-    /** Separable box blur: three passes of it is a gaussian to the eye, and it costs nothing at this size. */
-    private static void box(int[] px, int[] tmp, int bw, int bh, int r) {
-        for (int y = 0; y < bh; y++) {
-            int row = y * bw;
-            for (int x = 0; x < bw; x++) {
-                int a = 0, rr = 0, gg = 0, bb = 0, n = 0;
-                for (int d = -r; d <= r; d++) {
-                    int xx = x + d;
-                    if (xx < 0) xx = 0; else if (xx >= bw) xx = bw - 1;
-                    int c = px[row + xx];
-                    a += c >>> 24; rr += (c >> 16) & 255; gg += (c >> 8) & 255; bb += c & 255; n++;
-                }
-                tmp[row + x] = ((a / n) << 24) | ((rr / n) << 16) | ((gg / n) << 8) | (bb / n);
-            }
-        }
-        for (int x = 0; x < bw; x++) {
-            for (int y = 0; y < bh; y++) {
-                int a = 0, rr = 0, gg = 0, bb = 0, n = 0;
-                for (int d = -r; d <= r; d++) {
-                    int yy = y + d;
-                    if (yy < 0) yy = 0; else if (yy >= bh) yy = bh - 1;
-                    int c = tmp[yy * bw + x];
-                    a += c >>> 24; rr += (c >> 16) & 255; gg += (c >> 8) & 255; bb += c & 255; n++;
-                }
-                px[y * bw + x] = ((a / n) << 24) | ((rr / n) << 16) | ((gg / n) << 8) | (bb / n);
-            }
-        }
-    }
-
-    /** The bar: the blurred band, a frosted tint, a lit top edge, a hairline and a soft shadow under it. */
     private void drawBar(Canvas c) {
-        float barH = BAR_H * k;
-        float bandH = barH + LENS_EXTRA * k;
-        // everything that is glass in the chrome: the bar, the search pill, the capsules, the focused tab
-        shapeCount = 0;
-        addShape(w / 2, (barH - 4000 * k) / 2, w, (barH + 4000 * k) / 2, 0);
-        addShape(chromeRects[CH_SEARCH], chromeRects[CH_SEARCH].height() / 2);
-        addShape(chromeRects[CH_APPS], 20 * k);
-        addShape(chromeRects[CH_SYNC], 20 * k);
-        addShape(chromeRects[CH_GEAR], 20 * k);
-        for (int i = 0; i < TAB_COUNT; i++) if (focused(CH_TAB + i)) addShape(tabRects[i], 18 * k);
-        shapeSum = 0;
-        for (int i = 0; i < shapeCount * 5; i++) shapeSum = shapeSum * 31 + Math.round(shapes[i]);
-        updateBlur();
-
-        if (glassBmp != null) {
-            // the shader already blurred, bent and saturated it: crop the band to the bar and draw
-            int gh = glassBmp.getHeight();
-            srcRect.set(0, 0, glassBmp.getWidth(), Math.max(1, Math.round(gh * (barH / bandH))));
-            blurDst.set(0, 0, w, barH);
-            c.drawBitmap(glassBmp, srcRect, blurDst, blurPaint);
-        } else {
-            blurDst.set(0, 0, w, bandH);
-            blurPaint.setColorFilter(SATURATE);   // Liquid Glass keeps behind it alive
-            c.drawBitmap(blurBmp, null, blurDst, blurPaint);
-            blurPaint.setColorFilter(null);
-        }
-
-        fill.setAlpha(255);
-        fill.setShader(null);
-        // smoked glass: the colour of the blur stays alive under a slight dark tint (a white veil would wash it out)
-        fill.setColor(0x40090F14);
-        c.drawRect(0, 0, w, barH, fill);
-        fill.setShader(new LinearGradient(0, 0, 0, 30 * k, 0x26FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, 30 * k, fill);
-        fill.setShader(null);
-        // no hairlines: the two rules the bar used to draw read as a frame, not as glass
-        // and the soft shadow it casts on the content below (a hard band would read as a separator)
-        fill.setShader(new LinearGradient(0, barH, 0, barH + 26 * k,
-                new int[] {0x33000000, 0x14000000, 0x00000000}, new float[] {0f, 0.35f, 1f}, Shader.TileMode.CLAMP));
-        c.drawRect(0, barH, w, barH + 26 * k, fill);
-        fill.setShader(null);
-
         drawPill(c, chromeRects[CH_SEARCH], focused(CH_SEARCH));
         for (int i = 0; i < TAB_COUNT; i++) drawTab(c, i, focused(CH_TAB + i));
         drawCapsule(c, chromeRects[CH_APPS], "apps", focused(CH_APPS));
         drawCapsule(c, chromeRects[CH_SYNC], "sync", focused(CH_SYNC));
         drawCapsule(c, chromeRects[CH_GEAR], "settings", focused(CH_GEAR));
-    }
-
-    private void addShape(RectF b, float rad) {
-        addShape(b.centerX(), b.centerY(), b.width() / 2, b.height() / 2, rad);
-    }
-
-    private void addShape(float cx, float cy, float hw, float hh, float rad) {
-        if (shapeCount >= Glass.MAX_SHAPES) return;
-        int o = shapeCount * 5;
-        shapes[o] = cx / BLUR;
-        shapes[o + 1] = cy / BLUR;
-        shapes[o + 2] = hw / BLUR;
-        shapes[o + 3] = hh / BLUR;
-        shapes[o + 4] = rad / BLUR;
-        shapeCount++;
     }
 
     private boolean focused(int id) {
@@ -967,23 +818,20 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         clip.addRoundRect(box, rad, rad, Path.Direction.CW);
         c.save();
         c.clipPath(clip);
-        boolean real = glassBmp != null;   // the shader put the backdrop inside this shape, only brighten it
         fill.setShader(null);
-        fill.setColor(real ? (on ? 0x3DFFFFFF : 0x14FFFFFF) : (on ? 0x38FFFFFF : tint));
+        fill.setColor(on ? 0x38FFFFFF : tint);
         c.drawRect(box, fill);
-        if (!real) {
-            fill.setAlpha(255);
-            fill.setShader(new LinearGradient(0, box.top, 0, box.top + box.height() * 0.55f,
-                    0x73FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
-            c.drawRect(box, fill);
-            fill.setShader(null);
-            fill.setColor(0x5CFFFFFF);
-            c.drawRect(box.left, box.top, box.right, box.top + 1.2f * k, fill);
-            fill.setShader(new LinearGradient(0, box.bottom - box.height() * 0.35f, 0, box.bottom,
-                    0x00000000, 0x26000000, Shader.TileMode.CLAMP));
-            c.drawRect(box, fill);
-            fill.setShader(null);
-        }
+        fill.setAlpha(255);
+        fill.setShader(new LinearGradient(0, box.top, 0, box.top + box.height() * 0.55f,
+                0x73FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
+        c.drawRect(box, fill);
+        fill.setShader(null);
+        fill.setColor(0x5CFFFFFF);
+        c.drawRect(box.left, box.top, box.right, box.top + 1.2f * k, fill);
+        fill.setShader(new LinearGradient(0, box.bottom - box.height() * 0.35f, 0, box.bottom,
+                0x00000000, 0x26000000, Shader.TileMode.CLAMP));
+        c.drawRect(box, fill);
+        fill.setShader(null);
         if (on) {
             float phase = sheen();
             if (phase >= 0) {

@@ -12,6 +12,7 @@ import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.os.Looper;
 import android.view.Choreographer;
 import android.view.KeyEvent;
@@ -761,6 +762,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
     }
 
+    private long lastGlassAt;
+
     @Override protected void onDraw(Canvas c) {
         drawScene(c);
         drawBar(c);
@@ -772,11 +775,18 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
      * bar covers is drawn once into a bitmap 12× smaller and stretched back: a cheap, honest gaussian-ish blur.
      */
     private void updateBlur() {
-        if (blurBmp != null && Math.abs(blurLag - blurOffset) < 0.4f && backdropKey.equals(blurKey)
-                && shapeSum == lastShapeSum) return;
+        boolean dirty = !backdropKey.equals(blurKey) || shapeSum != lastShapeSum;
+        boolean moved = Math.abs(blurLag - blurOffset) >= 0.4f;
+        boolean atRest = Math.abs(blurLag - offset) < 0.6f;
+        long now = SystemClock.uptimeMillis();
+        // While the shelves are moving the bar keeps the glass it already has: behind it the picture is a blur,
+        // so a strip that is one frame (or ten) old is invisible — and this pass is the most expensive thing on
+        // the frame. At most one refresh every 120 ms in motion, and one the moment it settles.
+        if (blurBmp != null && !dirty && (!moved || !atRest)) return;
         lastShapeSum = shapeSum;
         blurOffset = blurLag;
         blurKey = backdropKey;
+        lastGlassAt = now;
         float barH = BAR_H * k;
         float bandH = barH + LENS_EXTRA * k;   // the extra rows are what the lens bends up into the glass
 

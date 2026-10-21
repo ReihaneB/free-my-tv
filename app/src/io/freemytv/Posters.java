@@ -52,13 +52,22 @@ final class Posters {
             Bitmap b = memory.get(url);
             if (b != null) return b;
         }
-        File f = file(url);
+        final File f = file(url);
         if (f.isFile()) {
-            Bitmap b = BitmapFactory.decodeFile(f.getAbsolutePath());
-            if (b != null) {
-                synchronized (memory) { memory.put(url, b); }
-                return b;
+            // Decoding here would run on the thread that draws: a 400 px JPEG costs 10-40 ms and lands mid-scroll.
+            // So the frame goes without it and the callback asks for another frame when it is ready.
+            synchronized (pending) {
+                if (!pending.add(url)) return null;
             }
+            io.execute(() -> {
+                Bitmap b = BitmapFactory.decodeFile(f.getAbsolutePath());
+                synchronized (pending) { pending.remove(url); }
+                if (b != null) {
+                    synchronized (memory) { memory.put(url, b); }
+                    if (done != null) done.onPoster(url, b);
+                }
+            });
+            return null;
         }
         synchronized (pending) {
             if (!pending.add(url)) return null;

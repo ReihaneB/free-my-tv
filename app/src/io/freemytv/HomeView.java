@@ -3,7 +3,10 @@ package io.freemytv;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.BitmapShader;
 import android.graphics.Canvas;
+import android.graphics.ComposeShader;
+import android.graphics.Matrix;
 import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
 import android.graphics.LinearGradient;
@@ -51,6 +54,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         boolean series, live;
         int color;                  // library tile
         int action = -1;            // >= 0: open that library tab; TO_SETTINGS / TO_BROWSE
+        // what the frame would otherwise recompute (and allocate) for every card, every frame
+        float capWidth = -1, heroWidth = -1;
+        String capTitle = "", capMeta = "";
+        List<String> heroLines;
+        String heroMeta;
+        Shader heroTint;
+        int heroTintOf;
     }
 
     private static final class Row {
@@ -77,17 +87,20 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     // MARK: - Geometry (designed at 1920×1080, scaled by k)
 
-    private static final float BAR_H = 104, MARGIN = 96;
-    private static final float HEAD_H = 40, ROW_GAP = 46, CAP_H = 70;
-    private static final float CARD_W = 400, CARD_H = 225, CARD_GAP = 30;
-    private static final float HERO_W = 545, HERO_H = 306, HERO_GAP = 30;
+    private static final float BAR_H = 116, MARGIN = 96, BAR_TOP = 36;
+    private static final float HEAD_H = 52, ROW_GAP = 46, CAP_H = 70;
+    // 4 cards or 3 heroes span exactly the plate's width (1728 = 4 × 402 + 3 × 40 = 3 × 549 + 2 × 40): every right
+    // edge on screen lines up with the bar's. The widths are a hair under so the column count never rounds down.
+    private static final float CARD_W = 401.9f, CARD_H = 226, CARD_GAP = 40;
+    private static final float HERO_W = 549.2f, HERO_H = 309, HERO_GAP = 40;
     private static final float PILL_W = 300, PILL_H = 58, BUTTON_W = 78, BUTTON_H = 58, BUTTON_GAP = 14;
     private static final float LIB_TITLE_H = 96;      // the library's name above its shelves
 
     // Infuse 8's slate background, not black.
     private static final int BG_TOP = 0xFF0E1418, BG_BOTTOM = 0xFF05080A;
     private static final int INK = 0xFFFFFFFF, DIM = 0xFFB8C4C9, FAINT = 0xFF8798A0, ACCENT = 0xFFFF8A00;
-    private static final int GLASS = 0x1FFFFFFF, GLASS_ON = 0x33FFFFFF, HAIR = 0x33FFFFFF;
+    /** How much the glass compresses what is behind it (a lens: the edge shows a little of the outside). */
+    private static final float LENS = 0.94f;
 
     private float k = 1f, w, h;
     private LinearGradient bg;
@@ -122,28 +135,46 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     // MARK: - Paints
 
+    private Paint monogram;
     private Paint rowTitle, cardTitle, cardMeta, seeAll, pillInk, tabInk, toast, empty;
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
 
-    private Bitmap blurBmp;
-    private Canvas blurCanvas;
-    private int[] stripPx, stripTmp;
-    private float blurLag = -1;
-    private final RectF blurDst = new RectF();
     private long sheenAt;
-    private Bitmap backdrop;          // the slate background + the focused artwork's wash, at 1/4: cheap to blit
-    private String backdropKey = "";
-    private float blurOffset = -1;    // the strip is only redrawn when what it covers changes
-    private String blurKey = "";
 
-    private static ColorMatrixColorFilter saturation(float s) {
-        ColorMatrix m = new ColorMatrix();
-        m.setSaturation(s);
-        return new ColorMatrixColorFilter(m);
-    }
+    // the backdrop, painted on its own thread (Lights); the glass and the scroll edge read it through shaders
+    private Lights lights;
+    private int shaderGen = -1;
+    private final Matrix matrix = new Matrix();
+    private final RectF screen = new RectF();
+    private LinearGradient scrimMask;
+    private final Paint scrimPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final Paint platePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private float scrimBottom;
+
+    // the materials, baked once per size (Liquid)
+    private Liquid.Kit kitClear, kitLit, kitWell, kitButton, kitSee, kitToast;
+    private Bitmap plateFace, plateShadow, cardShadow, heroShadow;
+    private int platePad, cardPad;
+    private Shader cardRim, heroRim, topLight, sheenBand, sepShade;
+    private Bitmap heroTile;
+    /** The plate's backdrop is drawn in nested bands, each compressed more than the one inside it: a lens. */
+    private static final float[] LENS_BANDS = {0.80f, 0.86f, 0.90f, LENS};
+    private static final float[] LENS_INSETS = {0f, 3f, 6f, 10f};
+    private final BitmapShader[] lensShaders = new BitmapShader[LENS_BANDS.length];
+    private final Paint glassPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Paint shadowPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final Paint rimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint shaded = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    // the focus lens of the bar: one drop of lit glass that slides from control to control
+    private final RectF lens = new RectF(), lensTo = new RectF(), lensBox = new RectF();
+    private float lensA;
+
+    private final Posters.Done posterDone = (url, bitmap) -> postInvalidateOnAnimation();
+    private final Runnable toastTick = this::invalidate;
 
     private final Path clip = new Path();
     private final RectF r = new RectF(), r2 = new RectF(), dst = new RectF(), artBox = new RectF();
@@ -151,11 +182,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private float barRadius, sepA, sepB;
     private final android.graphics.Rect srcRect = new android.graphics.Rect();
     private final Map<String, Integer> accents = new HashMap<>();   // url → the artwork's average colour
-    private Bitmap lightsBmp;
-    private Canvas lightsCanvas;
-    private long lightsAt;
-    private final Paint blobPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint lightsPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private String toastText = "";
     private long toastAt;
 
@@ -174,6 +200,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void paints() {
         rowTitle = Ui.text(Ui.semibold, 26, 0xFFE7EDEE);
+        monogram = Ui.text(Ui.semibold, 112, 0x8CFFFFFF);
+        monogram.setTextAlign(Paint.Align.CENTER);
         cardTitle = Ui.text(Ui.medium, 21, 0xFFFFFFFF);
         cardMeta = Ui.text(Ui.regular, 17, 0xFF9AA8AE);
         seeAll = Ui.text(Ui.medium, 20, 0xFFB8C4C9);
@@ -193,17 +221,35 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         requestFrame();
         main.removeCallbacks(clockTick);
         main.postDelayed(clockTick, 20_000);
+        if (lights != null) lights.start();
+        Perf.readSkip(getContext());
+        main.removeCallbacks(autoDrive);
+        if (Perf.off(Perf.AUTO)) main.postDelayed(autoDrive, 4000);
         invalidate();
     }
+
+    private final Runnable autoDrive = new Runnable() {
+        private int i;
+        @Override public void run() {
+            if (!resumed || !Perf.off(Perf.AUTO)) return;
+            int code = Perf.DRIVE[i++ % Perf.DRIVE.length];
+            onKey(new KeyEvent(KeyEvent.ACTION_DOWN, code));
+            onKey(new KeyEvent(KeyEvent.ACTION_UP, code));
+            main.postDelayed(this, 250);
+        }
+    };
 
     void pause() {
         resumed = false;
         Iptv.get(getContext()).removeListener(this);
         main.removeCallbacks(clockTick);
+        main.removeCallbacks(autoDrive);
+        if (lights != null) lights.stop();
     }
 
     void destroy() {
         pause();
+        if (lights != null) lights.release();
     }
 
     /** Home pressed on the home screen: back to the top of the home tab. */
@@ -502,9 +548,81 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         h = height;
         k = Math.min(width / 1920f, height / 1080f);
         bg = new LinearGradient(0, 0, 0, height, BG_TOP, BG_BOTTOM, Shader.TileMode.CLAMP);
+        screen.set(0, 0, width, height);
         layout();
         offset = offsetTo;
         for (Row row : rows) row.slide = row.slideTo;
+        if (lights != null) lights.release();
+        lights = new Lights(this, width, height, BG_TOP, BG_BOTTOM);
+        shaderGen = -1;
+        if (resumed) lights.start();
+        bake();
+    }
+
+    /**
+     * Bakes every glass surface for this screen size (Liquid): the bar's plate, the controls, the focus lens, the
+     * soft shadows of the cards, and the few gradients the cards use — in their own coordinates, so a frame only
+     * moves the canvas and never builds a shader.
+     */
+    private void bake() {
+        int ch = Math.round(PILL_H * k);
+        kitClear = Liquid.capsule(Liquid.CLEAR, ch, k, false);
+        kitLit = Liquid.capsule(Liquid.LIT, ch, k, true);
+        kitWell = Liquid.capsule(Liquid.WELL, ch, k, false);
+        kitButton = Liquid.capsule(Liquid.CLEAR, Math.round(44 * k), k, false);
+        kitSee = Liquid.capsule(Liquid.LIT, Math.round(40 * k), k, true);
+        kitToast = Liquid.capsule(Liquid.DARK, Math.round(56 * k), k, true);
+
+        int pw = Math.round(barBox.width()), ph = Math.round(barBox.height());
+        plateFace = Liquid.face(Liquid.PLATE, pw, ph, barRadius, k);
+        platePad = Math.round(28 * k);
+        plateShadow = Liquid.shadow(pw, ph, barRadius, platePad, 20 * k, 0.55f, 0.5f);
+
+        cardPad = Math.round(34 * k);
+        int cw = Math.round(CARD_W * k), chh = Math.round(CARD_H * k);
+        int hw = Math.round(HERO_W * k), hh = Math.round(HERO_H * k);
+        cardShadow = Liquid.shadow(cw, chh, 30 * k, cardPad, 24 * k, 0.62f, 0.5f);
+        heroShadow = Liquid.shadow(hw, hh, 34 * k, cardPad, 26 * k, 0.62f, 0.5f);
+
+        cardRim = rimShader(cw, chh);
+        heroRim = rimShader(hw, hh);
+        topLight = new LinearGradient(0, 0, 0, chh * 0.55f, 0x1AFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
+        float band = cw * 0.42f;
+        sheenBand = new LinearGradient(-band, -band * 0.35f, band, band * 0.35f,
+                new int[] {0x00FFFFFF, 0x30FFFFFF, 0x00FFFFFF}, new float[] {0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
+        float sepLen = barBox.height() - 44 * k;
+        sepShade = new LinearGradient(0, 0, 0, sepLen, new int[] {0x00FFFFFF, 0x38FFFFFF, 0x00FFFFFF},
+                new float[] {0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
+        float tilePad = 24 * k, tileH = HERO_H * k - 2 * tilePad;
+        heroTile = Liquid.face(Liquid.CLEAR, Math.round(tileH * 2f / 3f), Math.round(tileH), 12 * k, k);
+
+        // the scroll edge: what scrolls up fades into the backdrop before it reaches the glass
+        scrimBottom = BAR_H * k + 16 * k;
+        scrimMask = new LinearGradient(0, barBox.centerY(), 0, scrimBottom, 0xFF000000, 0x00000000,
+                Shader.TileMode.CLAMP);
+
+        // the glass shows the lights behind it, more vivid and a little brighter (Apple's vibrancy)
+        ColorMatrix vibrancy = new ColorMatrix();
+        // mostly clear: Liquid Glass takes a hint of what is behind it, not its colour
+        vibrancy.setSaturation(0.82f);
+        ColorMatrix lift = new ColorMatrix(new float[] {
+                1.04f, 0, 0, 0, 9,
+                0, 1.04f, 0, 0, 9,
+                0, 0, 1.04f, 0, 10,
+                0, 0, 0, 1, 0});
+        vibrancy.postConcat(lift);
+        platePaint.setColorFilter(new ColorMatrixColorFilter(vibrancy));
+
+        rimPaint.setStyle(Paint.Style.STROKE);
+        lens.setEmpty();
+        lensA = 0;
+    }
+
+    /** The specular rim of a card, in the card's own coordinates: lit on the top-left, again on the bottom-right. */
+    private static Shader rimShader(float cw, float ch) {
+        return new LinearGradient(0, 0, cw, ch,
+                new int[] {0xFFFFFFFF, 0x6BFFFFFF, 0x4DFFFFFF, 0xD9FFFFFF},
+                new float[] {0f, 0.32f, 0.68f, 1f}, Shader.TileMode.CLAMP);
     }
 
     private float tw(int kind) {
@@ -559,36 +677,51 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         clampOffset();
     }
 
+    /**
+     * The bar is one glass plate inset from the edges, and everything in it is concentric with it: the plate's
+     * radius is half its height, the controls sit 12 px inside and have half that radius. Search on the left, the
+     * actions on the right, the libraries centred between the two separators.
+     */
     private void layoutBar() {
-        float top = 26 * k, hh = PILL_H * k, m = MARGIN * k;
-        // one floating plate, inset from the edges, the chrome sits inside it with its own padding
+        float top = BAR_TOP * k, hh = PILL_H * k, m = MARGIN * k;
         float pad = 12 * k;
-        barBox.set(m, top - pad, w - m, top + hh + pad);
+        barBox.set(m, top - pad, w - m, top + hh + pad);   // 24 px of air above the plate
         barRadius = barBox.height() / 2;
-        float inL = m + pad + 4 * k, inR = w - m - pad - 4 * k;
+        float inL = m + pad, inR = w - m - pad;
         chromeCount = 0;
         chromeRects[CH_SEARCH].set(inL, top, inL + PILL_W * k, top + hh);
         chromeOrder[chromeCount++] = CH_SEARCH;
 
-        tabInk.setTextSize(20 * k);
-        sepA = inL + PILL_W * k + 20 * k;
-        float tx = inL + PILL_W * k + 40 * k;
+        float bw = BUTTON_W * k, gb = 4 * k;
+        chromeRects[CH_GEAR].set(inR - bw, top, inR, top + hh);
+        chromeRects[CH_SYNC].set(inR - 2 * bw - gb, top, inR - bw - gb, top + hh);
+        chromeRects[CH_APPS].set(inR - 3 * bw - 2 * gb, top, inR - 2 * bw - 2 * gb, top + hh);
+        sepA = chromeRects[CH_SEARCH].right + 22 * k;
+        sepB = chromeRects[CH_APPS].left - 22 * k;
+
+        tabInk.setTextSize(21 * k);
+        float gt = 10 * k, total = -gt;
+        for (int i = 0; i < TAB_COUNT; i++) total += tabInk.measureText(LIBRARIES[i]) + 40 * k + gt;
+        float tx = w / 2 - total / 2;   // on the screen's axis, not between the separators
+        tx = Math.max(sepA + 16 * k, Math.min(tx, sepB - 16 * k - total));
         for (int i = 0; i < TAB_COUNT; i++) {
-            float twi = tabInk.measureText(LIBRARIES[i]) + 30 * k;
+            float twi = tabInk.measureText(LIBRARIES[i]) + 40 * k;
             tabRects[i].set(tx, top, tx + twi, top + hh);
-            tx += twi + 6 * k;
+            tx += twi + gt;
             chromeOrder[chromeCount++] = CH_TAB + i;
         }
-
-        float bw = BUTTON_W * k, right = inR;
-        sepB = right - 3 * bw - 2 * BUTTON_GAP * k - 22 * k;
-        chromeRects[CH_GEAR].set(right - bw, top, right, top + hh);
-        chromeRects[CH_SYNC].set(right - 2 * bw - BUTTON_GAP * k, top, right - bw - BUTTON_GAP * k, top + hh);
-        chromeRects[CH_APPS].set(right - 3 * bw - 2 * BUTTON_GAP * k, top, right - 2 * bw - 2 * BUTTON_GAP * k, top + hh);
         chromeOrder[chromeCount++] = CH_APPS;
         chromeOrder[chromeCount++] = CH_SYNC;
         chromeOrder[chromeCount++] = CH_GEAR;
         chromeIndex = Math.max(0, Math.min(chromeIndex, chromeCount - 1));
+    }
+
+    private RectF chromeRect(int id) {
+        return id >= CH_TAB ? tabRects[id - CH_TAB] : chromeRects[id];
+    }
+
+    private int focusedChrome() {
+        return chromeOrder[Math.max(0, Math.min(chromeIndex, chromeCount - 1))];
     }
 
     private float contentH() {
@@ -623,17 +756,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     @Override public void doFrame(long nanos) {
         framePosted = false;
+        if (Perf.ON) Perf.frame(nanos, wasMoving);
         long now = nanos / 1_000_000L;
         float dt = lastFrame == 0 ? 0.016f : Math.min(0.05f, (now - lastFrame) / 1000f);
         lastFrame = now;
-        boolean moving = false;
-        if (blurLag < 0) blurLag = offset;
-        if (Math.abs(offset - blurLag) > 0.3f) {
-            blurLag += (offset - blurLag) * Math.min(1f, dt * 20f);   // the material follows a beat late
-            moving = true;
-        } else {
-            blurLag = offset;
-        }
+        boolean moving = stepLens(dt);
         if (Math.abs(offsetTo - offset) > 0.35f) {
             offset += (offsetTo - offset) * Math.min(1f, dt * 13f);
             moving = true;
@@ -661,83 +788,46 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             }
         }
         invalidate();
-        if (sheenAt != 0 && System.currentTimeMillis() - sheenAt < 640) moving = true;
+        if (sheenAt != 0 && System.currentTimeMillis() - sheenAt < SHEEN_MS + 20) moving = true;
         if (moving) requestFrame();
+        wasMoving = moving;
+    }
+
+    private boolean wasMoving;
+
+    /**
+     * The lens follows the focus like a drop: the edge in front runs, the edge behind follows, so it stretches on
+     * the way and settles round on arrival. It fades in where the focus is when the bar is entered.
+     */
+    private boolean stepLens(float dt) {
+        boolean moving = false;
+        float aTo = zone == Z_BAR && !searchOpen ? 1f : 0f;
+        if (searchOpen) lensA = 0;   // the field is typed in white: no lit glass under it, not even fading
+        if (Math.abs(aTo - lensA) > 0.004f) {
+            lensA += (aTo - lensA) * Math.min(1f, dt * 14f);
+            moving = true;
+        } else {
+            lensA = aTo;
+        }
+        lensTo.set(chromeRect(focusedChrome()));
+        if (lens.isEmpty() || (lensA < 0.04f && aTo > 0)) {
+            lens.set(lensTo);
+            return moving;
+        }
+        float fast = Math.min(1f, dt * 21f), slow = Math.min(1f, dt * 12.5f);
+        boolean right = lensTo.centerX() >= lens.centerX();
+        float l = lens.left + (lensTo.left - lens.left) * (right ? slow : fast);
+        float rr = lens.right + (lensTo.right - lens.right) * (right ? fast : slow);
+        if (Math.abs(lensTo.left - l) < 0.3f) l = lensTo.left;
+        if (Math.abs(lensTo.right - rr) < 0.3f) rr = lensTo.right;
+        if (l != lensTo.left || rr != lensTo.right) moving = true;
+        lens.set(l, lensTo.top, rr, lensTo.bottom);
+        return moving;
     }
 
     // MARK: - Drawing
 
-    /**
-     * The slate background, warmed by the focused artwork's wash. It only changes when the focus moves or a poster
-     * lands, so it is built once into a quarter-size bitmap and blitted: stretching the whole wash every frame is
-     * what made the shelves stutter.
-     */
-    private void ensureBackdrop() {
-        int bw = Math.max(4, Math.round(w / 4)), bh = Math.max(4, Math.round(h / 4));
-        if (backdrop == null || backdrop.getWidth() != bw || backdrop.getHeight() != bh) {
-            if (backdrop != null) backdrop.recycle();
-            backdrop = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
-            backdropKey = "";
-        }
-        if (FLAT.equals(backdropKey)) return;
-        backdropKey = FLAT;
-        Canvas bc = new Canvas(backdrop);
-        bc.scale(1f / 4, 1f / 4);
-        fill.setAlpha(255);
-        fill.setShader(bg);
-        bc.drawRect(0, 0, w, h, fill);
-        fill.setShader(null);
-    }
-
-    /**
-     * The ambient lights: three big, soft blobs tinted by the focused artwork, drifting on slow Lissajous paths.
-     * They are painted into a bitmap 8× smaller and stretched back, so the blur is free and the edges can never
-     * be hard; the picture is only rebuilt ~10 times a second, which is invisible on shapes this size.
-     */
-    private void updateLights() {
-        long now = SystemClock.uptimeMillis();
-        if (lightsBmp != null && now - lightsAt < 90) return;
-        lightsAt = now;
-        int lw = Math.max(32, Math.round(w / 8f)), lh = Math.max(18, Math.round(h / 8f));
-        if (lightsBmp == null || lightsBmp.getWidth() != lw || lightsBmp.getHeight() != lh) {
-            if (lightsBmp != null) lightsBmp.recycle();
-            lightsBmp = Bitmap.createBitmap(lw, lh, Bitmap.Config.ARGB_8888);
-            lightsCanvas = new Canvas(lightsBmp);
-        }
-        lightsCanvas.drawColor(0, PorterDuff.Mode.CLEAR);
-        int accent = vivid(accentOf(focusedTile()));
-        float sec = now / 1000f;
-        blob(lightsCanvas, lw, lh, sec * 0.085f + 0.6f, sec * 0.062f + 1.4f, 0.95f, accent, 0.95f);
-        blob(lightsCanvas, lw, lh, sec * 0.061f + 2.4f, sec * 0.079f + 0.3f, 0.78f, vivid(hue(accent, 46f)), 0.78f);
-        blob(lightsCanvas, lw, lh, sec * 0.047f + 4.1f, sec * 0.054f + 3.2f, 0.88f, vivid(hue(accent, -62f)), 0.70f);
-        blob(lightsCanvas, lw, lh, sec * 0.038f + 5.4f, sec * 0.091f + 2.1f, 0.72f, 0xFF2E6C8E, 0.55f);
-    }
-
-    private void blob(Canvas c, int lw, int lh, float px, float py, float radiusRatio, int color, float alpha) {
-        float cx = lw * (0.5f + 0.38f * (float) Math.sin(px));
-        float cy = lh * (0.5f + 0.36f * (float) Math.cos(py));
-        float r = Math.max(lw, lh) * radiusRatio;
-        blobPaint.setShader(new RadialGradient(cx, cy, r,
-                Ui.alpha(color, alpha), Ui.alpha(color, 0f), Shader.TileMode.CLAMP));
-        c.drawCircle(cx, cy, r, blobPaint);
-        blobPaint.setShader(null);
-    }
-
-    /** Push a colour towards the saturated side: an average is always muddy, and muddy glows read as grey. */
-    private static int vivid(int color) {
-        float[] hsv = new float[3];
-        android.graphics.Color.colorToHSV(color, hsv);
-        hsv[1] = Math.min(0.95f, Math.max(0.55f, hsv[1] * 1.4f));
-        hsv[2] = Math.min(0.80f, Math.max(0.38f, hsv[2] * 1.15f + 0.10f));
-        return android.graphics.Color.HSVToColor(hsv);
-    }
-
-    private static int hue(int color, float deg) {
-        float[] hsv = new float[3];
-        android.graphics.Color.colorToHSV(color, hsv);
-        hsv[0] = (hsv[0] + deg + 360f) % 360f;
-        return android.graphics.Color.HSVToColor(hsv);
-    }
+    private static final long SHEEN_MS = 640;
 
     /** The tile that has the focus, if any: the one whose artwork tints the lights and the hero card. */
     private Tile focusedTile() {
@@ -748,17 +838,36 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return row.items.get(row.col);
     }
 
+    @Override protected void onDraw(Canvas c) {
+        long t0 = Perf.ON ? System.nanoTime() : 0;
+        if (Perf.off(Perf.NOTHING)) {
+            c.drawColor(0xFF0E1418);
+            return;
+        }
+        // the lights repaint themselves on their thread and invalidate us when a new picture is ready
+        if (lights != null) lights.accent(accentOf(focusedTile()));
+        drawScene(c);
+        if (!Perf.off(Perf.NO_BAR)) drawBar(c);
+        drawToast(c);
+        if (Perf.ON) Perf.draw(System.nanoTime() - t0);
+    }
+
     private void drawScene(Canvas c) {
-        ensureBackdrop();
-        blurDst.set(0, 0, w, h);
-        c.drawBitmap(backdrop, null, blurDst, art);
-        updateLights();
-        if (lightsBmp != null) c.drawBitmap(lightsBmp, null, blurDst, lightsPaint);
+        Bitmap back = lights == null || Perf.off(Perf.NO_BACKDROP) ? null : lights.front();
+        if (back != null) {
+            c.drawBitmap(back, null, screen, art);
+        } else {
+            fill.setColor(0xFF000000);
+            fill.setShader(bg);
+            c.drawRect(screen, fill);
+            fill.setShader(null);
+        }
 
         float barH = BAR_H * k;
         float top = barH + 18 * k - offset;
         if (rows.isEmpty()) {
             empty.setTextSize(24 * k);
+            empty.setTextAlign(Paint.Align.LEFT);
             String msg = searchOpen
                     ? query.length() < 2 ? "Tapez au moins deux lettres." : "Aucun résultat pour « " + query + " »."
                     : seriesMode ? "Chargement des épisodes…"
@@ -777,191 +886,154 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 drawRow(c, row, i, y);
             }
         }
-    }
-
-    private static final String FLAT = "flat";
-    private long lastGlassAt;
-
-    @Override protected void onDraw(Canvas c) {
-        drawScene(c);
-        drawBar(c);
-        drawToast(c);
-        // the lights never stop moving: one cheap frame every 110 ms keeps the background breathing when the
-        // shelves are still, and costs nothing while an animation is already posting frames.
-        postInvalidateDelayed(110);
+        // the scroll edge: what goes up fades into the backdrop before it reaches the glass
+        if (!Perf.off(Perf.NO_SCRIM) && refreshBackdropShaders()) c.drawRect(0, 0, w, scrimBottom, scrimPaint);
     }
 
     /**
-     * No bar. The chrome floats straight on the lights: a search pill and three capsules, each with its own glass,
-     * and the tabs as bare text. There is no band, no tint, no shadow under it — anything rectangular up there
-     * reads as a browser chrome bar, which is exactly what this home is not.
+     * The scroll edge and the plate read the lights through bitmap shaders, and a shader keeps the picture it was
+     * built on: rebuild both whenever the lights publish a new one (15 times a second, never per frame).
+     */
+    private boolean refreshBackdropShaders() {
+        if (lights == null || scrimMask == null) return false;
+        int g = lights.generation();
+        Bitmap b = lights.front();
+        if (b == null) return false;
+        if (g == shaderGen) return true;
+        shaderGen = g;
+        float sx = w / lights.width(), sy = h / lights.height();
+        BitmapShader edge = new BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+        matrix.setScale(sx, sy);
+        edge.setLocalMatrix(matrix);
+        scrimPaint.setShader(new ComposeShader(edge, scrimMask, PorterDuff.Mode.DST_IN));
+        for (int i = 0; i < LENS_BANDS.length; i++) {
+            BitmapShader glass = new BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+            matrix.setScale(sx, sy);
+            matrix.postScale(LENS_BANDS[i], LENS_BANDS[i], barBox.centerX(), barBox.centerY());
+            glass.setLocalMatrix(matrix);
+            lensShaders[i] = glass;
+        }
+        return true;
+    }
+
+    /**
+     * The bar: one Liquid Glass plate — its soft shadow, the lights seen through it (compressed like through a lens,
+     * more vivid), then its baked rim and sheen. Inside, the search well, the library shown on a quiet glass capsule,
+     * and the focus: one drop of lit glass that slides from control to control. Ink turns dark where the drop is.
      */
     private void drawBar(Canvas c) {
-        // the plate: a floating glass panel with a black contour, the signature of that style
-        if (focused(CH_SEARCH)) { }   // the sheen is per element; the plate stays still
-        dst.set(barBox);
-        dst.offset(0, 8 * k);
-        fill.setShader(null);
-        fill.setAlpha(255);
-        fill.setColor(0x4D000000);
-        c.drawRoundRect(dst, barRadius, barRadius, fill);
-        fill.setShader(new LinearGradient(0, barBox.top, 0, barBox.bottom, 0x33FFFFFF, 0x0DFFFFFF,
-                Shader.TileMode.CLAMP));
-        c.drawRoundRect(barBox, barRadius, barRadius, fill);
-        fill.setShader(null);
-        fill.setColor(0x2EFFFFFF);
-        c.drawRect(sepA, barBox.top + 20 * k, sepA + 1.5f * k, barBox.bottom - 20 * k, fill);
-        c.drawRect(sepB, barBox.top + 20 * k, sepB + 1.5f * k, barBox.bottom - 20 * k, fill);
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(1.6f * k);
-        stroke.setColor(0xE6000000);
-        c.drawRoundRect(barBox, barRadius, barRadius, stroke);
-        dst.set(barBox);
-        dst.inset(1.7f * k, 1.7f * k);
-        stroke.setStrokeWidth(1 * k);
-        stroke.setColor(0x24FFFFFF);
-        c.drawRoundRect(dst, barRadius - 1.7f * k, barRadius - 1.7f * k, stroke);
-
-        drawPill(c, chromeRects[CH_SEARCH], focused(CH_SEARCH));
-        for (int i = 0; i < TAB_COUNT; i++) drawTab(c, i, focused(CH_TAB + i));
-        drawCapsule(c, chromeRects[CH_APPS], "apps", focused(CH_APPS));
-        drawCapsule(c, chromeRects[CH_SYNC], "sync", focused(CH_SYNC));
-        drawCapsule(c, chromeRects[CH_GEAR], "settings", focused(CH_GEAR));
-    }
-
-    private boolean focused(int id) {
-        if (zone != Z_BAR) return false;
-        return chromeOrder[Math.max(0, Math.min(chromeIndex, chromeCount - 1))] == id;
-    }
-
-    /**
-     * One Liquid Glass surface: a soft shadow, the backdrop showing through a light tint, the specular crescent of a
-     * lit top edge, a moving highlight when it takes the focus, and a hairline rim.
-     */
-    private void drawGlass(Canvas c, RectF box, float radius, boolean on, int tint) {
-        float rad = radius;
-        if (on) {
-            dst.set(box);
-            dst.offset(0, 8 * k);
-            fill.setShader(null);
-            fill.setAlpha(255);
-            fill.setColor(0x4D000000);
-            c.drawRoundRect(dst, rad, rad, fill);
-        }
-        clip.reset();
-        clip.addRoundRect(box, rad, rad, Path.Direction.CW);
-        c.save();
-        c.clipPath(clip);
-        fill.setShader(null);
-        fill.setColor(on ? 0x38FFFFFF : tint);
-        c.drawRect(box, fill);
-        fill.setAlpha(255);
-        fill.setShader(new LinearGradient(0, box.top, 0, box.top + box.height() * 0.55f,
-                0x73FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
-        c.drawRect(box, fill);
-        fill.setShader(null);
-        fill.setColor(0x5CFFFFFF);
-        c.drawRect(box.left, box.top, box.right, box.top + 1.2f * k, fill);
-        fill.setShader(new LinearGradient(0, box.bottom - box.height() * 0.35f, 0, box.bottom,
-                0x00000000, 0x26000000, Shader.TileMode.CLAMP));
-        c.drawRect(box, fill);
-        fill.setShader(null);
-        if (on) {
-            float phase = sheen();
-            if (phase >= 0) {
-                float cx = box.left - box.width() * 0.4f + box.width() * 1.8f * phase;
-                fill.setAlpha(255);
-                fill.setShader(new LinearGradient(cx - box.width() * 0.45f, box.top, cx + box.width() * 0.45f, box.bottom,
-                        new int[] {0x00FFFFFF, 0x3DFFFFFF, 0x00FFFFFF}, new float[] {0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
-                c.drawRect(box, fill);
-                fill.setShader(null);
+        shadowPaint.setAlpha(255);
+        dst.set(barBox.left - platePad, barBox.top - platePad + 6 * k, barBox.right + platePad,
+                barBox.bottom + platePad + 6 * k);
+        c.drawBitmap(plateShadow, null, dst, shadowPaint);
+        if (refreshBackdropShaders()) {
+            // the lights through the glass, bent more and more towards the rim: the edge shows what lies just
+            // outside it, like the thick border of a drop
+            for (int i = 0; i < LENS_BANDS.length; i++) {
+                float in = LENS_INSETS[i] * k;
+                dst.set(barBox);
+                dst.inset(in, in);
+                platePaint.setShader(lensShaders[i]);
+                c.drawRoundRect(dst, barRadius - in, barRadius - in, platePaint);
             }
         }
+        c.drawBitmap(plateFace, barBox.left, barBox.top, glassPaint);
+        shaded.setAlpha(255);
+        shaded.setShader(sepShade);
+        float sepTop = barBox.top + 22 * k, sepLen = barBox.height() - 44 * k;
+        c.save();
+        c.translate(sepA, sepTop);
+        c.drawRect(0, 0, 1.5f * k, sepLen, shaded);
+        c.translate(sepB - sepA, 0);
+        c.drawRect(0, 0, 1.5f * k, sepLen, shaded);
         c.restore();
+        shaded.setShader(null);
 
-        stroke.setStyle(Paint.Style.STROKE);
-        if (on) {
-            // a halo so the focus reads from the sofa, not only from close up
-            stroke.setStrokeWidth(9 * k);
-            stroke.setColor(0x14FFFFFF);
-            c.drawRoundRect(box, rad, rad, stroke);
-            stroke.setStrokeWidth(4 * k);
-            stroke.setColor(0x26FFFFFF);
-            c.drawRoundRect(box, rad, rad, stroke);
+        Liquid.draw(c, kitWell, chromeRects[CH_SEARCH], glassPaint, 1f, false, 0);
+        Liquid.draw(c, kitClear, tabRects[tab], glassPaint, seriesMode ? 0.55f : 1f, false, 0);
+        if (lensA > 0.003f) {
+            // a drop stretched by its speed gets a little thinner, like a liquid would
+            float stretch = Math.max(0, lens.width() / Math.max(1, lensTo.width()) - 1);
+            float squash = Math.min(0.14f, stretch * 0.12f) * lensTo.height();
+            lensBox.set(lens.left, lens.top + squash / 2, lens.right, lens.bottom - squash / 2);
+            Liquid.draw(c, kitLit, lensBox, glassPaint, lensA, true, 5 * k);
         }
-        stroke.setStrokeWidth((on ? 1.8f : 1f) * k);
-        stroke.setColor(on ? 0xDBFFFFFF : 0x38FFFFFF);
-        c.drawRoundRect(box, rad, rad, stroke);
-    }
 
-    /** 0..1 while a focus highlight sweeps across a surface, -1 when it is done (keeps the CPU quiet at rest). */
-    private float sheen() {
-        long age = System.currentTimeMillis() - sheenAt;
-        if (sheenAt == 0 || age < 0 || age > 620) return -1;
-        return age / 620f;
-    }
-
-    private void drawPill(Canvas c, RectF box, boolean on) {
-        drawGlass(c, box, 18 * k, on, 0x38000000);
-
-        float cx = box.left + 30 * k, cy = box.centerY();
+        RectF pill = chromeRects[CH_SEARCH];
+        float on = cover(pill);
+        float cx = pill.left + 30 * k, cy = pill.centerY();
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeWidth(2.2f * k);
-        stroke.setColor(on ? INK : DIM);
+        stroke.setColor(blend(DIM, Liquid.INK_ON_LIT, on));
         c.drawCircle(cx, cy - 1 * k, 9 * k, stroke);
         c.drawLine(cx + 6.5f * k, cy + 6 * k, cx + 13 * k, cy + 12.5f * k, stroke);
-
         if (!searchOpen) {   // the EditText laid over the pill draws the hint itself when it is up
             pillInk.setTextSize(22 * k);
             pillInk.setTextAlign(Paint.Align.LEFT);
-            pillInk.setColor(on ? 0xFFFFFFFF : 0xFFB0BCC1);
-            c.drawText("Rechercher", box.left + 54 * k, box.centerY() + Ui.halfCap(pillInk), pillInk);
+            pillInk.setColor(blend(0xFFB0BCC1, Liquid.INK_ON_LIT, on));
+            c.drawText("Rechercher", pill.left + 54 * k, cy + Ui.halfCap(pillInk), pillInk);
         }
-    }
 
-    /** A library name in the top bar: the one shown is white with an orange dot, the focused one becomes glass. */
-    private void drawTab(Canvas c, int i, boolean focus) {
-        RectF box = tabRects[i];
-        if (focus) drawGlass(c, box, 18 * k, true, 0x1FFFFFFF);
-        tabInk.setTextSize(20 * k);
+        tabInk.setTextSize(21 * k);
         tabInk.setTextAlign(Paint.Align.CENTER);
-        tabInk.setColor(i == tab ? INK : focus ? 0xFFFFFFFF : 0xB4FFFFFF);
-        c.drawText(LIBRARIES[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk) - 2 * k, tabInk);
-        if (i == tab) {
-            fill.setShader(null);
-            fill.setAlpha(255);
-            fill.setColor(ACCENT);
-            c.drawCircle(box.centerX(), box.bottom - 9 * k, 3 * k, fill);
+        for (int i = 0; i < TAB_COUNT; i++) {
+            RectF box = tabRects[i];
+            tabInk.setColor(blend(i == tab ? INK : 0xB8FFFFFF, Liquid.INK_ON_LIT, cover(box)));
+            c.drawText(LIBRARIES[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk), tabInk);
         }
+        icon(c, CH_APPS, "apps");
+        icon(c, CH_SYNC, "sync");
+        icon(c, CH_GEAR, "settings");
     }
 
-    private void drawCapsule(Canvas c, RectF box, String symbol, boolean on) {
-        drawGlass(c, box, 20 * k, on, 0x33000000);
-        if (!symbol.isEmpty()) Symbols.draw(getContext(), c, symbol, box.centerX(), box.centerY(), 28 * k, on ? INK : DIM);
+    private void icon(Canvas c, int id, String symbol) {
+        RectF box = chromeRects[id];
+        Symbols.draw(getContext(), c, symbol, box.centerX(), box.centerY(), 28 * k, blend(DIM, Liquid.INK_ON_LIT, cover(box)));
+    }
+
+    /** How much of `box` the focus drop covers right now (0..1, faded with it): the ink follows the glass. */
+    private float cover(RectF box) {
+        if (lensA <= 0.003f || box.width() <= 0) return 0;
+        float o = Math.min(lensBox.right, box.right) - Math.max(lensBox.left, box.left);
+        return Ui.clamp(o / box.width()) * lensA;
+    }
+
+    private static int blend(int a, int b, float t) {
+        if (t <= 0) return a;
+        if (t >= 1) return b;
+        int aa = (a >>> 24), ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+        int ba = (b >>> 24), br = (b >> 16) & 255, bg2 = (b >> 8) & 255, bb = b & 255;
+        return (Math.round(aa + (ba - aa) * t) << 24) | (Math.round(ar + (br - ar) * t) << 16)
+                | (Math.round(ag + (bg2 - ag) * t) << 8) | Math.round(ab + (bb - ab) * t);
+    }
+
+    /** 0..1 while a glint crosses the focused surface, -1 when it is done (keeps the CPU quiet at rest). */
+    private float sheen() {
+        long age = System.currentTimeMillis() - sheenAt;
+        if (sheenAt == 0 || age < 0 || age > SHEEN_MS) return -1;
+        float t = age / (float) SHEEN_MS;
+        return 1 - (1 - t) * (1 - t) * (1 - t);   // ease out
     }
 
     private void drawRow(Canvas c, Row row, int index, float y) {
         float m = MARGIN * k;
-        rowTitle.setTextSize(26 * k);
+        rowTitle.setTextSize(28 * k);
         rowTitle.setTextAlign(Paint.Align.LEFT);
-        float base = y + HEAD_H * k - 12 * k;
+        float base = y + 30 * k;   // 22 px above the cards: a focused card grows 7 px and still clears it
         c.drawText(row.title, m, base, rowTitle);
 
         boolean focusedRow = index == rowIndex && zone == Z_ROW;
         if (row.seeTab >= 0) {
+            // "Tout voir" is a control like the others: plain ink at rest, the lit glass drop when focused
             seeAll.setTextSize(20 * k);
             seeAll.setTextAlign(Paint.Align.RIGHT);
             boolean on = focusedRow && row.col == SEE_ALL;
-            float tw2 = seeAll.measureText("Tout voir");
-            if (on) {
-                r.set(w - m - tw2 - 20 * k, base - Ui.cap(seeAll) - 9 * k, w - m + 12 * k, base + 9 * k);
-                fill.setShader(null);
-                fill.setColor(0xF2FFFFFF);
-                c.drawRoundRect(r, 18 * k, 18 * k, fill);
-                seeAll.setColor(0xFF0B1013);
-            } else {
-                seeAll.setColor(0xFFB8C4C9);
+            float tw2 = seeAll.measureText("Tout voir"), cy = base - Ui.cap(seeAll) / 2;
+            if (on) {   // the text stays on the grid's right edge; the drop overhangs it like a focused card
+                r.set(w - m - tw2 - 20 * k, cy - 20 * k, w - m + 20 * k, cy + 20 * k);
+                Liquid.draw(c, kitSee, r, glassPaint, 1f, true, 4 * k);
             }
+            seeAll.setColor(on ? Liquid.INK_ON_LIT : 0xFFB8C4C9);
             c.drawText("Tout voir", w - m, base, seeAll);
             seeAll.setColor(0xFFB8C4C9);
         }
@@ -969,46 +1041,84 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         int n = cols(row.kind);
         float s = step(row.kind), tw = tw(row.kind), th = th(row.kind);
         float tilesTop = y + HEAD_H * k;
+        boolean hero = row.kind == R_HERO;
         for (int j = row.win; j < n + row.win && j < row.items.size(); j++) {
             Tile t = row.items.get(j);
             float x = m + j * s - row.slide;
             r.set(x, tilesTop, x + tw, tilesTop + th);
             if (r.right < m - 12 || r.left > w - m + 12) continue;
             float f = j < row.focus.length ? row.focus[j] : 0;
-            if (row.kind == R_HERO) drawHero(c, r, t, f);
-            else drawCard(c, r, t, f);
-            if (row.kind != R_HERO) drawCaption(c, t, r, tilesTop + th + 8 * k);
+            drawCard(c, r, t, f, hero);
+            if (!hero && !Perf.off(Perf.NO_TEXT)) drawCaption(c, t, r, tilesTop + th + (8 + 10 * f) * k, f);
         }
     }
 
-    private void drawCard(Canvas c, RectF box, Tile t, float f) {
-        float radius = 30 * k;
-        float grow = 1 + 0.055f * f;
+    /**
+     * Every card is the same piece of glass: artwork clipped to its rounded shape, a specular rim lit from the
+     * top-left (quiet at rest, bright when focused), and on focus a lift — scale, a soft baked shadow, light on its
+     * top half and a glint that crosses it once.
+     */
+    private void drawCard(Canvas c, RectF box, Tile t, float f, boolean hero) {
+        float radius = (hero ? 34 : 30) * k;
+        float grow = 1 + (hero ? 0.045f : 0.055f) * f;
         r2.set(box);
         r2.inset(-box.width() * (grow - 1) / 2, -box.height() * (grow - 1) / 2);
         float rad = radius * grow;
 
         if (f > 0.02f) {
-            dst.set(r2);
-            dst.offset(0, 14 * k * f);
-            fill.setShader(null);
-            fill.setColor(Ui.alpha(0xFF000000, 0.35f * f));
-            c.drawRoundRect(dst, rad, rad, fill);
+            float pad = cardPad * grow, dy = 16 * k * f;
+            dst.set(r2.left - pad, r2.top - pad + dy, r2.right + pad, r2.bottom + pad + dy);
+            shadowPaint.setAlpha(Math.round(255 * Math.min(1f, f)));
+            c.drawBitmap(hero ? heroShadow : cardShadow, null, dst, shadowPaint);
+            shadowPaint.setAlpha(255);
         }
 
         clip.reset();
         clip.addRoundRect(r2, rad, rad, Path.Direction.CW);
         c.save();
-        c.clipPath(clip);
-        fill.setShader(null);
-        fill.setColor(0xFF243038);
-        c.drawRect(r2, fill);
+        if (!Perf.off(Perf.NO_CLIP)) c.clipPath(clip);
+        if (hero) heroBody(c, t, f, grow); else cardBody(c, t);
+        if (f > 0.02f) {
+            c.save();
+            c.translate(r2.left, r2.top);
+            shaded.setShader(topLight);
+            shaded.setAlpha(Math.round(255 * Math.min(1f, f)));
+            c.drawRect(0, 0, r2.width(), r2.height(), shaded);
+            float phase = sheen();
+            if (phase >= 0 && f > 0.5f) {
+                float gx = -r2.width() * 0.45f + r2.width() * 1.9f * phase, gy = r2.height() / 2;
+                c.translate(gx, gy);
+                shaded.setShader(sheenBand);
+                shaded.setAlpha(255);
+                c.drawRect(-gx, -gy, r2.width() - gx, r2.height() - gy, shaded);
+            }
+            c.restore();
+            shaded.setShader(null);
+            shaded.setAlpha(255);
+        }
+        c.restore();
 
+        if (Perf.off(Perf.NO_RIM)) return;
+        float sw = (1f + 1.6f * f) * k;
+        rimPaint.setShader(hero ? heroRim : cardRim);
+        rimPaint.setStrokeWidth(sw);
+        rimPaint.setAlpha(Math.round(255 * Math.min(1f, 0.20f + 0.80f * f)));
+        c.save();
+        c.translate(r2.left, r2.top);
+        dst.set(sw / 2, sw / 2, r2.width() - sw / 2, r2.height() - sw / 2);
+        c.drawRoundRect(dst, rad - sw / 2, rad - sw / 2, rimPaint);
+        c.restore();
+    }
+
+    private void cardBody(Canvas c, Tile t) {
+        fill.setShader(null);
+        fill.setColor(0xFF1E2A31);
+        c.drawRect(r2, fill);
         Bitmap b = artOf(t);
         if (b != null) {
             if (t.live) {
                 artBox.set(r2);
-                artBox.inset(26 * k, 26 * k);
+                artBox.inset(28 * k, 28 * k);
                 drawContain(c, b, artBox);
             } else {
                 drawCover(c, b, r2);
@@ -1016,126 +1126,129 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         } else {
             // No artwork: a quiet glyph, never the title — the caption under the card already has it.
             String glyph = !t.symbol.isEmpty() ? t.symbol : t.live ? "tv" : "play";
-            Symbols.draw(getContext(), c, glyph, r2.centerX(), r2.centerY(), 54 * k, 0x59FFFFFF);
+            Symbols.draw(getContext(), c, glyph, r2.centerX(), r2.centerY(), 54 * k, 0x4DFFFFFF);
         }
-
         if (t.progress > 0.005f) {
-            // A track across the card so a sliver of progress reads as progress, not as a stray dot.
-            float barH = 4 * k, barY = r2.bottom - 3 * k;
-            fill.setColor(0x4D000000);
-            c.drawRect(r2.left, barY - barH, r2.right, barY, fill);
-            fill.setColor(0x26FFFFFF);
-            c.drawRect(r2.left, barY - barH, r2.right, barY - barH + 1 * k, fill);
-            dst.set(r2.left, barY - barH, r2.left + Math.max(16 * k, r2.width() * t.progress), barY);
+            // the progress is a capsule inset in the card's foot, like everything else that is a control here
+            float ph = 6 * k, inset = 22 * k, py = r2.bottom - 16 * k;
+            dst.set(r2.left + inset, py - ph, r2.right - inset, py);
+            fill.setColor(0x8C000000);
+            c.drawRoundRect(dst, ph / 2, ph / 2, fill);
+            dst.right = dst.left + Math.max(30 * k, (r2.width() - 2 * inset) * Math.min(1f, t.progress));
             fill.setColor(ACCENT);
-            c.drawRoundRect(dst, barH / 2, barH / 2, fill);
-        }
-        if (f > 0.02f) {
-            fill.setAlpha(255);
-            fill.setShader(new LinearGradient(0, r2.top, 0, r2.top + r2.height() * 0.5f,
-                    Ui.alpha(0xFFFFFFFF, 0.06f * f), 0x00FFFFFF, Shader.TileMode.CLAMP));
-            c.drawRect(r2, fill);
-            fill.setShader(null);
-        }
-        c.restore();
-
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(1 * k);
-        stroke.setColor(0x22FFFFFF);
-        c.drawRoundRect(r2, rad, rad, stroke);
-        if (f > 0.02f) {
-            stroke.setStrokeWidth(2.5f * k);
-            stroke.setColor(Ui.alpha(0xFFFFFFFF, 0.92f * f));
-            c.drawRoundRect(r2, rad, rad, stroke);
+            c.drawRoundRect(dst, ph / 2, ph / 2, fill);
         }
     }
 
     /**
-     * The card that speaks: artwork on the left, title, year and the button on the right, over a wash of the same
-     * artwork. It is the hero of the first shelf, kept from the earlier design.
+     * The card that speaks: artwork on the left with its own concentric corners, title, year and the button on the
+     * right, over a tone taken from the artwork (one flat colour, darkened so white text always reads on it).
      */
-    private void drawHero(Canvas c, RectF box, Tile t, float f) {
-        float radius = 34 * k;
-        float grow = 1 + 0.045f * f;
-        r2.set(box);
-        r2.inset(-box.width() * (grow - 1) / 2, -box.height() * (grow - 1) / 2);
-        float rad = radius * grow;
-
-        if (f > 0.02f) {
-            dst.set(r2);
-            dst.offset(0, 14 * k * f);
-            fill.setShader(null);
-            fill.setAlpha(255);
-            fill.setColor(Ui.alpha(0xFF000000, 0.35f * f));
-            c.drawRoundRect(dst, rad, rad, fill);
+    private void heroBody(Canvas c, Tile t, float f, float grow) {
+        // a pane of smoked glass over the lights (they are already soft, so what shows through is a true frost),
+        // tinted by the artwork; a card with no artwork is the same glass, untinted
+        fill.setShader(null);
+        fill.setColor(0x9E0B1116);
+        c.drawRect(r2, fill);
+        int accent = accentOf(t);
+        if (t.heroTint == null || t.heroTintOf != accent) {
+            int tint = heroTint(accent);
+            t.heroTint = new LinearGradient(0, 0, 0, HERO_H * k, Ui.alpha(tint, 0.72f), Ui.alpha(tint, 0.40f),
+                    Shader.TileMode.CLAMP);
+            t.heroTintOf = accent;
         }
-
-        clip.reset();
-        clip.addRoundRect(r2, rad, rad, Path.Direction.CW);
         c.save();
-        c.clipPath(clip);
-        fill.setShader(null);
-        fill.setColor(0xFF20303A);
-        c.drawRect(r2, fill);
+        c.translate(r2.left, r2.top);
+        shaded.setAlpha(255);
+        shaded.setShader(t.heroTint);
+        c.drawRect(0, 0, r2.width(), r2.height(), shaded);
+        shaded.setShader(null);
+        c.restore();
 
-        Bitmap b = artOf(t);
-        // No stretched picture behind the text: the card is tinted with the artwork's own average colour, which
-        // cannot pixelate because it is one flat tone, and it still makes each card feel like its film.
-        int tint = accentOf(t);
-        fill.setAlpha(255);
-        fill.setShader(new LinearGradient(r2.left, r2.top, r2.right, r2.bottom,
-                Ui.alpha(tint, 0.34f), Ui.alpha(tint, 0.86f), Shader.TileMode.CLAMP));
-        c.drawRect(r2, fill);
-        fill.setShader(new LinearGradient(r2.left, r2.top, r2.right, r2.top,
-                0xB30B1116, 0x000B1116, Shader.TileMode.CLAMP));
-        c.drawRect(r2, fill);
-        fill.setShader(null);
-
-        float pad = 24 * k;
+        float pad = 24 * k * grow;
         float artH = r2.height() - 2 * pad;
         float artW = artH * 2f / 3f;
         artBox.set(r2.left + pad, r2.top + pad, r2.left + pad + artW, r2.top + pad + artH);
-        if (b != null) {
+        Bitmap b = artOf(t);
+        float ir = Math.max(4 * k, 34 * k * grow - pad);   // concentric with the card
+        if (b == null || t.live) {
+            // a channel logo or no picture at all: it sits on a pane of glass the size of a poster
+            c.drawBitmap(heroTile, null, artBox, glassPaint);
+        }
+        if (b != null && t.live) {
+            artBox.inset(20 * k, 20 * k);
             drawContain(c, b, artBox);
+            artBox.inset(-20 * k, -20 * k);
+        } else if (b != null) {
+            float bw = b.getWidth(), bh = b.getHeight();
+            float scale = Math.min(artBox.width() / bw, artBox.height() / bh);
+            float dw = bw * scale, dh = bh * scale;
+            dst.set(artBox.centerX() - dw / 2, artBox.centerY() - dh / 2, artBox.centerX() + dw / 2, artBox.centerY() + dh / 2);
+            clip.reset();
+            clip.addRoundRect(dst, ir, ir, Path.Direction.CW);
+            c.save();
+            c.clipPath(clip);
+            c.drawBitmap(b, null, dst, art);
+            c.restore();
         } else {
-            Symbols.draw(getContext(), c, !t.symbol.isEmpty() ? t.symbol : t.live ? "tv" : "play",
-                    artBox.centerX(), artBox.centerY(), 56 * k, 0x59FFFFFF);
+            // no artwork: the title's initial, large, on the glass pane — typography, not a placeholder icon
+            String initial = t.title.isEmpty() ? "·" : t.title.substring(0, t.title.offsetByCodePoints(0, 1))
+                    .toUpperCase(Locale.FRENCH);
+            monogram.setTextSize(112 * k * grow);
+            c.drawText(initial, artBox.centerX(), artBox.centerY() + Ui.halfCap(monogram), monogram);
         }
 
         float tx = artBox.right + 26 * k;
         float maxW = r2.right - pad - tx;
         cardTitle.setTextSize(29 * k);
         cardTitle.setTextAlign(Paint.Align.LEFT);
-        List<String> lines = wrap(t.title, cardTitle, maxW, 2);
+        cardTitle.setColor(INK);
+        if (t.heroLines == null || Math.abs(t.heroWidth - maxW) > 6 * k) {
+            t.heroLines = wrap(t.title, cardTitle, maxW, 2);
+            t.heroWidth = maxW;
+        }
         float ty = r2.top + pad + 4 * k;
-        for (String line : lines) {
+        for (String line : t.heroLines) {
             c.drawText(line, tx, ty + Ui.cap(cardTitle), cardTitle);
             ty += 36 * k;
         }
         cardMeta.setTextSize(19 * k);
         cardMeta.setTextAlign(Paint.Align.LEFT);
-        String meta = t.meta == null ? "" : t.meta;
-        if (!meta.isEmpty()) c.drawText(fit(cardMeta, meta, maxW), tx, ty + Ui.cap(cardMeta) + 2 * k, cardMeta);
+        if (t.heroMeta == null) t.heroMeta = heroMeta(t);
+        c.drawText(t.heroMeta, tx, ty + Ui.cap(cardMeta) + 2 * k, cardMeta);
 
         String label = t.series ? "Épisodes" : t.url.isEmpty() ? "" : t.live ? "En direct" : "Regarder";
         if (!label.isEmpty()) {
             cardTitle.setTextSize(20 * k);
-            float bw = cardTitle.measureText(label) + 58 * k;
-            float by = Math.min(r2.bottom - pad - 44 * k, ty + Ui.cap(cardMeta) + 26 * k);
+            float bw = cardTitle.measureText(label) + 62 * k;
+            float by = r2.bottom - pad - 44 * k;   // on the poster's foot: every hero's button on one line
             r.set(tx, by, tx + bw, by + 44 * k);
-            fill.setColor(0xF2FFFFFF);
-            c.drawRoundRect(r, 22 * k, 22 * k, fill);
-            Symbols.draw(getContext(), c, "play", r.left + 25 * k, r.centerY(), 22 * k, 0xFF0B1116);
-            cardTitle.setColor(0xFF0B1116);
-            c.drawText(label, r.left + 44 * k, r.centerY() + Ui.halfCap(cardTitle), cardTitle);
-            cardTitle.setColor(0xFFFFFFFF);
+            // the button is glass at rest and lights up with its card, the same drop as in the bar
+            Liquid.draw(c, kitButton, r, glassPaint, 1f, false, 0);
+            Liquid.draw(c, kitButton, r, glassPaint, 0.9f * f, false, 0);   // brighter glass with its card
+            int ink = INK;
+            Symbols.draw(getContext(), c, "play", r.left + 26 * k, r.centerY(), 22 * k, ink);
+            cardTitle.setColor(ink);
+            c.drawText(label, r.left + 46 * k, r.centerY() + Ui.halfCap(cardTitle), cardTitle);
+            cardTitle.setColor(INK);
         }
-        c.restore();
+    }
 
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(f > 0.02f ? 2.5f * k : 1 * k);
-        stroke.setColor(f > 0.02f ? Ui.alpha(0xFFFFFFFF, 0.62f * f) : 0x22FFFFFF);
-        c.drawRoundRect(r2, rad, rad, stroke);
+    /** Every hero says the same things in the same order: what it is, its year, how far it was watched. */
+    private static String heroMeta(Tile t) {
+        StringBuilder b = new StringBuilder(t.live ? "Chaîne en direct" : t.series ? "Série" : "Film");
+        if (t.meta != null && !t.meta.isEmpty() && !t.live) b.append(" · ").append(t.meta);
+        if (t.progress > 0.01f) b.append(" · ").append(Math.round(t.progress * 100)).append(" % vu");
+        return b.toString();
+    }
+
+    /** The artwork's tone made safe for white text: never brighter than a dark mid-tone, never garish. */
+    private static int heroTint(int color) {
+        float[] hsv = new float[3];
+        android.graphics.Color.colorToHSV(color, hsv);
+        hsv[1] = Math.min(hsv[1], 0.70f);
+        hsv[2] = Math.min(hsv[2], 0.44f);
+        return android.graphics.Color.HSVToColor(hsv);
     }
 
     /**
@@ -1155,23 +1268,24 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         int g = Math.min(255, Math.round(((c >> 8) & 255) * 1.25f) + 14);
         int b = Math.min(255, Math.round((c & 255) * 1.25f) + 14);
         int out = 0xFF000000 | (r << 16) | (g << 8) | b;
-        if (accents.size() > 32) accents.clear();
+        if (accents.size() > 160) accents.clear();
         accents.put(t.image, out);
         return out;
     }
 
     private Bitmap artOf(Tile t) {
+        if (Perf.off(Perf.NO_ART)) return null;
         if (t.art != null) return t.art;
         if (t.image == null || t.image.isEmpty()) return null;
-        return Posters.get(getContext()).get(t.image, (url, bitmap) -> postInvalidateOnAnimation());
+        return Posters.get(getContext()).get(t.image, posterDone);
     }
 
     private void drawCover(Canvas c, Bitmap b, RectF box) {
         float bw = b.getWidth(), bh = b.getHeight();
         float scale = Math.max(box.width() / bw, box.height() / bh);
         float sw = box.width() / scale, sh = box.height() / scale;
-        srcRect.set(Math.round((bw - sw) / 2), Math.round((bh - sh) / 2),
-                Math.round((bw + sw) / 2), Math.round((bh + sh) / 2));
+        float top = (bh - sh) * (bh > bw ? 0.3f : 0.5f);   // a portrait poster: its upper part, where faces are
+        srcRect.set(Math.round((bw - sw) / 2), Math.round(top), Math.round((bw + sw) / 2), Math.round(top + sh));
         c.drawBitmap(b, srcRect, box, art);
     }
 
@@ -1183,28 +1297,25 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         c.drawBitmap(b, null, dst, art);
     }
 
-    private static int lighten(int color, float f) {
-        int r = Math.min(255, Math.round(((color >> 16) & 255) * f));
-        int g = Math.min(255, Math.round(((color >> 8) & 255) * f));
-        int b = Math.min(255, Math.round((color & 255) * f));
-        return 0xFF000000 | (r << 16) | (g << 8) | b;
-    }
-
-    private void drawCaption(Canvas c, Tile t, RectF box, float y) {
+    private void drawCaption(Canvas c, Tile t, RectF box, float y, float f) {
         cardTitle.setTextSize(21 * k);
         cardTitle.setTextAlign(Paint.Align.CENTER);
         cardMeta.setTextSize(17 * k);
         cardMeta.setTextAlign(Paint.Align.CENTER);
         float width = box.width() + 24 * k;
-        c.drawText(fit(cardTitle, t.title, width), box.centerX(), y + Ui.cap(cardTitle), cardTitle);
-        String meta = t.meta == null ? "" : t.meta;
-        if (!meta.isEmpty()) {
-            c.drawText(fit(cardMeta, meta, width), box.centerX(), y + Ui.cap(cardTitle) + 26 * k, cardMeta);
+        if (t.capWidth != width) {
+            t.capTitle = fit(cardTitle, t.title, width);
+            t.capMeta = t.meta == null || t.meta.isEmpty() ? "" : fit(cardMeta, t.meta, width);
+            t.capWidth = width;
         }
+        cardTitle.setColor(blend(0xFFDDE4E7, INK, f));
+        c.drawText(t.capTitle, box.centerX(), y + Ui.cap(cardTitle), cardTitle);
+        if (!t.capMeta.isEmpty()) c.drawText(t.capMeta, box.centerX(), y + Ui.cap(cardTitle) + 26 * k, cardMeta);
+        cardTitle.setColor(INK);
         cardTitle.setTextAlign(Paint.Align.LEFT);
     }
 
-    // MARK: - Top bar
+    // MARK: - Toast
 
     private void drawToast(Canvas c) {
         if (toastText == null || toastText.isEmpty()) return;
@@ -1216,14 +1327,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         float a = Ui.clamp(age < 200 ? age / 200f : age > 2200 ? 1 - (age - 2200) / 400f : 1f);
         toast.setTextSize(22 * k);
         toast.setTextAlign(Paint.Align.CENTER);
-        toast.setAlpha((int) (255 * a));
-        fill.setColor(Ui.alpha(0xFF000000, 0.7f * a));
-        float tw = toast.measureText(toastText) + 56 * k;
+        float tw = toast.measureText(toastText) + 64 * k;
         r.set(w / 2 - tw / 2, h - 116 * k, w / 2 + tw / 2, h - 60 * k);
-        c.drawRoundRect(r, 28 * k, 28 * k, fill);
+        Liquid.draw(c, kitToast, r, glassPaint, a, true, 6 * k);
+        toast.setAlpha(Math.round(255 * a));
         c.drawText(toastText, w / 2, r.centerY() + Ui.halfCap(toast), toast);
         toast.setAlpha(255);
-        main.postDelayed(this::invalidate, 240);
+        main.removeCallbacks(toastTick);
+        if (age < 200 || age > 2200) postInvalidateOnAnimation();
+        else main.postDelayed(toastTick, 2200 - age);
     }
 
     // MARK: - Keys
@@ -1293,6 +1405,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (next != colIndex) {
             colIndex = next;
             row.col = next;
+            sheenAt = System.currentTimeMillis();
             ensureWindow(row);
             invalidate();
             requestFrame();
@@ -1332,6 +1445,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private void enterRow() {
+        sheenAt = System.currentTimeMillis();
         Row row = rows.get(rowIndex);
         colIndex = Math.max(0, Math.min(colIndex, row.items.size() - 1));
         row.col = colIndex;
@@ -1542,6 +1656,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         android.app.Activity a = activity();
         if (a instanceof HomeActivity) ((HomeActivity) a).openSearch();
         else { field.setVisibility(VISIBLE); field.requestFocus(); }
+        lensA = 0;
+        requestFrame();
         showResults("");
     }
 
@@ -1553,6 +1669,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         query = "";
         rebuild();
         requestFocus();
+        requestFrame();
         invalidate();
     }
 

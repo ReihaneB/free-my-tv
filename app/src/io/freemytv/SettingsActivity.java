@@ -74,6 +74,11 @@ public class SettingsActivity extends Activity {
         super.onPause();
     }
 
+    @Override protected void onDestroy() {
+        view.release();
+        super.onDestroy();
+    }
+
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if (preview != null) {
             // Like the real screensaver: arrows, OK or Back close it (other keys go on to the system).
@@ -117,7 +122,12 @@ public class SettingsActivity extends Activity {
         private static final int AMBER = 0xFFFFC266, INK = 0xFF1C1C1E;
 
         private final SettingsActivity activity;
-        private final Scene scene = new Scene();
+        // the same backdrop as the home (Lights) and the same lit glass for the focused row (Liquid)
+        private Lights lights;
+        private final RectF screenRect = new RectF();
+        private final Paint backPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final Paint glassPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final java.util.Map<Integer, Liquid.Kit> lit = new java.util.HashMap<>();
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final Spring[] pop = new Spring[12];
         private final List<String> appPkgs = new ArrayList<>(), appLabels = new ArrayList<>();
@@ -165,10 +175,6 @@ public class SettingsActivity extends Activity {
             super(a);
             activity = a;
             for (int i = 0; i < pop.length; i++) pop[i] = new Spring(0.28f, 0.85f, 0);
-            HomeData.Weather wx = HomeData.get(a).weather;
-            Shaders.sky(scene.palette, System.currentTimeMillis(), wx.sunrise, wx.sunset);
-            scene.setMotion(0.5f, 0.2f);
-            scene.applyPalette();
             setFocusable(true);
             setContentDescription("Free My TV");
             // TalkBack: one item per row, id = row + 1.
@@ -260,13 +266,20 @@ public class SettingsActivity extends Activity {
             startedAt = SystemClock.uptimeMillis();
             lastNanos = 0;
             handler.post(poll);
+            if (lights != null) lights.start();
             Choreographer.getInstance().postFrameCallback(this);
             spoken.readAgain();
+        }
+
+        void release() {
+            pause();
+            if (lights != null) lights.release();
         }
 
         void pause() {
             running = false;
             handler.removeCallbacks(poll);
+            if (lights != null) lights.stop();
             Choreographer.getInstance().removeFrameCallback(this);
         }
 
@@ -274,7 +287,7 @@ public class SettingsActivity extends Activity {
             if (!running) return;
             boolean moving = busy();
             for (Spring s : pop) moving |= !s.settled();
-            if (moving || SystemClock.uptimeMillis() - lastSky >= 100) invalidate();
+            if (moving) invalidate();   // the lights invalidate on their own, 15 times a second
             Choreographer.getInstance().postFrameCallback(this);
         }
 
@@ -282,7 +295,12 @@ public class SettingsActivity extends Activity {
             w = width;
             h = height;
             k = w / 1920f;
-            scene.setSize(w, h);
+            screenRect.set(0, 0, w, h);
+            if (lights != null) lights.release();
+            lights = new Lights(this, w, h, 0xFF0E1418, 0xFF05080A);
+            lights.accent(0xFF2E6C8E);
+            if (running) lights.start();
+            lit.clear();
             title = Ui.text(Ui.displaySemibold, 50 * k, 0xFFFFFFFF);
             title.setTextAlign(Paint.Align.CENTER);
             subtitle = Ui.text(Ui.regular, 26 * k, 0x99FFFFFF);
@@ -340,11 +358,9 @@ public class SettingsActivity extends Activity {
             }
             long up = SystemClock.uptimeMillis();
             float seconds = (up - startedAt) / 1000f;
-            if (up - lastSky >= 100) {
-                lastSky = up;
-                scene.advance(seconds);
-            }
-            scene.drawBackground(c);
+            android.graphics.Bitmap back = lights == null ? null : lights.front();
+            if (back != null) c.drawBitmap(back, null, screenRect, backPaint);
+            else c.drawColor(0xFF0E1418);
 
             // On the left: big symbol, title, description.
             float cx = 500 * k;
@@ -443,13 +459,14 @@ public class SettingsActivity extends Activity {
                 float s = 1 + 0.02f * f;
                 float cx = rowRect.centerX(), cy = rowRect.centerY();
                 tmp.set(cx - rowRect.width() * s / 2, cy - rowRect.height() * s / 2, cx + rowRect.width() * s / 2, cy + rowRect.height() * s / 2);
-                float r = 18 * k * s;
-                tmp.offset(0, 10 * k * f);
-                shadow.setColor(Ui.alpha(0xFF000000, 0.4f * f));
-                c.drawRoundRect(tmp, r, r, shadow);
-                tmp.offset(0, -10 * k * f);
-                white.setAlpha(Math.round(255 * f));
-                c.drawRoundRect(tmp, r, r, white);
+                // the home's focus: one capsule of lit glass, with its soft shadow
+                int hpx = Math.round(rowRect.height());
+                Liquid.Kit kit = lit.get(hpx);
+                if (kit == null) {
+                    kit = Liquid.capsule(Liquid.LIT, hpx, k, true);
+                    lit.put(hpx, kit);
+                }
+                Liquid.draw(c, kit, tmp, glassPaint, f, true, 8 * k * f);
                 rowRect.set(tmp);
             }
             return f;

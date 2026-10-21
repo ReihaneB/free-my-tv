@@ -56,14 +56,14 @@ public class HomeActivity extends Activity {
         search.setTextColor(Color.WHITE);
         search.setHintTextColor(0xFF9AA8AE);
         search.setHint("Rechercher");
-        search.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(24));
-        search.setPadding(px(56), 0, px(18), 0);
+        search.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(22));
+        search.setPadding(px(54), 0, px(22), 0);
         search.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         search.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
         search.setVisibility(View.GONE);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(px(300), px(58));
-        lp.leftMargin = px(96);
-        lp.topMargin = px(26);
+        lp.leftMargin = px(108);   // exactly over the search well: 96 (margin) + 12 (inside the plate)
+        lp.topMargin = px(36);   // BAR_TOP
         root.addView(search, lp);
         home.setSearchField(search);
 

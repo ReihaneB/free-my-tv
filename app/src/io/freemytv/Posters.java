@@ -90,6 +90,45 @@ final class Posters {
         return null;
     }
 
+    // Backdrops: full screen, so decoded at full size (the posters' 300 px floor would make them blurry). A few only.
+    private final Map<String, Bitmap> large = new LinkedHashMap<String, Bitmap>(8, 0.75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, Bitmap> e) { return size() > 2; }
+    };
+
+    /** A backdrop at full size: here if already decoded, otherwise null and `done` is called when it is. */
+    Bitmap large(String url, Done done) {
+        if (url == null || url.isEmpty()) return null;
+        synchronized (large) {
+            Bitmap b = large.get(url);
+            if (b != null) return b;
+        }
+        final String key = "L:" + url;
+        synchronized (pending) {
+            if (!pending.add(key)) return null;
+        }
+        io.execute(() -> {
+            Bitmap b = null;
+            File f = file(key);
+            try {
+                if (f.isFile()) {
+                    b = BitmapFactory.decodeFile(f.getAbsolutePath());
+                } else {
+                    b = fetch(url, 1920);
+                    if (b != null) write(f, b);
+                }
+            } catch (Exception e) {
+                AppLog.w("backdrop: " + e.getMessage());
+            } finally {
+                synchronized (pending) { pending.remove(key); }
+            }
+            if (b != null) {
+                synchronized (large) { large.put(url, b); }
+                if (done != null) done.onPoster(url, b);
+            }
+        });
+        return null;
+    }
+
     private File file(String url) {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
@@ -122,6 +161,11 @@ final class Posters {
     }
 
     private static Bitmap download(String url) throws IOException {
+        return fetch(url, 0);
+    }
+
+    /** `maxW` > 0: decoded at full size up to that width (backdrops); 0: down to the posters' floor. */
+    private static Bitmap fetch(String url, int maxW) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         if (c instanceof javax.net.ssl.HttpsURLConnection) relax((javax.net.ssl.HttpsURLConnection) c);
         c.setConnectTimeout(10_000);
@@ -137,7 +181,11 @@ final class Posters {
                 bounds.inJustDecodeBounds = true;
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
                 int sample = 1;
-                while (bounds.outWidth / (sample * 2) >= MIN_W && bounds.outHeight / (sample * 2) >= MIN_H) sample *= 2;
+                if (maxW > 0) {
+                    while (bounds.outWidth / sample > maxW * 1.5f) sample *= 2;
+                } else {
+                    while (bounds.outWidth / (sample * 2) >= MIN_W && bounds.outHeight / (sample * 2) >= MIN_H) sample *= 2;
+                }
                 BitmapFactory.Options o = new BitmapFactory.Options();
                 o.inSampleSize = sample;
                 return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);

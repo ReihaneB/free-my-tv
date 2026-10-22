@@ -136,47 +136,163 @@ final class Iptv {
         return out.size() > max ? new ArrayList<>(out.subList(0, max)) : out;
     }
 
-    /** One series' episodes, fetched when the series is opened (a series has no single stream). */
-    List<Item> episodes(String seriesId) {
-        List<Item> out = new ArrayList<>();
-        try {
-            JSONObject root = new JSONObject(download(api("&action=get_series_info&series_id=" + enc(seriesId))));
-            JSONObject seasons = root.optJSONObject("episodes");
-            if (seasons == null) return out;
-            JSONArray names = seasons.names();
-            if (names == null) return out;
-            for (int s = 0; s < names.length(); s++) {
-                String season = names.getString(s);
-                JSONArray list = seasons.optJSONArray(season);
-                if (list == null) continue;
-                for (int i = 0; i < list.length(); i++) {
-                    JSONObject o = list.optJSONObject(i);
-                    if (o == null) continue;
-                    Item it = new Item();
-                    String num = o.optString("episode_num", String.valueOf(i + 1));
-                    String title = o.optString("title", "").trim();
-                    // Panels often send "Serie - S01E02 - Title": keep only the episode's own title.
-                    title = title.replaceFirst("(?i)^.*S\\d+\\s*[Ee]\\d+\\s*[-–·:]\\s*", "").trim();
-                    it.name = "S" + pad(season) + " E" + pad(num) + (title.isEmpty() ? "" : " · " + title);
-                    it.id = o.optString("id");
-                    it.group = season;
-                    String ext = o.optString("container_extension", "mp4");
-                    it.url = streamUrl("series", it.id, ext);
-                    org.json.JSONObject info = o.optJSONObject("info");
-                    if (info != null) {
-                        String still = info.optString("movie_image", "");
-                        if (!still.isEmpty()) it.logo = still;
-                    }
-                    if (!it.id.isEmpty()) out.add(it);
-                }
-            }
-        } catch (Exception e) {
-            AppLog.w("episodes: " + e.getMessage());
-        }
-        return out;
+    /** One episode of a series, as its page shows it. */
+    static final class Episode {
+        String id = "", url = "", title = "", plot = "", still = "";
+        int season, number;
+        long durationMs;
     }
 
-    private static String pad(String n) { return n.length() == 1 ? "0" + n : n; }
+    /** What a film's or a series' page shows; read from the panel when the page opens, kept for the session. */
+    static final class Detail {
+        String title = "", plot = "", genre = "", director = "", cast = "", year = "", country = "", age = "";
+        String trailer = "", backdrop = "", poster = "";
+        float rating;
+        long durationMs;
+        final List<Integer> seasons = new ArrayList<>();
+        final List<Episode> episodes = new ArrayList<>();
+    }
+
+    private final Map<String, Detail> details = new java.util.LinkedHashMap<String, Detail>(16, 0.75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, Detail> e) { return size() > 24; }
+    };
+
+    /** A film's details (`get_vod_info`), or null when the panel doesn't answer. Network: call off the UI thread. */
+    Detail film(String vodId) {
+        String key = "vod:" + vodId;
+        synchronized (details) {
+            Detail d = details.get(key);
+            if (d != null) return d;
+        }
+        try {
+            JSONObject root = new JSONObject(download(api("&action=get_vod_info&vod_id=" + enc(vodId))));
+            JSONObject info = root.optJSONObject("info");
+            if (info == null) return null;
+            Detail d = new Detail();
+            common(d, info);
+            d.durationMs = clockMs(text(info, "duration"));
+            if (d.durationMs <= 0) d.durationMs = minutes(text(info, "runtime")) * 60_000L;
+            synchronized (details) { details.put(key, d); }
+            return d;
+        } catch (Exception e) {
+            AppLog.w("film info: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** A series' details, seasons and episodes (`get_series_info`), or null. Network: call off the UI thread. */
+    Detail series(String seriesId) {
+        String key = "series:" + seriesId;
+        synchronized (details) {
+            Detail d = details.get(key);
+            if (d != null) return d;
+        }
+        try {
+            JSONObject root = new JSONObject(download(api("&action=get_series_info&series_id=" + enc(seriesId))));
+            Detail d = new Detail();
+            JSONObject info = root.optJSONObject("info");
+            if (info != null) {
+                common(d, info);
+                d.durationMs = minutes(text(info, "episode_run_time")) * 60_000L;
+            }
+            JSONObject seasons = root.optJSONObject("episodes");
+            JSONArray names = seasons == null ? null : seasons.names();
+            if (names != null) {
+                List<Integer> order = new ArrayList<>();
+                for (int s = 0; s < names.length(); s++) {
+                    try { order.add(Integer.parseInt(names.getString(s).trim())); } catch (Exception ignored) { }
+                }
+                java.util.Collections.sort(order);
+                for (int season : order) {
+                    JSONArray list = seasons.optJSONArray(String.valueOf(season));
+                    if (list == null) continue;
+                    int before = d.episodes.size();
+                    for (int i = 0; i < list.length(); i++) {
+                        JSONObject o = list.optJSONObject(i);
+                        if (o == null) continue;
+                        Episode ep = new Episode();
+                        ep.id = o.optString("id");
+                        if (ep.id.isEmpty()) continue;
+                        ep.season = season;
+                        try { ep.number = Integer.parseInt(o.optString("episode_num", "").trim()); }
+                        catch (Exception e) { ep.number = i + 1; }
+                        String title = o.optString("title", "").trim();
+                        // Panels often send "Serie - S01E02 - Title": keep only the episode's own title.
+                        title = title.replaceFirst("(?i)^.*S\\d+\\s*[Ee]\\d+\\s*[-–·:]?\\s*", "").trim();
+                        if (title.matches("(?i)(é|e)pisode\\s*\\d+")) title = "";   // "Épisode 3" says nothing
+                        ep.title = title;
+                        ep.url = streamUrl("series", ep.id, o.optString("container_extension", "mp4"));
+                        JSONObject ei = o.optJSONObject("info");
+                        if (ei != null) {
+                            ep.plot = text(ei, "plot");
+                            ep.still = text(ei, "movie_image");
+                            ep.durationMs = clockMs(text(ei, "duration"));
+                            if (ep.durationMs <= 0) {
+                                long secs = (long) ei.optDouble("duration_secs", 0);
+                                ep.durationMs = secs * 1000L;
+                            }
+                        }
+                        d.episodes.add(ep);
+                    }
+                    java.util.Collections.sort(d.episodes.subList(before, d.episodes.size()),
+                            (a, b) -> Integer.compare(a.number, b.number));
+                    if (d.episodes.size() > before) d.seasons.add(season);
+                }
+            }
+            synchronized (details) { details.put(key, d); }
+            return d;
+        } catch (Exception e) {
+            AppLog.w("series info: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** The fields films and series share. */
+    private static void common(Detail d, JSONObject info) {
+        d.title = text(info, "name");
+        d.plot = text(info, "plot");
+        if (d.plot.isEmpty()) d.plot = text(info, "description");
+        d.genre = text(info, "genre");
+        d.director = text(info, "director");
+        d.cast = text(info, "cast");
+        if (d.cast.isEmpty()) d.cast = text(info, "actors");
+        d.country = text(info, "country");
+        d.age = text(info, "age");
+        d.trailer = text(info, "youtube_trailer");
+        String date = text(info, "releasedate");
+        if (date.isEmpty()) date = text(info, "releaseDate");
+        if (date.isEmpty()) date = text(info, "release_date");
+        if (date.length() >= 4 && date.substring(0, 4).matches("\\d{4}")) d.year = date.substring(0, 4);
+        d.rating = (float) info.optDouble("rating", 0);
+        d.poster = text(info, "cover_big");
+        if (d.poster.isEmpty()) d.poster = text(info, "cover");
+        if (d.poster.isEmpty()) d.poster = text(info, "movie_image");
+        Object b = info.opt("backdrop_path");
+        if (b instanceof JSONArray && ((JSONArray) b).length() > 0) d.backdrop = ((JSONArray) b).optString(0, "");
+        else if (b instanceof String) d.backdrop = (String) b;
+    }
+
+    /** A JSON text field, with the panels' "null", "0" and "N/A" read as nothing. */
+    private static String text(JSONObject o, String key) {
+        Object v = o.opt(key);
+        if (v == null || v == JSONObject.NULL) return "";
+        String s = String.valueOf(v).trim();
+        return s.equalsIgnoreCase("null") || s.equalsIgnoreCase("none") || s.equals("N/A") || s.equals("0") ? "" : s;
+    }
+
+    /** "01:35:18" → ms. */
+    private static long clockMs(String v) {
+        if (v == null || !v.matches("\\d{1,2}:\\d{2}(:\\d{2})?")) return 0;
+        String[] p = v.split(":");
+        long h = p.length == 3 ? Long.parseLong(p[0]) : 0, m = Long.parseLong(p[p.length == 3 ? 1 : 0]);
+        long sec = Long.parseLong(p[p.length - 1]);
+        return ((h * 60 + m) * 60 + sec) * 1000L;
+    }
+
+    private static long minutes(String v) {
+        try { return Math.max(0, Math.round(Double.parseDouble(v.trim()))); } catch (Exception e) { return 0; }
+    }
+
 
     void refreshIfStale() {
         if (!configured() || loading) return;

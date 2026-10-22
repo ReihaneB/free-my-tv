@@ -26,6 +26,9 @@ import android.widget.TextView;
 public class HomeActivity extends Activity {
     private HomeView home;
     private EditText search;
+    private FrameLayout root;
+    private DetailView detail;      // a film's or a series' page, over the home screen
+    private boolean resumed, searchHidden;
     private int prefsVersion = Prefs.version;   // settings changed while we were away: start over
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -47,7 +50,7 @@ public class HomeActivity extends Activity {
         Ui.init(this);
         home = new HomeView(this);      // this screen is the home, as it always was
 
-        FrameLayout root = new FrameLayout(this);
+        root = new FrameLayout(this);
         root.addView(home, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
         search = new EditText(this);
@@ -66,6 +69,25 @@ public class HomeActivity extends Activity {
         lp.topMargin = px(36);   // BAR_TOP
         root.addView(search, lp);
         home.setSearchField(search);
+        detail = new DetailView(this, new DetailView.Host() {
+            @Override public void covered() {
+                home.pause();
+                home.setVisibility(View.INVISIBLE);   // under the page: not drawn, not animated
+                // the search box stays typed in (Back comes back to the results) but its caret must not blink under
+                // the page: each blink redraws the whole screen
+                searchHidden = search.getVisibility() == View.VISIBLE;
+                if (searchHidden) search.setVisibility(View.INVISIBLE);
+            }
+
+            @Override public void uncovered() {
+                home.setVisibility(View.VISIBLE);
+                if (searchHidden) search.setVisibility(View.VISIBLE);
+                searchHidden = false;
+                if (resumed) home.resume();
+            }
+        });
+        root.addView(detail, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
 
         setContentView(root);
         getWindow().setBackgroundDrawable(null);
@@ -77,23 +99,33 @@ public class HomeActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        resumed = true;
         if (prefsVersion != Prefs.version) {
             prefsVersion = Prefs.version;
             HomeData.get(this).settingsChanged();
             recreate();   // a new language or city: draw everything again
             return;
         }
-        if (home != null) home.resume();
+        if (detailOpen()) detail.resume();      // back from the player: the page shows where it was left
+        else if (home != null) home.resume();
     }
 
     @Override protected void onPause() {
+        resumed = false;
         if (home != null) home.pause();
+        if (detail != null) detail.pause();
         super.onPause();
     }
 
     /** Home button pressed on the home screen: back to the entry state (focus on the first app, sheet closed). */
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (detailOpen()) {
+            detail.closeNow();
+            if (home != null) home.setVisibility(View.VISIBLE);   // onResume brings it back to life
+            if (searchHidden && search != null) search.setVisibility(View.VISIBLE);
+            searchHidden = false;
+        }
         if (home != null) home.reset(true);
     }
 
@@ -103,9 +135,10 @@ public class HomeActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (detailOpen() && detail.onKey(event)) return true;   // the page owns the arrows, OK and Back
         // While the search field is up it owns the keyboard: the home screen must not steal the arrows. Back closes
         // the search in one press — otherwise the first Back only hides the keyboard and the screen stays on results.
-        if (search != null && search.getVisibility() == View.VISIBLE) {
+        if (search != null && search.getVisibility() == View.VISIBLE && search.hasFocus()) {
             if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_DOWN) {
                 if (home != null) home.closeSearch();
                 return true;
@@ -115,6 +148,16 @@ public class HomeActivity extends Activity {
         if (RemoteKeys.onKey(this, event)) return true;
         if (home != null && home.onKey(event)) return true;
         return super.dispatchKeyEvent(event);
+    }
+
+    private boolean detailOpen() {
+        return detail != null && detail.isOpen();
+    }
+
+    /** A film's or a series' card was pressed: its page fades in over the home screen, which then rests. */
+    void openDetail(DetailView.Request r) {
+        if (detail == null) return;
+        detail.show(r);
     }
 
     /** Called by the home screen when its pill is pressed. */

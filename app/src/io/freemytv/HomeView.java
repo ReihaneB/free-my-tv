@@ -116,9 +116,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private int prefsVersion = Prefs.version;
     private String dataKey = "";
     private EditText field;                 // the activity's search box, laid over the pill
-    private boolean searchOpen, seriesMode;
-    private String seriesTitle = "", query = "";
-    private List<Iptv.Item> episodes = new ArrayList<>();
+    private boolean searchOpen;
+    private String query = "";
 
     private final RectF[] chromeRects = new RectF[4];
     private final RectF[] tabRects = new RectF[TAB_COUNT];
@@ -305,9 +304,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         progress.putAll(Prefs.progressAll());
         String keep = rowIndex < rows.size() ? rows.get(rowIndex).title : null;
         rows.clear();
-        if (seriesMode) {
-            seasonRows();
-        } else if (Iptv.configured()) {
+        if (Iptv.configured()) {
             switch (tab) {
                 case 0: homeRows(); break;
                 case 1: filmRows(); break;
@@ -651,7 +648,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private float contentTop() {
-        return (tab == 0 && !seriesMode ? 0 : LIB_TITLE_H * k);
+        return (tab == 0 ? 0 : LIB_TITLE_H * k);
     }
 
     private void layout() {
@@ -870,14 +867,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             empty.setTextAlign(Paint.Align.LEFT);
             String msg = searchOpen
                     ? query.length() < 2 ? "Tapez au moins deux lettres." : "Aucun résultat pour « " + query + " »."
-                    : seriesMode ? "Chargement des épisodes…"
                     : "Aucun compte IPTV : renseignez-le dans les réglages.";
             c.drawText(msg, MARGIN * k, top + 60 * k, empty);
         } else {
-            if (tab != 0 || seriesMode) {
+            if (tab != 0) {
                 rowTitle.setTextSize(44 * k);
                 rowTitle.setTextAlign(Paint.Align.LEFT);
-                c.drawText(seriesMode ? seriesTitle : LIBRARIES[tab], MARGIN * k, top + 52 * k, rowTitle);
+                c.drawText(LIBRARIES[tab], MARGIN * k, top + 52 * k, rowTitle);
             }
             for (int i = 0; i < rows.size(); i++) {
                 Row row = rows.get(i);
@@ -950,7 +946,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         shaded.setShader(null);
 
         Liquid.draw(c, kitWell, chromeRects[CH_SEARCH], glassPaint, 1f, false, 0);
-        Liquid.draw(c, kitClear, tabRects[tab], glassPaint, seriesMode ? 0.55f : 1f, false, 0);
+        Liquid.draw(c, kitClear, tabRects[tab], glassPaint, 1f, false, 0);
         if (lensA > 0.003f) {
             // a drop stretched by its speed gets a little thinner, like a liquid would
             float stretch = Math.max(0, lens.width() / Math.max(1, lensTo.width()) - 1);
@@ -1354,7 +1350,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 closeSearch();
                 return true;
             }
-            return false;   // the field and the keyboard own the rest
+            if (field != null && field.hasFocus()) return false;   // the field and the keyboard own the rest
+            // in the results (Down from the field): the arrows are ours; Up from the first row goes back to typing
+            if (down && code == KeyEvent.KEYCODE_DPAD_UP && zone == Z_ROW && rowIndex == 0 && field != null) {
+                field.requestFocus();
+                invalidate();
+                return true;
+            }
         }
         switch (code) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -1482,7 +1484,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (colIndex < 0 || colIndex >= row.items.size()) return;
         Tile t = row.items.get(colIndex);
         if (t.action >= 0) { selectTab(t.action); return; }
-        if (searchOpen) closeSearch();   // picking a result leaves the search behind
+        // picking a result leaves the search behind, except for a film's or a series' page: Back comes back to it
+        boolean page = t.series || t.url.contains("/movie/") || (t.url.contains("/series/") && !t.seriesId.isEmpty());
+        if (searchOpen && !page) closeSearch();
         open(t, row);
     }
 
@@ -1529,8 +1533,21 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             }
             return;
         }
-        if (t.series) {
-            openSeries(t);
+        boolean episode = t.url.contains("/series/") && !t.seriesId.isEmpty();
+        if (a instanceof HomeActivity && (t.series || episode || t.url.contains("/movie/"))) {
+            // a film or a series: its page first (synopsis, Lecture / Reprendre, the episodes)
+            if (t.series && t.seriesId.isEmpty()) {
+                showToast("Cette série n'a pas d'épisodes.");
+                return;
+            }
+            DetailView.Request r = new DetailView.Request();
+            r.title = t.title;
+            r.year = t.meta;
+            r.poster = t.image;
+            r.url = t.url;
+            r.series = t.series || episode;
+            r.seriesId = t.seriesId;
+            ((HomeActivity) a).openDetail(r);
             return;
         }
         if (t.url.isEmpty()) return;
@@ -1555,15 +1572,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private void back() {
-        if (seriesMode) {
-            seriesMode = false;
-            episodes = new ArrayList<>();
-            rowIndex = 0;
-            colIndex = 0;
-            offset = offsetTo = 0;
-            rebuild();
-            return;
-        }
         if (tab != 0) {
             selectTab(0);
             return;
@@ -1656,7 +1664,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private void openSearch() {
         if (field == null) return;
         searchOpen = true;
-        seriesMode = false;
         tab = 0;
         android.app.Activity a = activity();
         if (a instanceof HomeActivity) ((HomeActivity) a).openSearch();
@@ -1714,53 +1721,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             if (row.items.size() >= 24) break;
         }
         if (!row.items.isEmpty()) rows.add(row);
-    }
-
-    // MARK: - A series, in place (no other screen)
-
-    /** Opens a series' episodes in the shelves: one row per season, the series' name above them. */
-    private void openSeries(Tile t) {
-        if (t.seriesId == null || t.seriesId.isEmpty()) {
-            showToast("Cette série n'a pas d'épisodes.");
-            return;
-        }
-        seriesMode = true;
-        seriesTitle = t.title;
-        episodes = new ArrayList<>();
-        rowIndex = 0;
-        colIndex = 0;
-        offset = offsetTo = 0;
-        rebuild();
-        showToast("Chargement des épisodes…");
-        final String id = t.seriesId;
-        new Thread(() -> {
-            List<Iptv.Item> got = Iptv.get(getContext()).episodes(id);
-            post(() -> {
-                if (!seriesMode) return;
-                episodes = got;
-                rebuild();
-                if (got.isEmpty()) showToast("Aucun épisode pour cette série.");
-            });
-        }, "episodes").start();
-    }
-
-    private void seasonRows() {
-        java.util.LinkedHashMap<String, Row> bySeason = new java.util.LinkedHashMap<>();
-        for (Iptv.Item e : episodes) {
-            Row row = bySeason.get(e.group);
-            if (row == null) {
-                row = new Row();
-                row.kind = R_CARD;
-                row.title = "Saison " + e.group;
-                bySeason.put(e.group, row);
-            }
-            Tile t = new Tile();
-            t.title = e.name;                 // "S01 E02 · Titre"
-            t.url = e.url == null ? "" : e.url;
-            t.image = e.logo == null ? "" : e.logo;
-            row.items.add(t);
-        }
-        rows.addAll(bySeason.values());
     }
 
     // MARK: - Panel names

@@ -49,6 +49,8 @@ import java.util.Locale;
 public final class Player extends Activity implements androidx.media3.common.Player.Listener {
 
     static final String EXTRA_URL = "url", EXTRA_NAME = "name", EXTRA_LOGO = "logo";
+    /** From the film's page: "Reprendre au début" (the saved place is ignored), and an episode's series. */
+    static final String EXTRA_FROM_START = "fromStart", EXTRA_SERIES = "series";
 
     private FrameLayout root;
     private SurfaceView surface;
@@ -57,7 +59,9 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     private String url = "", name = "", logo = "";
     private boolean ready, fill, failed;
     private int videoW, videoH;
-    private long resumeMs = -1;   // where to start when the player is built again (back from standby or Home)
+    private long resumeMs = -1;
+    private String series;        // an episode: its series' id, saved with the position
+    private boolean fromStart;   // where to start when the player is built again (back from standby or Home)
 
     /** A track behind a popover row. */
     private static final class Ref {
@@ -83,6 +87,8 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         if (name == null) name = "";
         logo = intent.getStringExtra(EXTRA_LOGO);
         if (logo == null) logo = "";
+        series = intent.getStringExtra(EXTRA_SERIES);
+        fromStart = intent.getBooleanExtra(EXTRA_FROM_START, false);
         if (url == null || url.isEmpty()) { finish(); return; }
 
         root = new FrameLayout(this);
@@ -112,6 +118,8 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         if (name == null) name = "";
         logo = intent.getStringExtra(EXTRA_LOGO);
         if (logo == null) logo = "";
+        series = intent.getStringExtra(EXTRA_SERIES);
+        fromStart = intent.getBooleanExtra(EXTRA_FROM_START, false);
         resumeMs = -1;
         videoW = videoH = 0;
         java.util.Arrays.fill(rowsOf, null);
@@ -136,7 +144,8 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         super.onStart();
         started = true;
         if (url == null || url.isEmpty() || player != null) return;
-        long at = resumeMs >= 0 ? resumeMs : isLive() ? 0 : Prefs.positionOf(url);
+        long at = resumeMs >= 0 ? resumeMs : isLive() || fromStart ? 0 : Prefs.positionOf(url);
+        fromStart = false;   // once: back from standby, it goes on from where it is
         String note = at > 0 && resumeMs < 0 ? "Reprise à " + PlayerHud.clock(at / 1000) : "";
         build(at, note);
     }
@@ -488,7 +497,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         if (player == null || !ready || failed) return;
         long duration = player.getDuration();
         if (duration == C.TIME_UNSET) return;
-        Prefs.saveProgress(url, name, logo, player.getCurrentPosition(), duration);
+        Prefs.saveProgress(url, name, logo, player.getCurrentPosition(), duration, series);
     }
 
     private void release() {

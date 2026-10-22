@@ -38,16 +38,31 @@ final class Prefs {
 
     /**
      * Where the player stopped, per stream. A film or an episode keeps its place for two weeks; a live channel is
-     * never "resumed". Entries are stored as name \t position \t duration \t url \t logo.
+     * never "resumed". Entries are stored as name \t position \t duration \t url \t logo \t series id (an episode:
+     * its card opens the series' page). Played to the end, it is remembered as watched instead.
      */
-    static void saveProgress(String url, String name, String logo, long position, long duration) {
+    static void saveProgress(String url, String name, String logo, long position, long duration, String series) {
         if (url == null || url.isEmpty()) return;
+        if (duration > 0 && position > duration * 0.96) seen().edit().putLong(key(url), System.currentTimeMillis()).apply();
         if (duration <= 0 || position < 45_000 || position > duration * 0.96) {
             play().edit().remove(key(url)).apply();
             return;
         }
         play().edit().putString(key(url), name + "\t" + position + "\t" + duration + "\t" + url + "\t"
-                + (logo == null ? "" : logo)).apply();
+                + (logo == null ? "" : logo) + "\t" + (series == null ? "" : series)).apply();
+    }
+
+    private static SharedPreferences seen() {
+        return app.getSharedPreferences("watched", Context.MODE_PRIVATE);
+    }
+
+    /** Every stream played to the end (keys, see watched(set, url)). */
+    static java.util.Set<String> watched() {
+        return new java.util.HashSet<>(seen().getAll().keySet());
+    }
+
+    static boolean watched(java.util.Set<String> all, String url) {
+        return url != null && all.contains(key(url));
     }
 
     static List<Iptv.Item> resume(String type) {
@@ -63,6 +78,7 @@ final class Prefs {
             it.name = f[0];
             it.url = url;
             it.logo = f.length > 4 ? f[4] : "";
+            it.id = f.length > 5 ? f[5] : "";   // an episode: its series
             out.add(it);
         }
         return out;

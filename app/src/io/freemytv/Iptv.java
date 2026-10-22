@@ -154,8 +154,15 @@ final class Iptv {
     }
 
     private final Map<String, Detail> details = new java.util.LinkedHashMap<String, Detail>(16, 0.75f, true) {
-        @Override protected boolean removeEldestEntry(Map.Entry<String, Detail> e) { return size() > 24; }
+        @Override protected boolean removeEldestEntry(Map.Entry<String, Detail> e) { return size() > 120; }
     };
+
+    /** What is already known of a film or a series (no network), or null: the home screen's spotlight asks first. */
+    Detail peek(boolean series, String id) {
+        synchronized (details) {
+            return details.get((series ? "series:" : "vod:") + id);
+        }
+    }
 
     /** A film's details (`get_vod_info`), or null when the panel doesn't answer. Network: call off the UI thread. */
     Detail film(String vodId) {

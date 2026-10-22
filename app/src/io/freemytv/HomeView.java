@@ -5,19 +5,15 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapShader;
 import android.graphics.Canvas;
-import android.graphics.ComposeShader;
 import android.graphics.Matrix;
 import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
-import android.graphics.PorterDuff;
-import android.graphics.RadialGradient;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.os.Handler;
-import android.os.SystemClock;
 import android.os.Looper;
 import android.view.Choreographer;
 import android.view.KeyEvent;
@@ -33,13 +29,14 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * The home screen, in the clothes of Infuse 8 on the Apple TV: a search field and three capsule buttons on top, then
- * shelves of large 16:9 cards with their title centred underneath and an orange progress bar where a film was left.
+ * The home screen, in the clothes of the film's page and the player (tvOS 26 / Infuse 8): the picture of what has
+ * the focus fills the screen (its backdrop, or its colours), its title, facts and story stand at the top left, and
+ * the shelves sit below — posters for films and series, 16:9 cards for what is being watched, the channels and the
+ * apps. The focused shelf always sits at the same height; the ones above it fade away as it rises.
  *
- * <p>The first shelf is what is being watched, the second is the libraries (Fims, Séries, Live, Apps, Entrées — the
- * Favorites row of Infuse), then the account's shelves. Opening a library swaps the top bar for a back button and the
- * library's name, and shows that library's rows; Back comes home. Everything is drawn on the canvas from the account
- * cached on disk, so the screen opens with no network.
+ * <p>The Liquid Glass bar is kept: search, the libraries (Accueil, Films, Séries, Direct, Apps), three capsules.
+ * Everything is drawn on the canvas from the account cached on disk, so the screen opens with no network; the
+ * pictures and the facts of the focused item come from the panel when the focus rests.
  */
 final class HomeView extends View implements Choreographer.FrameCallback, Iptv.Listener {
 
@@ -48,32 +45,34 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     /** One card: a film, an episode, a channel, an app, an input, or one of the library tiles. */
     private static final class Tile {
         String title = "", meta = "", image = "", url = "", seriesId = "", symbol = "";
+        String episode = "";        // a "continue watching" episode: "S1, É2"
+        String wide = "";           // a "continue watching" card: its 16:9 picture (backdrop, episode still)
         Bitmap art;                 // apps: the ready 16:9 card
         HomeApps.Item app;          // apps and inputs open through HomeApps
         float progress;             // continue watching: 0..1
+        long left;                  // continue watching: what remains, ms
         boolean series, live;
         int color;                  // library tile
         int action = -1;            // >= 0: open that library tab; TO_SETTINGS / TO_BROWSE
         // what the frame would otherwise recompute (and allocate) for every card, every frame
-        float capWidth = -1, heroWidth = -1;
+        float capWidth = -1;
         String capTitle = "", capMeta = "";
-        List<String> heroLines;
-        String heroMeta;
-        Shader heroTint;
-        int heroTintOf;
     }
 
     private static final class Row {
         String title = "";
         int kind, seeTab = -1;
+        boolean captions;           // "En cours": title and time left under each card
         final List<Tile> items = new ArrayList<>();
         float y, h;
         int col, win;
         float slide, slideTo;
+        float alpha = 1;            // the shelves above the focused one fade out as it rises
         float[] focus = new float[0];
     }
 
-    private static final int R_CARD = 0, R_HERO = 1;
+    /** 16:9 cards (watching, channels, apps, inputs) and 2:3 posters (films, series). */
+    private static final int R_CARD = 0, R_POSTER = 1;
     private static final int Z_ROW = 0, Z_BAR = 1;
     /** col value of the "Tout voir" label at the end of a shelf. */
     private static final int SEE_ALL = -2;
@@ -88,15 +87,22 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     // MARK: - Geometry (designed at 1920×1080, scaled by k)
 
     private static final float BAR_H = 116, MARGIN = 96, BAR_TOP = 36;
-    private static final float HEAD_H = 52, ROW_GAP = 46, CAP_H = 70;
-    // 4 cards or 3 heroes span exactly the plate's width (1728 = 4 × 402 + 3 × 40 = 3 × 549 + 2 × 40): every right
+    private static final float HEAD_H = 58, ROW_GAP = 44, CAP_H = 66;
+    // 4 cards or 7 posters span exactly the plate's width (1728 = 4 × 402 + 3 × 40 = 7 × 216 + 6 × 36): every right
     // edge on screen lines up with the bar's. The widths are a hair under so the column count never rounds down.
-    private static final float CARD_W = 401.9f, CARD_H = 226, CARD_GAP = 40;
-    private static final float HERO_W = 549.2f, HERO_H = 309, HERO_GAP = 40;
+    private static final float CARD_W = 401.9f, CARD_H = 226, CARD_GAP = 40, CARD_R = 24;
+    private static final float POSTER_W = 215.9f, POSTER_H = 324, POSTER_GAP = 36, POSTER_R = 18;
     private static final float PILL_W = 300, PILL_H = 58, BUTTON_W = 78, BUTTON_H = 58, BUTTON_GAP = 14;
-    private static final float LIB_TITLE_H = 96;      // the library's name above its shelves
+    /** Where the focused shelf's block starts (its title, then its cards): always here, the others move. */
+    private static final float ROW_ANCHOR = 530;
+    /**
+     * The spotlight stands on the shelves, as a film's page stands on the bottom of the screen: its last line sits
+     * SPOT_GAP above the focused shelf. Films and series keep room for three lines of story, so the title doesn't
+     * jump when the story arrives from the panel; a channel or an app has none and sits lower.
+     */
+    private static final float SPOT_GAP = 72, SPOT_TITLE_W = 1300, SPOT_TEXT_W = 920;
 
-    // Infuse 8's slate background, not black.
+    // Infuse 8's slate background, not black (until the first picture is ready).
     private static final int BG_TOP = 0xFF0E1418, BG_BOTTOM = 0xFF05080A;
     private static final int INK = 0xFFFFFFFF, DIM = 0xFFB8C4C9, FAINT = 0xFF8798A0, ACCENT = 0xFFFF8A00;
     /** How much the glass compresses what is behind it (a lens: the edge shows a little of the outside). */
@@ -132,35 +138,71 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
     };
 
+    // MARK: - The spotlight (what has the focus) and the picture behind everything
+
+    private Tile spot;                      // what the top of the screen is about
+    private Iptv.Detail spotDetail;         // its facts, once the panel gave them
+    private List<String> spotLines = new ArrayList<>(), spotStory = new ArrayList<>();
+    private final List<Fact> spotFacts = new ArrayList<>();
+    private float spotSize, spotA = 1, spotInfoA = 1;
+    private int spotRoom;                   // lines kept for the story
+    /** The panel is asked one thing at a time, below the UI thread; the pictures are baked on another. */
+    private final java.util.concurrent.ExecutorService infoPool = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(() -> {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+            r.run();
+        }, "home-info");
+        t.setDaemon(true);
+        return t;
+    });
+    private final java.util.concurrent.ExecutorService bakePool = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(() -> {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+            r.run();
+        }, "home-bake");
+        t.setDaemon(true);
+        return t;
+    });
+    /** The "continue watching" cards ask on their own thread: the spotlight never waits behind them. */
+    private final java.util.concurrent.ExecutorService watchPool = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(() -> {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST);
+            r.run();
+        }, "home-watching");
+        t.setDaemon(true);
+        return t;
+    });
+    private Scenery scene, sceneNext;       // the picture shown, and the one fading in over it
+    private volatile String sceneWant = "";
+    private long sceneAt;
+    private float sceneT;
+    private Bitmap frostOf;                 // the frosted picture the bar's lens shaders were built on
+
     // MARK: - Paints
 
-    private Paint monogram;
-    private Paint rowTitle, cardTitle, cardMeta, seeAll, pillInk, tabInk, toast, empty;
+    private Paint rowTitle, cardTitle, cardMeta, seeAll, pillInk, tabInk, toast, empty, nameInk;
+    private Paint spotTitle, spotMeta, spotStoryP, spotBadge, spotDot;
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
-
     private long sheenAt;
 
-    // the backdrop, painted on its own thread (Lights); the glass and the scroll edge read it through shaders
-    private Lights lights;
-    private int shaderGen = -1;
     private final Matrix matrix = new Matrix();
     private final RectF screen = new RectF();
-    private LinearGradient scrimMask;
-    private final Paint scrimPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final Paint platePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private float scrimBottom;
 
     // the materials, baked once per size (Liquid)
-    private Liquid.Kit kitClear, kitLit, kitWell, kitButton, kitSee, kitToast;
-    private Bitmap plateFace, plateShadow, cardShadow, heroShadow;
+    private Liquid.Kit kitClear, kitLit, kitWell, kitSee, kitToast;
+    private Bitmap plateFace, plateShadow, cardShadow, posterShadow;
     private int platePad, cardPad;
-    private Shader cardRim, heroRim, topLight, sheenBand, sepShade;
-    private Bitmap heroTile;
-    /** The plate's backdrop is drawn in nested bands, each compressed more than the one inside it: a lens. */
-    private static final float[] LENS_BANDS = {0.80f, 0.86f, 0.90f, LENS};
+    private Shader cardRim, posterRim, cardLight, posterLight, sheenBand, sepShade;
+    /**
+     * The plate's backdrop is drawn in nested bands, each compressed more than the one inside it: a lens. Behind it
+     * is now a photograph, not soft lights: the middle stays almost true (what is seen through the glass lines up
+     * with what is around it), only the rim bends.
+     */
+    private static final float[] LENS_BANDS = {0.985f, 0.97f, 0.955f, LENS};
     private static final float[] LENS_INSETS = {0f, 3f, 6f, 10f};
     private final BitmapShader[] lensShaders = new BitmapShader[LENS_BANDS.length];
     private final Paint glassPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
@@ -180,7 +222,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final RectF barBox = new RectF();
     private float barRadius, sepA, sepB;
     private final android.graphics.Rect srcRect = new android.graphics.Rect();
-    private final Map<String, Integer> accents = new HashMap<>();   // url → the artwork's average colour
     private String toastText = "";
     private long toastAt;
 
@@ -199,8 +240,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void paints() {
         rowTitle = Ui.text(Ui.semibold, 26, 0xFFE7EDEE);
-        monogram = Ui.text(Ui.semibold, 112, 0x8CFFFFFF);
-        monogram.setTextAlign(Paint.Align.CENTER);
         cardTitle = Ui.text(Ui.medium, 21, 0xFFFFFFFF);
         cardMeta = Ui.text(Ui.regular, 17, 0xFF9AA8AE);
         seeAll = Ui.text(Ui.medium, 20, 0xFFB8C4C9);
@@ -208,6 +247,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         pillInk = Ui.text(Ui.regular, 22, 0xFFB0BCC1);
         toast = Ui.text(Ui.medium, 22, INK);
         empty = Ui.text(Ui.medium, 24, FAINT);
+        nameInk = Ui.text(Ui.semibold, 30, 0xE6FFFFFF);
+        nameInk.setTextAlign(Paint.Align.CENTER);
+        spotTitle = Ui.text(Ui.displaySemibold, 66, INK);
+        spotTitle.setLetterSpacing(-0.01f);
+        spotMeta = Ui.text(Ui.medium, 24, 0xE0FFFFFF);
+        spotStoryP = Ui.text(Ui.regular, 25, 0xD1FFFFFF);
+        spotBadge = Ui.text(Ui.semibold, 18, 0xE0FFFFFF);
+        spotDot = Ui.text(Ui.semibold, 24, 0x73FFFFFF);
+        for (Paint p : new Paint[]{spotTitle, spotMeta, spotStoryP, spotBadge, spotDot}) p.setTextAlign(Paint.Align.LEFT);
     }
 
     void resume() {
@@ -220,7 +268,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         requestFrame();
         main.removeCallbacks(clockTick);
         main.postDelayed(clockTick, 20_000);
-        if (lights != null) lights.start();
         Perf.readSkip(getContext());
         main.removeCallbacks(autoDrive);
         if (Perf.off(Perf.AUTO)) main.postDelayed(autoDrive, 4000);
@@ -243,12 +290,14 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         Iptv.get(getContext()).removeListener(this);
         main.removeCallbacks(clockTick);
         main.removeCallbacks(autoDrive);
-        if (lights != null) lights.stop();
+        main.removeCallbacks(settle);
     }
 
     void destroy() {
         pause();
-        if (lights != null) lights.release();
+        infoPool.shutdownNow();
+        watchPool.shutdownNow();
+        bakePool.shutdownNow();
     }
 
     /** Home pressed on the home screen: back to the top of the home tab. */
@@ -337,29 +386,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private void homeRows() {
         Iptv iptv = Iptv.get(getContext());
 
-        // The hero shelf: what was left unfinished, then a new series, then a channel — four cards, all speaking.
-        Row hero = new Row();
-        hero.title = "À la une";
-        hero.kind = R_HERO;
-        List<Iptv.Item> resumed = new ArrayList<>(Prefs.resume("vod"));
-        resumed.addAll(Prefs.resume("series"));
-        if (!resumed.isEmpty()) hero.items.add(resumeTile(resumed.get(0)));
-        if (hero.items.isEmpty()) {
-            for (Iptv.Item i : iptv.fresh("vod", 30, 40)) { hero.items.add(tile(i, false)); break; }
-        }
-        for (Iptv.Item i : iptv.fresh("series", 60, 40)) {
-            if (hero.items.size() >= 2) break;
-            hero.items.add(tile(i, true));
-        }
-        for (Iptv.Item i : frenchChannels(iptv, 4)) {
-            if (hero.items.size() >= 3) break;
-            hero.items.add(tile(i, false));
-        }
-        if (!hero.items.isEmpty()) rows.add(hero);
-
+        // What was left unfinished, as Apple's "Up Next": 16:9 pictures, the title and the time left under them.
         Row watching = new Row();
         watching.title = "En cours";
         watching.kind = R_CARD;
+        watching.captions = true;
         for (Iptv.Item i : Prefs.resume("vod")) watching.items.add(resumeTile(i));
         for (Iptv.Item i : Prefs.resume("series")) watching.items.add(resumeTile(i));
         if (!watching.items.isEmpty()) rows.add(watching);
@@ -372,24 +403,64 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         addApps(apps);
         if (!apps.items.isEmpty()) rows.add(apps);
 
+        shelf("Nouveautés films", iptv.fresh("vod", 30, 24), false, 1, R_POSTER);
+        shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, 2, R_POSTER);
+        shelf("Chaînes", frenchChannels(iptv, 24), false, 3, R_CARD);
+        shelf("Les mieux notés", iptv.best("vod", 24), false, 1, R_POSTER);
+        shelf("Séries", firstOf(iptv.series(), 24), true, 2, R_POSTER);
+
         Row inputs = new Row();
         inputs.title = "Entrées";
         inputs.kind = R_CARD;
         inputs.seeTab = 4;
         addInputs(inputs);
         if (!inputs.items.isEmpty()) rows.add(inputs);
+        fillWatching(watching);
+    }
 
-        shelf("Nouveautés films", iptv.fresh("vod", 30, 24), false, 1);
-        shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, 2);
-        shelf("Chaînes", frenchChannels(iptv, 24), false, 3);
-        shelf("Les mieux notés", iptv.best("vod", 24), false, 1);
-        shelf("Séries", firstOf(iptv.series(), 24), true, 2);
+    /** The "continue watching" cards want a 16:9 picture and the time left: from the panel, one by one. */
+    private void fillWatching(Row row) {
+        final Iptv iptv = Iptv.get(getContext());
+        for (Tile t : row.items) {
+            final Tile tile = t;
+            boolean episode = isEpisode(t);
+            Iptv.Detail known = episode ? iptv.peek(true, t.seriesId) : iptv.peek(false, vodId(t.url));
+            if (known != null) {
+                watchingFrom(tile, known);
+                continue;
+            }
+            watchPool.execute(() -> {
+                Iptv.Detail d = episode ? iptv.series(tile.seriesId) : iptv.film(vodId(tile.url));
+                if (d != null) main.post(() -> {
+                    watchingFrom(tile, d);
+                    invalidate();
+                });
+            });
+        }
+    }
+
+    private void watchingFrom(Tile t, Iptv.Detail d) {
+        String picture = d.backdrop;
+        long duration = d.durationMs;
+        if (isEpisode(t)) {
+            for (Iptv.Episode e : d.episodes) {
+                if (!e.url.equals(t.url)) continue;
+                if (!e.still.isEmpty()) picture = e.still;
+                if (e.durationMs > 0) duration = e.durationMs;
+                break;
+            }
+            if (!d.title.isEmpty()) t.title = DetailView.seriesTitle(d.title);
+        }
+        if (picture.isEmpty() && !d.poster.isEmpty() && t.image.isEmpty()) t.image = d.poster;
+        t.wide = picture;
+        if (duration > 0 && t.progress > 0) t.left = (long) (duration * (1 - t.progress));
+        t.capWidth = -1;
     }
 
     private void filmRows() {
         Iptv iptv = Iptv.get(getContext());
-        shelf("Nouveautés", iptv.fresh("vod", 30, 24), false, -1);
-        shelf("Les mieux notés", iptv.best("vod", 24), false, -1);
+        shelf("Nouveautés", iptv.fresh("vod", 30, 24), false, -1, R_POSTER);
+        shelf("Les mieux notés", iptv.best("vod", 24), false, -1, R_POSTER);
         List<Iptv.Item> all = iptv.movies();
         int built = 0;
         for (Iptv.Category c : iptv.movieCategories()) {
@@ -401,15 +472,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 if (items.size() >= 24) break;
             }
             if (items.size() < 4) continue;
-            shelf(clean(c.name), items, false, -1);
+            shelf(clean(c.name), items, false, -1, R_POSTER);
             built++;
         }
     }
 
     private void seriesRows() {
         Iptv iptv = Iptv.get(getContext());
-        shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, -1);
-        shelf("Les mieux notées", iptv.best("series", 24), true, -1);
+        shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, -1, R_POSTER);
+        shelf("Les mieux notées", iptv.best("series", 24), true, -1, R_POSTER);
         List<Iptv.Item> all = iptv.series();
         int built = 0;
         for (Iptv.Category c : iptv.seriesCategories()) {
@@ -421,14 +492,14 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 if (items.size() >= 24) break;
             }
             if (items.size() < 4) continue;
-            shelf(clean(c.name), items, true, -1);
+            shelf(clean(c.name), items, true, -1, R_POSTER);
             built++;
         }
     }
 
     private void liveRows() {
         Iptv iptv = Iptv.get(getContext());
-        shelf("Chaînes françaises", frenchChannels(iptv, 24), false, -1);
+        shelf("Chaînes françaises", frenchChannels(iptv, 24), false, -1, R_CARD);
         List<Iptv.Item> all = iptv.live();
         int built = 0;
         for (Iptv.Category c : iptv.liveCategories()) {
@@ -444,7 +515,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 if (items.size() >= 24) break;
             }
             if (items.size() < 4) continue;
-            shelf(clean(c.name), items, false, -1);
+            shelf(clean(c.name), items, false, -1, R_CARD);
             built++;
         }
     }
@@ -462,11 +533,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (!inputs.items.isEmpty()) rows.add(inputs);
     }
 
-    private void shelf(String title, List<Iptv.Item> items, boolean series, int seeTab) {
+    private void shelf(String title, List<Iptv.Item> items, boolean series, int seeTab, int kind) {
         if (items.isEmpty()) return;
         Row row = new Row();
         row.title = title;
-        row.kind = R_CARD;
+        row.kind = kind;
         row.seeTab = seeTab;
         Set<String> seen = new HashSet<>();
         for (Iptv.Item i : items) {
@@ -516,6 +587,14 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     /** A saved position has the title and the stream but no artwork and no year: take both from the catalogue. */
     private Tile resumeTile(Iptv.Item i) {
         Tile t = tile(i, false);
+        t.seriesId = i.id == null ? "" : i.id;   // an episode: its series (saved with the position)
+        int cut = t.title.indexOf(" · S");
+        if (cut > 0) {   // an episode is saved as "Série · S1, É2"
+            t.episode = t.title.substring(cut + 3).trim();
+            t.title = t.title.substring(0, cut).trim();
+        }
+        long pos = Prefs.positionOf(t.url);
+        if (t.progress > 0.01f && pos > 0) t.left = (long) (pos * (1 - t.progress) / t.progress);
         if (!t.image.isEmpty() || t.title.isEmpty()) return t;
         String n = norm(t.title);
         Iptv ip = Iptv.get(getContext());
@@ -549,11 +628,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         layout();
         offset = offsetTo;
         for (Row row : rows) row.slide = row.slideTo;
-        if (lights != null) lights.release();
-        lights = new Lights(this, width, height, BG_TOP, BG_BOTTOM);
-        shaderGen = -1;
-        if (resumed) lights.start();
         bake();
+        // the picture is baked for this size: again from scratch
+        scene = sceneNext = null;
+        frostOf = null;
+        sceneWant = "";
+        requestScenery(spot, spotDetail);
+        if (spot != null) buildSpot();
     }
 
     /**
@@ -566,7 +647,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         kitClear = Liquid.capsule(Liquid.CLEAR, ch, k, false);
         kitLit = Liquid.capsule(Liquid.FOCUS, ch, k, true);
         kitWell = Liquid.capsule(Liquid.WELL, ch, k, false);
-        kitButton = Liquid.capsule(Liquid.CLEAR, Math.round(44 * k), k, false);
         kitSee = Liquid.capsule(Liquid.FOCUS, Math.round(40 * k), k, true);
         kitToast = Liquid.capsule(Liquid.DARK, Math.round(56 * k), k, true);
 
@@ -577,31 +657,23 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
         cardPad = Math.round(34 * k);
         int cw = Math.round(CARD_W * k), chh = Math.round(CARD_H * k);
-        int hw = Math.round(HERO_W * k), hh = Math.round(HERO_H * k);
-        cardShadow = Liquid.shadow(cw, chh, 30 * k, cardPad, 24 * k, 0.62f, 0.5f);
-        heroShadow = Liquid.shadow(hw, hh, 34 * k, cardPad, 26 * k, 0.62f, 0.5f);
-
+        int qw = Math.round(POSTER_W * k), qh = Math.round(POSTER_H * k);
+        cardShadow = Liquid.shadow(cw, chh, CARD_R * k, cardPad, 24 * k, 0.62f, 0.5f, -6 * k);
+        posterShadow = Liquid.shadow(qw, qh, POSTER_R * k, cardPad, 24 * k, 0.66f, 0.5f, -6 * k);
         cardRim = rimShader(cw, chh);
-        heroRim = rimShader(hw, hh);
-        topLight = new LinearGradient(0, 0, 0, chh * 0.55f, 0x1AFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
+        posterRim = rimShader(qw, qh);
+        cardLight = new LinearGradient(0, 0, 0, chh * 0.55f, 0x1AFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
+        posterLight = new LinearGradient(0, 0, 0, qh * 0.45f, 0x1AFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
         float band = cw * 0.42f;
         sheenBand = new LinearGradient(-band, -band * 0.35f, band, band * 0.35f,
                 new int[] {0x00FFFFFF, 0x30FFFFFF, 0x00FFFFFF}, new float[] {0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
         float sepLen = barBox.height() - 44 * k;
         sepShade = new LinearGradient(0, 0, 0, sepLen, new int[] {0x00FFFFFF, 0x38FFFFFF, 0x00FFFFFF},
                 new float[] {0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
-        float tilePad = 24 * k, tileH = HERO_H * k - 2 * tilePad;
-        heroTile = Liquid.face(Liquid.CLEAR, Math.round(tileH * 2f / 3f), Math.round(tileH), 12 * k, k);
 
-        // the scroll edge: what scrolls up fades into the backdrop before it reaches the glass
-        scrimBottom = BAR_H * k + 16 * k;
-        scrimMask = new LinearGradient(0, barBox.centerY(), 0, scrimBottom, 0xFF000000, 0x00000000,
-                Shader.TileMode.CLAMP);
-
-        // the glass shows the lights behind it, more vivid and a little brighter (Apple's vibrancy)
+        // the glass shows the picture behind it, more vivid and a little brighter (Apple's vibrancy)
         ColorMatrix vibrancy = new ColorMatrix();
-        // mostly clear: Liquid Glass takes a hint of what is behind it, not its colour
-        vibrancy.setSaturation(0.82f);
+        vibrancy.setSaturation(0.82f);   // mostly clear: Liquid Glass takes a hint of what is behind it, not its colour
         ColorMatrix lift = new ColorMatrix(new float[] {
                 1.04f, 0, 0, 0, 9,
                 0, 1.04f, 0, 0, 9,
@@ -623,15 +695,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private float tw(int kind) {
-        return (kind == R_HERO ? HERO_W : CARD_W) * k;
+        return (kind == R_POSTER ? POSTER_W : CARD_W) * k;
     }
 
     private float th(int kind) {
-        return (kind == R_HERO ? HERO_H : CARD_H) * k;
+        return (kind == R_POSTER ? POSTER_H : CARD_H) * k;
     }
 
     private float gap(int kind) {
-        return (kind == R_HERO ? HERO_GAP : CARD_GAP) * k;
+        return (kind == R_POSTER ? POSTER_GAP : CARD_GAP) * k;
     }
 
     private float step(int kind) {
@@ -643,19 +715,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return Math.max(1, (int) ((usable + gap(kind)) / step(kind)));
     }
 
-    private float capH(int kind) {
-        return (kind == R_HERO ? 18 : CAP_H) * k;
-    }
-
-    private float contentTop() {
-        return (tab == 0 ? 0 : LIB_TITLE_H * k);
-    }
-
     private void layout() {
-        float y = contentTop();
+        float y = 0;
         for (Row row : rows) {
             row.y = y;
-            row.h = (HEAD_H + th(row.kind) + capH(row.kind)) * k;
+            row.h = HEAD_H * k + th(row.kind) + (row.captions ? CAP_H * k : 0);
             y += row.h + ROW_GAP * k;
             if (row.col < 0) row.col = 0;
             row.col = Math.min(row.col, Math.max(0, row.items.size() - 1));
@@ -721,24 +785,15 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return chromeOrder[Math.max(0, Math.min(chromeIndex, chromeCount - 1))];
     }
 
-    private float contentH() {
-        if (rows.isEmpty()) return contentTop();
-        Row last = rows.get(rows.size() - 1);
-        return last.y + last.h;
-    }
-
-    private float maxOffset() {
-        return Math.max(0, contentH() - (h - BAR_H * k - 24 * k));
-    }
-
     private void clampOffset() {
-        offsetTo = Math.max(0, Math.min(maxOffset(), offsetTo));
+        float last = rows.isEmpty() ? 0 : rows.get(rows.size() - 1).y;
+        offsetTo = Math.max(0, Math.min(last, offsetTo));
     }
 
-    /** The focused shelf sits right under the bar, so the shelf below always peeks at the bottom. */
+    /** The focused shelf goes to the anchor, under the spotlight: the shelf below always peeks at the bottom. */
     private void reveal() {
         if (rows.isEmpty()) return;
-        offsetTo = rows.get(rowIndex).y - 4 * k;
+        offsetTo = rows.get(rowIndex).y;
         clampOffset();
         requestFrame();
     }
@@ -759,7 +814,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         lastFrame = now;
         boolean moving = stepLens(dt);
         if (Math.abs(offsetTo - offset) > 0.35f) {
-            offset += (offsetTo - offset) * Math.min(1f, dt * 13f);
+            offset += (offsetTo - offset) * Math.min(1f, dt * 12f);
             moving = true;
         } else {
             offset = offsetTo;
@@ -771,6 +826,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 moving = true;
             } else {
                 row.slide = row.slideTo;
+            }
+            float show = i >= rowIndex ? 1f : 0f;   // the shelves above the focused one step aside
+            if (row.alpha != show) {
+                row.alpha = Math.abs(show - row.alpha) < 0.01f ? show : row.alpha + (show - row.alpha) * Math.min(1f, dt * 14f);
+                moving = true;
             }
             if (row.focus.length != row.items.size()) continue;
             for (int j = 0; j < row.items.size(); j++) {
@@ -784,6 +844,23 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 moving = true;
             }
         }
+        if (spotA < 1) {
+            spotA = Math.min(1f, spotA + dt / 0.24f);
+            moving = true;
+        }
+        if (spotInfoA < 1) {
+            spotInfoA = Math.min(1f, spotInfoA + dt / 0.28f);
+            moving = true;
+        }
+        if (sceneNext != null) {
+            if (sceneAt == 0) sceneAt = now;
+            sceneT = Math.min(1f, (now - sceneAt) / 480f);
+            if (sceneT >= 1) {
+                scene = sceneNext;
+                sceneNext = null;
+            }
+            moving = true;
+        }
         invalidate();
         if (sheenAt != 0 && System.currentTimeMillis() - sheenAt < SHEEN_MS + 20) moving = true;
         if (moving) requestFrame();
@@ -791,6 +868,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private boolean wasMoving;
+
+    private static float ease(float t) {
+        t = Math.max(0, Math.min(1, t));
+        return 1 - (1 - t) * (1 - t) * (1 - t);
+    }
 
     /**
      * The lens follows the focus like a drop: the edge in front runs, the edge behind follows, so it stretches on
@@ -822,13 +904,330 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return moving;
     }
 
+    // MARK: - The spotlight
+
+    /** One fact of the line under the spotlight's title. */
+    private static final class Fact {
+        static final int TEXT = 0, RATING = 1, BADGE = 2, PROGRESS = 3;
+        final int kind;
+        final String text;
+        final float value;
+        final boolean late;   // known only once the panel answered: fades in with the story
+
+        Fact(int kind, String text, float value, boolean late) {
+            this.kind = kind;
+            this.text = text;
+            this.value = value;
+            this.late = late;
+        }
+    }
+
+    private static boolean isEpisode(Tile t) {
+        return t.url.contains("/series/") && !t.seriesId.isEmpty();
+    }
+
+    private static final java.util.regex.Pattern MOVIE_ID = java.util.regex.Pattern.compile("/movie/[^/]+/[^/]+/(\\d+)\\.");
+
+    private static String vodId(String url) {
+        java.util.regex.Matcher m = MOVIE_ID.matcher(url == null ? "" : url);
+        return m.find() ? m.group(1) : "";
+    }
+
+    /** What the panel already told about this card (nothing is asked here). */
+    private Iptv.Detail known(Tile t) {
+        Iptv iptv = Iptv.get(getContext());
+        if (t.series || isEpisode(t)) return t.seriesId.isEmpty() ? null : iptv.peek(true, t.seriesId);
+        if (t.url.contains("/movie/")) {
+            String id = vodId(t.url);
+            return id.isEmpty() ? null : iptv.peek(false, id);
+        }
+        return null;
+    }
+
+    private static boolean sameTile(Tile a, Tile b) {
+        return a != null && b != null && a.title.equals(b.title) && a.url.equals(b.url) && a.seriesId.equals(b.seriesId)
+                && a.app == b.app;
+    }
+
+    /** The focus moved to another card: the spotlight takes it at once, the panel is asked when the focus rests. */
+    private void syncSpot() {
+        Tile t = focusedTile();
+        if (t == null || t == spot) return;
+        if (sameTile(t, spot)) {   // the shelves were rebuilt under the same card: nothing to show again
+            spot = t;
+            return;
+        }
+        spot = t;
+        spotA = 0;
+        spotDetail = known(t);
+        spotInfoA = spotDetail != null ? 1 : 0;
+        buildSpot();
+        main.removeCallbacks(settle);
+        main.postDelayed(settle, spotDetail != null ? 140 : 260);
+        requestFrame();
+    }
+
+    private final Runnable settle = new Runnable() {
+        @Override public void run() {
+            final Tile t = spot;
+            if (t == null) return;
+            boolean film = t.url.contains("/movie/"), series = t.series || isEpisode(t);
+            if (spotDetail != null || !(film || series)) {
+                requestScenery(t, spotDetail);
+                return;
+            }
+            final Iptv iptv = Iptv.get(getContext());
+            infoPool.execute(() -> {
+                if (spot != t) return;   // the focus went on meanwhile: not worth asking
+                Iptv.Detail d = series ? (t.seriesId.isEmpty() ? null : iptv.series(t.seriesId)) : iptv.film(vodId(t.url));
+                main.post(() -> {
+                    if (spot != t) return;
+                    if (d != null) {
+                        spotDetail = d;
+                        spotInfoA = 0;
+                        buildSpot();
+                    }
+                    requestScenery(t, d);
+                    requestFrame();
+                });
+            });
+        }
+    };
+
+    /** The spotlight's lines, worked out when its card or its facts change (never per frame). */
+    private void buildSpot() {
+        Tile t = spot;
+        if (t == null || w == 0) return;
+        Iptv.Detail d = spotDetail;
+        String title = t.title;
+        if ((t.series || isEpisode(t)) && d != null && !d.title.isEmpty()) title = DetailView.seriesTitle(d.title);
+        float maxW = SPOT_TITLE_W * k;
+        spotSize = 66 * k;
+        spotTitle.setTextSize(spotSize);
+        if (spotTitle.measureText(title) <= maxW) {
+            spotLines = new ArrayList<>();
+            spotLines.add(title);
+        } else {
+            spotSize = 56 * k;
+            spotTitle.setTextSize(spotSize);
+            spotLines = wrap(title, spotTitle, maxW, 2);
+        }
+
+        spotFacts.clear();
+        if (t.app != null) {
+            spotFacts.add(new Fact(Fact.TEXT, t.symbol.isEmpty() ? "Application" : "Entrée", 0, false));
+        } else if (t.live) {
+            spotFacts.add(new Fact(Fact.TEXT, "Chaîne en direct", 0, false));
+        } else {
+            boolean episode = isEpisode(t);
+            if (t.progress > 0.01f && t.left > 0) {
+                spotFacts.add(new Fact(Fact.PROGRESS, "Il reste " + span(t.left), t.progress, false));
+            }
+            if (episode && !t.episode.isEmpty()) spotFacts.add(new Fact(Fact.TEXT, t.episode, 0, false));
+            if (!episode && d == null) spotFacts.add(new Fact(Fact.TEXT, t.series ? "Série" : "Film", 0, false));
+            float rating = d == null ? 0 : d.rating > 10 ? d.rating / 10f : d.rating;
+            if (rating >= 1 && rating < 9.95f) {
+                spotFacts.add(new Fact(Fact.RATING, String.format(Locale.FRANCE, "%.1f", rating), 0, true));
+            }
+            String year = d != null && !d.year.isEmpty() ? d.year : t.meta;
+            if (year != null && !year.isEmpty() && !episode) spotFacts.add(new Fact(Fact.TEXT, year, 0, d != null && t.meta.isEmpty()));
+            if (d != null) {
+                if (t.series && !d.seasons.isEmpty()) {
+                    int n = d.seasons.size();
+                    spotFacts.add(new Fact(Fact.TEXT, n > 1 ? n + " saisons" : d.episodes.size() + " épisodes", 0, true));
+                } else if (!t.series && !episode && d.durationMs > 0) {
+                    spotFacts.add(new Fact(Fact.TEXT, span(d.durationMs), 0, true));
+                }
+                if (!d.age.isEmpty()) spotFacts.add(new Fact(Fact.BADGE, d.age, 0, true));
+                String genres = DetailView.genres(d.genre, 3);
+                if (!genres.isEmpty()) spotFacts.add(new Fact(Fact.TEXT, genres, 0, true));
+            }
+        }
+
+        spotStory = new ArrayList<>();
+        boolean content = t.app == null && !t.live;
+        spotRoom = content ? Math.max(1, 3 - (spotLines.size() - 1)) : 0;
+        if (d != null) {
+            String story = d.plot;
+            if (isEpisode(t)) {
+                for (Iptv.Episode e : d.episodes) {
+                    if (e.url.equals(t.url) && !e.plot.isEmpty()) {
+                        story = e.plot;
+                        break;
+                    }
+                }
+            }
+            spotStoryP.setTextSize(26 * k);
+            spotStory = wrap(story, spotStoryP, SPOT_TEXT_W * k, Math.max(1, spotRoom));
+        }
+    }
+
+    /** "1 h 35 min", "52 min". */
+    private static String span(long ms) {
+        long min = Math.max(1, Math.round(ms / 60000.0));
+        if (min < 60) return min + " min";
+        long hh = min / 60, mm = min % 60;
+        return mm == 0 ? hh + " h" : hh + " h " + mm + " min";
+    }
+
+    /** Title, facts and story of what has the focus, over its own picture, at the top left. */
+    private void drawSpotlight(Canvas c) {
+        if (spot == null || spotLines.isEmpty()) return;
+        float a = ease(spotA), ia = a * ease(spotInfoA);
+        float x = MARGIN * k;
+        spotTitle.setTextSize(spotSize);
+        spotTitle.setColor(Ui.alpha(INK, a));
+        float line = spotSize * 1.06f;
+        // from the bottom up: the story's room, the facts, the title's lines
+        float storyBase = (ROW_ANCHOR - SPOT_GAP) * k - Math.max(0, spotRoom - 1) * 37 * k;
+        float factsBase = spotRoom > 0 ? storyBase - 48 * k : (ROW_ANCHOR - SPOT_GAP) * k;
+        float base = factsBase - 54 * k - (spotLines.size() - 1) * line;
+        for (String l : spotLines) {
+            c.drawText(l, x - Ui.leftBearing(spotTitle, l), base, spotTitle);
+            base += line;
+        }
+        base = factsBase;
+
+        // the facts, as on the film's page: a progress bar and the time left, a rating, the year, the length…
+        spotMeta.setTextSize(24 * k);
+        spotBadge.setTextSize(18 * k);
+        spotDot.setTextSize(24 * k);
+        float mid = base - Ui.halfCap(spotMeta), right = w - MARGIN * k, dot = spotDot.measureText("·");
+        boolean first = true;
+        for (Fact f : spotFacts) {
+            float fa = f.late ? ia : a;
+            if (fa <= 0.003f) continue;
+            float fw = factWidth(f);
+            if (x + fw > right) break;
+            if (!first) {
+                spotDot.setColor(Ui.alpha(0x73FFFFFF, fa));
+                c.drawText("·", x + 15 * k - dot / 2, base, spotDot);
+                x += 30 * k;
+            }
+            first = false;
+            switch (f.kind) {
+                case Fact.PROGRESS: {
+                    float bw = 110 * k, bh = 6 * k;
+                    r.set(x, mid - bh / 2, x + bw, mid + bh / 2);
+                    fill.setColor(Ui.alpha(0x47FFFFFF, fa));
+                    c.drawRoundRect(r, bh / 2, bh / 2, fill);
+                    r.right = x + Math.max(14 * k, bw * f.value);
+                    fill.setColor(Ui.alpha(0xF2FFFFFF, fa));
+                    c.drawRoundRect(r, bh / 2, bh / 2, fill);
+                    spotMeta.setColor(Ui.alpha(0xE0FFFFFF, fa));
+                    c.drawText(f.text, x + bw + 14 * k, base, spotMeta);
+                    break;
+                }
+                case Fact.RATING:
+                    Symbols.draw(getContext(), c, "star", x + 11 * k, mid - 1 * k, 21 * k, Ui.alpha(0xE0FFFFFF, fa));
+                    spotMeta.setColor(Ui.alpha(0xE0FFFFFF, fa));
+                    c.drawText(f.text, x + 28 * k, base, spotMeta);
+                    break;
+                case Fact.BADGE: {
+                    float bw = spotBadge.measureText(f.text) + 18 * k, bh = 30 * k;
+                    r.set(x, mid - bh / 2, x + bw, mid + bh / 2);
+                    stroke.setStyle(Paint.Style.STROKE);
+                    stroke.setStrokeWidth(1.5f * k);
+                    stroke.setColor(Ui.alpha(0x8CFFFFFF, fa));
+                    c.drawRoundRect(r, 7 * k, 7 * k, stroke);
+                    spotBadge.setColor(Ui.alpha(0xE0FFFFFF, fa));
+                    c.drawText(f.text, x + 9 * k, mid + Ui.halfCap(spotBadge), spotBadge);
+                    break;
+                }
+                default:
+                    spotMeta.setColor(Ui.alpha(0xE0FFFFFF, fa));
+                    c.drawText(f.text, x, base, spotMeta);
+                    break;
+            }
+            x += fw;
+        }
+
+        if (ia <= 0.003f || spotStory.isEmpty()) return;
+        spotStoryP.setTextSize(26 * k);
+        spotStoryP.setColor(Ui.alpha(0xD1FFFFFF, ia));
+        base = storyBase;
+        for (String l : spotStory) {
+            c.drawText(l, MARGIN * k, base, spotStoryP);
+            base += 37 * k;
+        }
+    }
+
+    private float factWidth(Fact f) {
+        switch (f.kind) {
+            case Fact.RATING: return 28 * k + spotMeta.measureText(f.text);
+            case Fact.BADGE: return spotBadge.measureText(f.text) + 18 * k;
+            case Fact.PROGRESS: return 124 * k + spotMeta.measureText(f.text);
+            default: return spotMeta.measureText(f.text);
+        }
+    }
+
+    // MARK: - The picture behind everything
+
+    /**
+     * What the focused card shows behind the whole screen: its backdrop, else the wash of its poster or of its app's
+     * card, else slate (a channel). Baked once off the UI thread (Scenery), then cross-faded in.
+     */
+    private void requestScenery(Tile t, Iptv.Detail d) {
+        if (w == 0) return;
+        final String key;
+        if (t != null && d != null && !d.backdrop.isEmpty()) key = "bd:" + d.backdrop;
+        else if (t != null && t.app != null && t.art != null) key = "app:" + t.title;
+        else if (t != null && t.app == null && !t.image.isEmpty()) key = "wash:" + t.image;
+        else key = "slate";
+        Scenery front = sceneNext != null ? sceneNext : scene;
+        if (key.equals(sceneWant) || (front != null && key.equals(front.key))) {
+            sceneWant = key;
+            return;
+        }
+        sceneWant = key;
+        if (key.startsWith("bd:")) {
+            String url = d.backdrop;
+            Bitmap b = Posters.get(getContext()).large(url, (u, bm) -> main.post(() -> bakeScene(key, bm, false)));
+            if (b != null) bakeScene(key, b, false);
+        } else if (key.startsWith("app:")) {
+            bakeScene(key, t.art, true);
+        } else if (key.startsWith("wash:")) {
+            Bitmap p = Posters.get(getContext()).get(t.image, (u, bm) -> main.post(() -> bakeScene(key, bm, true)));
+            if (p != null) bakeScene(key, p, true);
+        } else {
+            bakeScene(key, null, false);
+        }
+    }
+
+    private void bakeScene(String key, Bitmap src, boolean wash) {
+        if (!key.equals(sceneWant)) return;
+        final int bw = Math.round(w), bh = Math.round(h);
+        bakePool.execute(() -> {
+            if (!key.equals(sceneWant)) return;   // the focus went on: not worth the 100 ms
+            // a backdrop as is; a poster, a logo or an app's card only lend their colour (never a blurred copy)
+            Scenery sc = wash ? Scenery.tinted(key, Scenery.average(src), bw, bh, true)
+                    : Scenery.bake(key, src, false, bw, bh, true);
+            if (sc == null) return;
+            main.post(() -> showScene(sc));
+        });
+    }
+
+    private void showScene(Scenery sc) {
+        if (!sc.key.equals(sceneWant)) return;
+        if (scene == null) {
+            scene = sc;
+        } else {
+            if (sceneNext != null) scene = sceneNext;   // a fade under way ends at once
+            sceneNext = sc;
+            sceneAt = 0;
+            sceneT = 0;
+        }
+        requestFrame();
+        invalidate();
+    }
+
     // MARK: - Drawing
 
     private static final long SHEEN_MS = 640;
 
-    /** The tile that has the focus, if any: the one whose artwork tints the lights and the hero card. */
+    /** The card the spotlight is about: the focused one, or, from the bar, the one the focus left in the shelves. */
     private Tile focusedTile() {
-        if (rows.isEmpty() || zone != Z_ROW) return null;
+        if (rows.isEmpty()) return null;
         if (rowIndex < 0 || rowIndex >= rows.size()) return null;
         Row row = rows.get(rowIndex);
         if (row.col < 0 || row.col >= row.items.size()) return null;
@@ -841,8 +1240,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             c.drawColor(0xFF0E1418);
             return;
         }
-        // the lights repaint themselves on their thread and invalidate us when a new picture is ready
-        if (lights != null) lights.accent(accentOf(focusedTile()));
+        syncSpot();
         drawScene(c);
         if (!Perf.off(Perf.NO_BAR)) drawBar(c);
         drawToast(c);
@@ -850,60 +1248,48 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     private void drawScene(Canvas c) {
-        Bitmap back = lights == null || Perf.off(Perf.NO_BACKDROP) ? null : lights.front();
-        if (back != null) {
-            c.drawBitmap(back, null, screen, art);
+        if (scene != null && !Perf.off(Perf.NO_BACKDROP)) {
+            c.drawBitmap(scene.image, null, screen, null);
         } else {
             fill.setColor(0xFF000000);
             fill.setShader(bg);
             c.drawRect(screen, fill);
             fill.setShader(null);
         }
+        if (sceneNext != null && !Perf.off(Perf.NO_BACKDROP)) {
+            art.setAlpha(Math.round(255 * ease(sceneT)));
+            c.drawBitmap(sceneNext.image, null, screen, art);
+            art.setAlpha(255);
+        }
+        drawSpotlight(c);
 
-        float barH = BAR_H * k;
-        float top = barH + 18 * k - offset;
+        float top = ROW_ANCHOR * k - offset;
         if (rows.isEmpty()) {
             empty.setTextSize(24 * k);
             empty.setTextAlign(Paint.Align.LEFT);
             String msg = searchOpen
                     ? query.length() < 2 ? "Tapez au moins deux lettres." : "Aucun résultat pour « " + query + " »."
                     : "Aucun compte IPTV : renseignez-le dans les réglages.";
-            c.drawText(msg, MARGIN * k, top + 60 * k, empty);
-        } else {
-            if (tab != 0) {
-                rowTitle.setTextSize(44 * k);
-                rowTitle.setTextAlign(Paint.Align.LEFT);
-                c.drawText(LIBRARIES[tab], MARGIN * k, top + 52 * k, rowTitle);
-            }
-            for (int i = 0; i < rows.size(); i++) {
-                Row row = rows.get(i);
-                float y = top + row.y;
-                if (y > h || y + row.h < barH) continue;
-                drawRow(c, row, i, y);
-            }
+            c.drawText(msg, MARGIN * k, ROW_ANCHOR * k + 40 * k, empty);
+            return;
         }
-        // the scroll edge: what goes up fades into the backdrop before it reaches the glass
-        if (!Perf.off(Perf.NO_SCRIM) && refreshBackdropShaders()) c.drawRect(0, 0, w, scrimBottom, scrimPaint);
+        for (int i = 0; i < rows.size(); i++) {
+            Row row = rows.get(i);
+            float y = top + row.y;
+            if (y > h || y + row.h < 0 || row.alpha <= 0.004f) continue;
+            drawRow(c, row, i, y, row.alpha);
+        }
     }
 
-    /**
-     * The scroll edge and the plate read the lights through bitmap shaders, and a shader keeps the picture it was
-     * built on: rebuild both whenever the lights publish a new one (15 times a second, never per frame).
-     */
+    /** The plate's lens shaders read the frosted picture: rebuilt only when the picture changes. */
     private boolean refreshBackdropShaders() {
-        if (lights == null || scrimMask == null) return false;
-        int g = lights.generation();
-        Bitmap b = lights.front();
-        if (b == null) return false;
-        if (g == shaderGen) return true;
-        shaderGen = g;
-        float sx = w / lights.width(), sy = h / lights.height();
-        BitmapShader edge = new BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
-        matrix.setScale(sx, sy);
-        edge.setLocalMatrix(matrix);
-        scrimPaint.setShader(new ComposeShader(edge, scrimMask, PorterDuff.Mode.DST_IN));
+        Scenery front = sceneNext != null ? sceneNext : scene;
+        if (front == null || front.frost == null) return false;
+        if (front.frost == frostOf) return true;
+        frostOf = front.frost;
+        float sx = w / Scenery.FW, sy = h / Scenery.FH;
         for (int i = 0; i < LENS_BANDS.length; i++) {
-            BitmapShader glass = new BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+            BitmapShader glass = new BitmapShader(frostOf, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
             matrix.setScale(sx, sy);
             matrix.postScale(LENS_BANDS[i], LENS_BANDS[i], barBox.centerX(), barBox.centerY());
             glass.setLocalMatrix(matrix);
@@ -913,7 +1299,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     }
 
     /**
-     * The bar: one Liquid Glass plate — its soft shadow, the lights seen through it (compressed like through a lens,
+     * The bar: one Liquid Glass plate — its soft shadow, the picture seen through it (compressed like through a lens,
      * more vivid), then its baked rim and sheen. Inside, the search well, the library shown on a quiet glass capsule,
      * and the focus: one drop of lit glass that slides from control to control. Ink turns dark where the drop is.
      */
@@ -923,7 +1309,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 barBox.bottom + platePad + 12 * k);
         c.drawBitmap(plateShadow, null, dst, shadowPaint);
         if (refreshBackdropShaders()) {
-            // the lights through the glass, bent more and more towards the rim: the edge shows what lies just
+            // the picture through the glass, bent more and more towards the rim: the edge shows what lies just
             // outside it, like the thick border of a drop
             for (int i = 0; i < LENS_BANDS.length; i++) {
                 float in = LENS_INSETS[i] * k;
@@ -1016,11 +1402,12 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return 1 - (1 - t) * (1 - t) * (1 - t);   // ease out
     }
 
-    private void drawRow(Canvas c, Row row, int index, float y) {
+    private void drawRow(Canvas c, Row row, int index, float y, float a) {
         float m = MARGIN * k;
         rowTitle.setTextSize(28 * k);
         rowTitle.setTextAlign(Paint.Align.LEFT);
-        float base = y + 30 * k;   // 22 px above the cards: a focused card grows 7 px and still clears it
+        rowTitle.setColor(Ui.alpha(0xFFE7EDEE, a));
+        float base = y + 30 * k;   // 22 px above the cards: a focused card grows and still clears it
         c.drawText(row.title, m, base, rowTitle);
 
         boolean focusedRow = index == rowIndex && zone == Z_ROW;
@@ -1032,36 +1419,37 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             float tw2 = seeAll.measureText("Tout voir"), cy = base - Ui.cap(seeAll) / 2;
             if (on) {   // the text stays on the grid's right edge; the drop overhangs it like a focused card
                 r.set(w - m - tw2 - 20 * k, cy - 20 * k, w - m + 20 * k, cy + 20 * k);
-                Liquid.draw(c, kitSee, r, glassPaint, 1f, true, 4 * k);
+                Liquid.draw(c, kitSee, r, glassPaint, a, true, 4 * k);
             }
-            seeAll.setColor(on ? INK : 0xFFB8C4C9);
+            seeAll.setColor(Ui.alpha(on ? INK : 0xFFB8C4C9, a));
             c.drawText("Tout voir", w - m, base, seeAll);
-            seeAll.setColor(0xFFB8C4C9);
         }
 
-        int n = cols(row.kind);
         float s = step(row.kind), tw = tw(row.kind), th = th(row.kind);
         float tilesTop = y + HEAD_H * k;
-        boolean hero = row.kind == R_HERO;
-        for (int j = row.win; j < n + row.win && j < row.items.size(); j++) {
-            Tile t = row.items.get(j);
+        // what lies just outside the plate's width peeks at both edges: there is more this way
+        int from = Math.max(0, (int) Math.floor((row.slide - m) / s));
+        for (int j = from; j < row.items.size(); j++) {
             float x = m + j * s - row.slide;
+            if (x > w) break;
+            if (x + tw < 0) continue;
+            Tile t = row.items.get(j);
             r.set(x, tilesTop, x + tw, tilesTop + th);
-            if (r.right < m - 12 || r.left > w - m + 12) continue;
             float f = j < row.focus.length ? row.focus[j] : 0;
-            drawCard(c, r, t, f, hero);
-            if (!hero && !Perf.off(Perf.NO_TEXT)) drawCaption(c, t, r, tilesTop + th + (8 + 10 * f) * k, f);
+            drawCard(c, r, t, f, row.kind, a);
+            if (row.captions && !Perf.off(Perf.NO_TEXT)) drawCaption(c, t, r, tilesTop + th + (14 + 8 * f) * k, f, a);
         }
     }
 
     /**
      * Every card is the same piece of glass: artwork clipped to its rounded shape, a specular rim lit from the
-     * top-left (quiet at rest, bright when focused), and on focus a lift — scale, a soft baked shadow, light on its
-     * top half and a glint that crosses it once.
+     * top-left (quiet at rest, bright when focused), and on focus a lift — scale, a soft baked shadow under it, light
+     * on its top half and a glint that crosses it once.
      */
-    private void drawCard(Canvas c, RectF box, Tile t, float f, boolean hero) {
-        float radius = (hero ? 34 : 30) * k;
-        float grow = 1 + (hero ? 0.045f : 0.055f) * f;
+    private void drawCard(Canvas c, RectF box, Tile t, float f, int kind, float a) {
+        boolean poster = kind == R_POSTER;
+        float radius = (poster ? POSTER_R : CARD_R) * k;
+        float grow = 1 + (poster ? 0.075f : 0.055f) * f;
         r2.set(box);
         r2.inset(-box.width() * (grow - 1) / 2, -box.height() * (grow - 1) / 2);
         float rad = radius * grow;
@@ -1069,8 +1457,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (f > 0.02f) {
             float pad = cardPad * grow, dy = 16 * k * f;
             dst.set(r2.left - pad, r2.top - pad + dy, r2.right + pad, r2.bottom + pad + dy);
-            shadowPaint.setAlpha(Math.round(255 * Math.min(1f, f)));
-            c.drawBitmap(hero ? heroShadow : cardShadow, null, dst, shadowPaint);
+            shadowPaint.setAlpha(Math.round(255 * Math.min(1f, f) * a));
+            c.drawBitmap(poster ? posterShadow : cardShadow, null, dst, shadowPaint);
             shadowPaint.setAlpha(255);
         }
 
@@ -1078,19 +1466,19 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         clip.addRoundRect(r2, rad, rad, Path.Direction.CW);
         c.save();
         if (!Perf.off(Perf.NO_CLIP)) c.clipPath(clip);
-        if (hero) heroBody(c, t, f, grow); else cardBody(c, t);
+        cardBody(c, t, poster, a);
         if (f > 0.02f) {
             c.save();
             c.translate(r2.left, r2.top);
-            shaded.setShader(topLight);
-            shaded.setAlpha(Math.round(255 * Math.min(1f, f)));
+            shaded.setShader(poster ? posterLight : cardLight);
+            shaded.setAlpha(Math.round(255 * Math.min(1f, f) * a));
             c.drawRect(0, 0, r2.width(), r2.height(), shaded);
             float phase = sheen();
             if (phase >= 0 && f > 0.5f) {
                 float gx = -r2.width() * 0.45f + r2.width() * 1.9f * phase, gy = r2.height() / 2;
                 c.translate(gx, gy);
                 shaded.setShader(sheenBand);
-                shaded.setAlpha(255);
+                shaded.setAlpha(Math.round(255 * a));
                 c.drawRect(-gx, -gy, r2.width() - gx, r2.height() - gy, shaded);
             }
             c.restore();
@@ -1101,177 +1489,60 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
         if (Perf.off(Perf.NO_RIM)) return;
         float sw = (1f + 1.6f * f) * k;
-        rimPaint.setShader(hero ? heroRim : cardRim);
+        rimPaint.setShader(poster ? posterRim : cardRim);
         rimPaint.setStrokeWidth(sw);
-        rimPaint.setAlpha(Math.round(255 * Math.min(1f, 0.20f + 0.80f * f)));
+        rimPaint.setAlpha(Math.round(255 * Math.min(1f, 0.20f + 0.80f * f) * a));
         c.save();
         c.translate(r2.left, r2.top);
-        dst.set(sw / 2, sw / 2, r2.width() - sw / 2, r2.height() - sw / 2);
-        c.drawRoundRect(dst, rad - sw / 2, rad - sw / 2, rimPaint);
+        c.scale(grow, grow);
+        float bw = box.width(), bh = box.height(), s = sw / grow;
+        dst.set(s / 2, s / 2, bw - s / 2, bh - s / 2);
+        c.drawRoundRect(dst, radius - s / 2, radius - s / 2, rimPaint);
         c.restore();
     }
 
-    private void cardBody(Canvas c, Tile t) {
+    private void cardBody(Canvas c, Tile t, boolean poster, float a) {
         fill.setShader(null);
-        fill.setColor(0xFF1E2A31);
+        fill.setColor(Ui.alpha(0xFF1E2A31, a));
         c.drawRect(r2, fill);
-        Bitmap b = artOf(t);
+        Bitmap b = null;
+        if (!t.wide.isEmpty() && !Perf.off(Perf.NO_ART)) b = Posters.get(getContext()).get(t.wide, posterDone);
+        if (b == null) b = artOf(t);
+        art.setAlpha(Math.round(255 * a));
         if (b != null) {
             if (t.live) {
                 artBox.set(r2);
-                artBox.inset(28 * k, 28 * k);
+                artBox.inset(30 * k, 30 * k);
                 drawContain(c, b, artBox);
             } else {
                 drawCover(c, b, r2);
             }
+        } else if (t.live || t.app == null) {
+            // no picture: the name, set like a title card (a poster on two or three lines), not a placeholder icon
+            nameInk.setTextSize((poster ? 25 : 30) * k);
+            nameInk.setColor(Ui.alpha(0xE6FFFFFF, a));
+            List<String> lines = wrap(t.title, nameInk, r2.width() - (poster ? 32 : 48) * k, poster ? 4 : 2);
+            float lh = (poster ? 32 : 38) * k;
+            float ty = r2.centerY() - (lines.size() - 1) * lh / 2 + Ui.halfCap(nameInk);
+            for (String l : lines) {
+                c.drawText(l, r2.centerX(), ty, nameInk);
+                ty += lh;
+            }
         } else {
-            // No artwork: a quiet glyph, never the title — the caption under the card already has it.
-            String glyph = !t.symbol.isEmpty() ? t.symbol : t.live ? "tv" : "play";
-            Symbols.draw(getContext(), c, glyph, r2.centerX(), r2.centerY(), 54 * k, 0x4DFFFFFF);
+            String glyph = !t.symbol.isEmpty() ? t.symbol : "play";
+            Symbols.draw(getContext(), c, glyph, r2.centerX(), r2.centerY(), 54 * k, Ui.alpha(0x4DFFFFFF, a));
         }
+        art.setAlpha(255);
         if (t.progress > 0.005f) {
             // the progress is a capsule inset in the card's foot, like everything else that is a control here
-            float ph = 6 * k, inset = 22 * k, py = r2.bottom - 16 * k;
+            float ph = 6 * k, inset = (poster ? 14 : 22) * k, py = r2.bottom - (poster ? 12 : 16) * k;
             dst.set(r2.left + inset, py - ph, r2.right - inset, py);
-            fill.setColor(0x8C000000);
+            fill.setColor(Ui.alpha(0x8C000000, a));
             c.drawRoundRect(dst, ph / 2, ph / 2, fill);
-            dst.right = dst.left + Math.max(30 * k, (r2.width() - 2 * inset) * Math.min(1f, t.progress));
-            fill.setColor(ACCENT);
+            dst.right = dst.left + Math.max(24 * k, (r2.width() - 2 * inset) * Math.min(1f, t.progress));
+            fill.setColor(Ui.alpha(ACCENT, a));
             c.drawRoundRect(dst, ph / 2, ph / 2, fill);
         }
-    }
-
-    /**
-     * The card that speaks: artwork on the left with its own concentric corners, title, year and the button on the
-     * right, over a tone taken from the artwork (one flat colour, darkened so white text always reads on it).
-     */
-    private void heroBody(Canvas c, Tile t, float f, float grow) {
-        // a pane of smoked glass over the lights (they are already soft, so what shows through is a true frost),
-        // tinted by the artwork; a card with no artwork is the same glass, untinted
-        fill.setShader(null);
-        fill.setColor(0x9E0B1116);
-        c.drawRect(r2, fill);
-        int accent = accentOf(t);
-        if (t.heroTint == null || t.heroTintOf != accent) {
-            int tint = heroTint(accent);
-            t.heroTint = new LinearGradient(0, 0, 0, HERO_H * k, Ui.alpha(tint, 0.72f), Ui.alpha(tint, 0.40f),
-                    Shader.TileMode.CLAMP);
-            t.heroTintOf = accent;
-        }
-        c.save();
-        c.translate(r2.left, r2.top);
-        shaded.setAlpha(255);
-        shaded.setShader(t.heroTint);
-        c.drawRect(0, 0, r2.width(), r2.height(), shaded);
-        shaded.setShader(null);
-        c.restore();
-
-        float pad = 24 * k * grow;
-        float artH = r2.height() - 2 * pad;
-        float artW = artH * 2f / 3f;
-        artBox.set(r2.left + pad, r2.top + pad, r2.left + pad + artW, r2.top + pad + artH);
-        Bitmap b = artOf(t);
-        float ir = Math.max(4 * k, 34 * k * grow - pad);   // concentric with the card
-        if (b == null || t.live) {
-            // a channel logo or no picture at all: it sits on a pane of glass the size of a poster
-            c.drawBitmap(heroTile, null, artBox, glassPaint);
-        }
-        if (b != null && t.live) {
-            artBox.inset(20 * k, 20 * k);
-            drawContain(c, b, artBox);
-            artBox.inset(-20 * k, -20 * k);
-        } else if (b != null) {
-            float bw = b.getWidth(), bh = b.getHeight();
-            float scale = Math.min(artBox.width() / bw, artBox.height() / bh);
-            float dw = bw * scale, dh = bh * scale;
-            dst.set(artBox.centerX() - dw / 2, artBox.centerY() - dh / 2, artBox.centerX() + dw / 2, artBox.centerY() + dh / 2);
-            clip.reset();
-            clip.addRoundRect(dst, ir, ir, Path.Direction.CW);
-            c.save();
-            c.clipPath(clip);
-            c.drawBitmap(b, null, dst, art);
-            c.restore();
-        } else {
-            // no artwork: the title's initial, large, on the glass pane — typography, not a placeholder icon
-            String initial = t.title.isEmpty() ? "·" : t.title.substring(0, t.title.offsetByCodePoints(0, 1))
-                    .toUpperCase(Locale.FRENCH);
-            monogram.setTextSize(112 * k * grow);
-            c.drawText(initial, artBox.centerX(), artBox.centerY() + Ui.halfCap(monogram), monogram);
-        }
-
-        float tx = artBox.right + 26 * k;
-        float maxW = r2.right - pad - tx;
-        cardTitle.setTextSize(29 * k);
-        cardTitle.setTextAlign(Paint.Align.LEFT);
-        cardTitle.setColor(INK);
-        if (t.heroLines == null || Math.abs(t.heroWidth - maxW) > 6 * k) {
-            t.heroLines = wrap(t.title, cardTitle, maxW, 2);
-            t.heroWidth = maxW;
-        }
-        float ty = r2.top + pad + 4 * k;
-        for (String line : t.heroLines) {
-            c.drawText(line, tx, ty + Ui.cap(cardTitle), cardTitle);
-            ty += 36 * k;
-        }
-        cardMeta.setTextSize(19 * k);
-        cardMeta.setTextAlign(Paint.Align.LEFT);
-        if (t.heroMeta == null) t.heroMeta = heroMeta(t);
-        c.drawText(t.heroMeta, tx, ty + Ui.cap(cardMeta) + 2 * k, cardMeta);
-
-        String label = t.series ? "Épisodes" : t.url.isEmpty() ? "" : t.live ? "En direct" : "Regarder";
-        if (!label.isEmpty()) {
-            cardTitle.setTextSize(20 * k);
-            float bw = cardTitle.measureText(label) + 62 * k;
-            float by = r2.bottom - pad - 44 * k;   // on the poster's foot: every hero's button on one line
-            r.set(tx, by, tx + bw, by + 44 * k);
-            // the button is glass at rest and lights up with its card, the same drop as in the bar
-            Liquid.draw(c, kitButton, r, glassPaint, 1f, false, 0);
-            Liquid.draw(c, kitButton, r, glassPaint, 0.9f * f, false, 0);   // brighter glass with its card
-            int ink = INK;
-            Symbols.draw(getContext(), c, "play", r.left + 26 * k, r.centerY(), 22 * k, ink);
-            cardTitle.setColor(ink);
-            c.drawText(label, r.left + 46 * k, r.centerY() + Ui.halfCap(cardTitle), cardTitle);
-            cardTitle.setColor(INK);
-        }
-    }
-
-    /** Every hero says the same things in the same order: what it is, its year, how far it was watched. */
-    private static String heroMeta(Tile t) {
-        StringBuilder b = new StringBuilder(t.live ? "Chaîne en direct" : t.series ? "Série" : "Film");
-        if (t.meta != null && !t.meta.isEmpty() && !t.live) b.append(" · ").append(t.meta);
-        if (t.progress > 0.01f) b.append(" · ").append(Math.round(t.progress * 100)).append(" % vu");
-        return b.toString();
-    }
-
-    /** The artwork's tone made safe for white text: never brighter than a dark mid-tone, never garish. */
-    private static int heroTint(int color) {
-        float[] hsv = new float[3];
-        android.graphics.Color.colorToHSV(color, hsv);
-        hsv[1] = Math.min(hsv[1], 0.70f);
-        hsv[2] = Math.min(hsv[2], 0.44f);
-        return android.graphics.Color.HSVToColor(hsv);
-    }
-
-    /**
-     * The artwork's average colour, cached per URL: one flat tone, computed by scaling the picture to a single
-     * pixel. It tints a card without ever showing a stretched, blocky copy of the picture behind the text.
-     */
-    private int accentOf(Tile t) {
-        if (t == null || t.image == null || t.image.isEmpty()) return 0xFF23323C;
-        Integer a = accents.get(t.image);
-        if (a != null) return a;
-        Bitmap src = artOf(t);
-        if (src == null) return 0xFF23323C;
-        Bitmap one = Bitmap.createScaledBitmap(src, 1, 1, true);
-        int c = one.getPixel(0, 0);
-        one.recycle();
-        int r = Math.min(255, Math.round(((c >> 16) & 255) * 1.25f) + 14);
-        int g = Math.min(255, Math.round(((c >> 8) & 255) * 1.25f) + 14);
-        int b = Math.min(255, Math.round((c & 255) * 1.25f) + 14);
-        int out = 0xFF000000 | (r << 16) | (g << 8) | b;
-        if (accents.size() > 160) accents.clear();
-        accents.put(t.image, out);
-        return out;
     }
 
     private Bitmap artOf(Tile t) {
@@ -1285,7 +1556,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         float bw = b.getWidth(), bh = b.getHeight();
         float scale = Math.max(box.width() / bw, box.height() / bh);
         float sw = box.width() / scale, sh = box.height() / scale;
-        float top = (bh - sh) * (bh > bw ? 0.3f : 0.5f);   // a portrait poster: its upper part, where faces are
+        float top = (bh - sh) * (bh > bw && box.width() > box.height() ? 0.3f : 0.5f);   // a poster in a wide card: its upper part
         srcRect.set(Math.round((bw - sw) / 2), Math.round(top), Math.round((bw + sw) / 2), Math.round(top + sh));
         c.drawBitmap(b, srcRect, box, art);
     }
@@ -1298,22 +1569,26 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         c.drawBitmap(b, null, dst, art);
     }
 
-    private void drawCaption(Canvas c, Tile t, RectF box, float y, float f) {
-        cardTitle.setTextSize(21 * k);
-        cardTitle.setTextAlign(Paint.Align.CENTER);
-        cardMeta.setTextSize(17 * k);
-        cardMeta.setTextAlign(Paint.Align.CENTER);
-        float width = box.width() + 24 * k;
+    /** Under a "continue watching" card, as Apple's Up Next: the title, then the episode and the time left. */
+    private void drawCaption(Canvas c, Tile t, RectF box, float y, float f, float a) {
+        cardTitle.setTextSize(22 * k);
+        cardTitle.setTextAlign(Paint.Align.LEFT);
+        cardMeta.setTextSize(18 * k);
+        cardMeta.setTextAlign(Paint.Align.LEFT);
+        float width = box.width();
         if (t.capWidth != width) {
             t.capTitle = fit(cardTitle, t.title, width);
-            t.capMeta = t.meta == null || t.meta.isEmpty() ? "" : fit(cardMeta, t.meta, width);
+            String meta = t.episode;
+            if (t.left > 0) meta = meta.isEmpty() ? "Il reste " + span(t.left) : meta + " · il reste " + span(t.left);
+            if (meta.isEmpty()) meta = t.meta == null ? "" : t.meta;
+            t.capMeta = fit(cardMeta, meta, width);
             t.capWidth = width;
         }
-        cardTitle.setColor(blend(0xFFDDE4E7, INK, f));
-        c.drawText(t.capTitle, box.centerX(), y + Ui.cap(cardTitle), cardTitle);
-        if (!t.capMeta.isEmpty()) c.drawText(t.capMeta, box.centerX(), y + Ui.cap(cardTitle) + 26 * k, cardMeta);
+        cardTitle.setColor(Ui.alpha(blend(0xFFDDE4E7, INK, f), a));
+        c.drawText(t.capTitle, box.left, y + Ui.cap(cardTitle), cardTitle);
+        cardMeta.setColor(Ui.alpha(0xFF9AA8AE, a));
+        if (!t.capMeta.isEmpty()) c.drawText(t.capMeta, box.left, y + Ui.cap(cardTitle) + 27 * k, cardMeta);
         cardTitle.setColor(INK);
-        cardTitle.setTextAlign(Paint.Align.LEFT);
     }
 
     // MARK: - Toast
@@ -1526,7 +1801,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             if (a == null) return;
             int i = Math.max(0, colIndex);
             float x = MARGIN * k + i * step(row.kind) - row.slide;
-            float y = BAR_H * k + 18 * k + row.y + HEAD_H * k - offset;
+            float y = ROW_ANCHOR * k + row.y + HEAD_H * k - offset;
             if (!HomeApps.open(a, t.app, this, Math.round(x), Math.round(y),
                     Math.round(tw(row.kind)), Math.round(th(row.kind)))) {
                 showToast("Impossible d'ouvrir " + t.title + ".");
@@ -1711,7 +1986,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private void results(String title, List<Iptv.Item> all, String q, boolean series) {
         Row row = new Row();
         row.title = title;
-        row.kind = R_CARD;
+        row.kind = "Chaînes".equals(title) ? R_CARD : R_POSTER;
         Set<String> seen = new HashSet<>();
         for (Iptv.Item i : all) {
             if (i.name == null || i.name.isEmpty()) continue;

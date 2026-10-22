@@ -236,12 +236,12 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         poster = r.poster.isEmpty() ? null : Posters.get(getContext()).get(r.poster, (url, b) -> post(() -> {
             if (open && req == r && poster == null) {
                 poster = b;
-                soft = softOf(b);
+                soft = Scenery.softOf(b);
                 bakeSoft();
                 hero.invalidate();
             }
         }));
-        if (poster != null) soft = softOf(poster);
+        if (poster != null) soft = Scenery.softOf(poster);
         bakeSoft();
 
         refresh();
@@ -390,14 +390,14 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
                     if (open && req == r) {
                         poster = b;
                         if (soft == null) {
-                            soft = softOf(b);
+                            soft = Scenery.softOf(b);
                             bakeSoft();
                         }
                         hero.invalidate();
                     }
                 }));
                 if (poster != null && soft == null) {
-                    soft = softOf(poster);
+                    soft = Scenery.softOf(poster);
                     bakeSoft();
                 }
             }
@@ -444,47 +444,14 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
 
     private interface Baked { void done(Bitmap b); }
 
-    /**
-     * The background as the screen shows it, in one bitmap: the picture cropped to the screen (or the poster's
-     * wash, darkened), with the scrims on it. Painted on a worker thread; handed over on the UI thread.
-     */
+    /** The background as the screen shows it (Scenery: picture + scrims, in GPU memory), baked on a worker. */
     private void bake(Bitmap src, boolean wash, Baked done) {
         final int bw = w, bh = h;
         if (bw == 0 || bh == 0) return;
         new Thread(() -> {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
-            Bitmap out;
-            try {
-                out = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
-            } catch (OutOfMemoryError e) {
-                return;
-            }
-            Canvas c = new Canvas(out);
-            Paint p = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
-            c.drawColor(0xFF0B1116);
-            if (wash) {
-                c.drawBitmap(src, null, new RectF(0, 0, bw, bh), p);
-                c.drawColor(0x8C05080B);
-            } else {
-                float sw0 = src.getWidth(), sh0 = src.getHeight();
-                float scale = Math.max(bw / sw0, bh / sh0);
-                float sw = bw / scale, sh = bh / scale;
-                // a backdrop keeps its top (faces are rarely at the very bottom)
-                int sx = Math.round((sw0 - sw) / 2), sy = Math.round((sh0 - sh) * 0.3f);
-                c.drawBitmap(src, new Rect(sx, sy, Math.round(sx + sw), Math.round(sy + sh)), new RectF(0, 0, bw, bh), p);
-            }
-            // the scrims: the text's side darkest, the picture free at the top right
-            Paint g = new Paint(Paint.DITHER_FLAG);
-            g.setShader(new LinearGradient(0, 0, bw * 0.66f, 0, new int[]{0xC705080B, 0x6105080B, 0x0005080B},
-                    new float[]{0, 0.45f, 1}, Shader.TileMode.CLAMP));
-            c.drawRect(0, 0, bw * 0.66f, bh, g);
-            g.setShader(new LinearGradient(0, bh * 0.34f, 0, bh, new int[]{0x0005080B, 0xB805080B, 0xF505080B},
-                    new float[]{0, 0.6f, 1}, Shader.TileMode.CLAMP));
-            c.drawRect(0, bh * 0.34f, bw, bh, g);
-            g.setShader(new LinearGradient(0, 0, 0, bh * 0.2f, 0x5205080B, 0x0005080B, Shader.TileMode.CLAMP));
-            c.drawRect(0, 0, bw, bh * 0.2f, g);
-            out.prepareToDraw();   // uploaded to the GPU ahead of its first frame
-            post(() -> done.done(out));
+            Scenery sc = Scenery.bake("", src, wash, bw, bh);
+            if (sc != null) post(() -> done.done(sc.image));
         }, "detail-bake").start();
     }
 
@@ -1319,30 +1286,6 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         cardPaint.setShader(null);
     }
 
-    /** The middle of the poster, 16:9, reduced to a few pixels and grown back: a wash of its colours. */
-    private static Bitmap softOf(Bitmap p) {
-        if (p == null || p.getWidth() < 4 || p.getHeight() < 4) return null;
-        try {
-            int pw = p.getWidth(), ph = p.getHeight();
-            int cw = pw, ch = Math.round(pw * 9f / 16f);
-            if (ch > ph) {
-                ch = ph;
-                cw = Math.round(ph * 16f / 9f);
-            }
-            Bitmap cur = Bitmap.createBitmap(p, (pw - cw) / 2, (ph - ch) / 2, cw, ch);
-            int tw = cur.getWidth(), tht = cur.getHeight();
-            while (tw > 64) {   // halving steps: every pixel counts, no sparkle
-                tw = Math.max(32, tw / 2);
-                tht = Math.max(18, tht / 2);
-                cur = Bitmap.createScaledBitmap(cur, tw, tht, true);
-            }
-            cur = Bitmap.createScaledBitmap(cur, 32, 18, true);
-            return Bitmap.createScaledBitmap(cur, 160, 90, true);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
     // MARK: - Text
 
     /** One fact of the line under the title. */
@@ -1380,6 +1323,26 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         if (min < 60) return min + " min";
         long hh = min / 60, mm = min % 60;
         return mm == 0 ? hh + " h" : hh + " h " + mm + " min";
+    }
+
+    /** For the home screen's spotlight: a series' name without its year and tags. */
+    static String seriesTitle(String n) {
+        return seriesName(n);
+    }
+
+    /** "Drame, Guerre & Politique": the first few genres, TMDB's English TV ones in French. */
+    static String genres(String raw, int max) {
+        if (raw == null || raw.isEmpty()) return "";
+        String[] g = raw.replace(" / ", ",").replace("/", ",").split("\\s*,\\s*");
+        StringBuilder b = new StringBuilder();
+        for (int i = 0, n = 0; i < g.length && n < max; i++) {
+            String one = genre(g[i].trim());
+            if (one.isEmpty()) continue;
+            if (b.length() > 0) b.append(", ");
+            b.append(one);
+            n++;
+        }
+        return b.toString();
     }
 
     /** A series' name as the panel gives it, without its year and its tags. */

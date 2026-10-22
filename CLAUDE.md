@@ -13,10 +13,10 @@ before you do it, and let them do the taps on the TV.
 ## Installing it for someone
 
 1. **Ask** for the TV's IP address and their city, if they didn't say.
-2. **Tools:** a JDK 17+, the Android SDK command-line tools (build-tools 34+, platform android-34) and adb. Check
+2. **Tools:** a JDK 17+, the Android SDK command-line tools (build-tools 35+, platform android-34) and adb. Check
    what's already there (`java -version`, `$ANDROID_HOME`, `adb version`) and install only what's missing.
    - macOS: `brew install --cask temurin android-commandlinetools android-platform-tools`, then
-     `sdkmanager "build-tools;34.0.0" "platforms;android-34"`.
+     `sdkmanager "build-tools;36.0.0" "platforms;android-34"`.
    - Linux: OpenJDK 17, Android's command-line tools and adb from the package manager, then the same `sdkmanager` line.
    - Windows: WSL, then as on Linux.
 3. **Settings:** run `./build.sh` once; it creates `config.properties`. Fill in `latitude` and `longitude` (decimal
@@ -75,7 +75,9 @@ TVs that don't run Google TV or Android TV (Samsung, LG and others): the way is 
 
 ## The code
 
-- Java 8 language level, minSdk 31 (Android 12), targetSdk 33. No Gradle, no libraries: only the Android SDK.
+- Java 8 language level, minSdk 31 (Android 12), targetSdk 33. No Gradle, and one library only: the video player's
+  engine, Media3 ExoPlayer (`tools/fetch-libs.sh` fetches it into `libs/` with pinned checksums; `build.sh` runs it
+  when `libs/` is missing). Needs build-tools 35+: build-tools 34's d8 crashes on Media3's classes.
 - The home screen is drawn by hand on one Canvas (`HomeView`); the glass and the sky are AGSL shaders (`Shaders`,
   Android 13+, with a fallback for 12). Keep it at 60 fps: no allocations in `onDraw`, no work on the UI thread.
 - `HomeMode` runs every switch as a background job (`ModeJob`) in the main process; the UI is in the `:home`

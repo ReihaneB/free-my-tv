@@ -47,10 +47,10 @@ About ten minutes. You need a Google TV or Android TV (Android 12 or newer) and 
 ### The manual way
 
 1. **On the TV**, do step 1 above.
-2. **Tools:** a JDK (17+), the Android SDK command-line tools (build-tools 34, platform android-34) and adb. On a Mac:
+2. **Tools:** a JDK (17+), the Android SDK command-line tools (build-tools 35+, platform android-34) and adb. On a Mac:
    ```bash
    brew install --cask temurin android-commandlinetools android-platform-tools
-   sdkmanager "build-tools;34.0.0" "platforms;android-34"
+   sdkmanager "build-tools;36.0.0" "platforms;android-34"
    ```
    On Linux, get OpenJDK 17, Android's command-line tools and adb from your package manager, then run the same `sdkmanager` line. On Windows, use WSL.
 3. **Build:**

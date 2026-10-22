@@ -3,8 +3,9 @@ config.properties
 *.keystore
 *.idsig
 
-# Build output
+# Build output (libs/ is fetched by tools/fetch-libs.sh)
 out/
+libs/
 *.apk
 
 # macOS

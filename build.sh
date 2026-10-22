@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds FreeMyTV.apk without Gradle: aapt2 -> javac -> d8 -> zipalign -> apksigner.
-# Needs a JDK (17+) and the Android SDK command-line tools (build-tools 34+, platform android-34). See README.md.
+# Needs a JDK (17+) and the Android SDK command-line tools (build-tools 35+, platform android-34). See README.md.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -76,16 +76,20 @@ final class Config {
 }
 EOF
 
+# --- The video player's engine (Media3 ExoPlayer): fetched once into libs/, checksums pinned
+[ -f libs/media3-exoplayer.jar ] || tools/fetch-libs.sh
+LIBS="$(ls libs/*.jar | tr '\n' ':')$(ls libs/compile/*.jar | tr '\n' ':')"
+
 # --- Build
 "$BT/aapt2" compile --dir app/res -o out/res.zip
 # Fonts uncompressed: Android reads them straight from the APK.
 "$BT/aapt2" link -o out/base.apk -I "$AJ" --manifest app/AndroidManifest.xml --java out/gen out/res.zip \
   --min-sdk-version "$MIN_SDK" --target-sdk-version "$TARGET_SDK" -A app/assets -0 ttf \
   --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" --replace-version
-"$JAVAC" -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$AJ:$BT/core-lambda-stubs.jar" -classpath "$AJ" \
+"$JAVAC" -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$AJ:$BT/core-lambda-stubs.jar" -classpath "$AJ:$LIBS" \
   -d out/classes $(find app/src out/gen -name '*.java')
-"$BT/d8" --release --min-api "$MIN_SDK" --lib "$AJ" --output out $(find out/classes -name '*.class')
-(cd out && zip -qj base.apk classes.dex)
+"$BT/d8" --release --min-api "$MIN_SDK" --lib "$AJ" --output out $(find out/classes -name '*.class') libs/*.jar
+(cd out && zip -qj base.apk classes*.dex)
 "$BT/zipalign" -f -p 4 out/base.apk out/aligned.apk
 
 # --- Sign with your own key (created once; updates need the same key, so keep freemytv.keystore)

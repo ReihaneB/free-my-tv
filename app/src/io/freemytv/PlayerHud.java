@@ -34,7 +34,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private static final int HIDE_MS = 5000, COMMIT_MS = 700;
     private static final int RED = 0xFFFF453A;
 
-    private static final int CONTROLS = 0, BAR = 1, SUBS = 2, MENU = 3, GLYPH = 4, SPINNER = 5, ERROR = 6;
+    private static final int CONTROLS = 0, BAR = 1, SUBS = 2, MENU = 3, GLYPH = 4, SPINNER = 5, ERROR = 6, IMAGES = 7;
 
     /** One part of the controls: draws in screen coordinates, through the HUD. */
     private final class Layer extends View {
@@ -58,7 +58,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     }
 
     private final Player host;
-    private final Layer controls, bar, subs, menuView, glyphView, spinner, errorView;
+    private final Layer controls, bar, subs, images, menuView, glyphView, spinner, errorView;
     private final Layer[] layers, fading;
     private float k = 1, w, h;
 
@@ -67,7 +67,6 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private boolean ready, live, buffering, failed;
     private String error = "";
     private long duration;
-    private int bufferedPct;
 
     // the position, read from the player at most twice a second and carried forward in between
     private long posBase, posAt;
@@ -100,6 +99,9 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private long glyphAt = -1;
 
     private String[] subLines = new String[0];
+    private Bitmap[] subImages = new Bitmap[0];
+    private RectF[] subPlaces = new RectF[0];
+    private final Paint imagePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private long lastFrame;
     private boolean framePosted;
 
@@ -131,11 +133,12 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         controls = new Layer(c, CONTROLS);
         bar = new Layer(c, BAR);
         subs = new Layer(c, SUBS);
+        images = new Layer(c, IMAGES);
         menuView = new Layer(c, MENU);
         glyphView = new Layer(c, GLYPH);
         spinner = new Layer(c, SPINNER);
         errorView = new Layer(c, ERROR);
-        layers = new Layer[]{controls, bar, subs, menuView, glyphView, spinner, errorView};
+        layers = new Layer[]{images, controls, bar, subs, menuView, glyphView, spinner, errorView};
         fading = new Layer[]{controls, bar};
         for (Layer l : layers) addView(l);
     }
@@ -147,6 +150,20 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         this.meta = meta;
         ready = false;
         failed = false;
+        // a new stream (or the same one built again): nothing of the last one stays
+        live = false;
+        duration = 0;
+        note = "";
+        scrubbing = false;
+        pendingSeek = -1;
+        elapsedSec = remainSec = -1;
+        removeCallbacks(commitRun);
+        if (menu >= 0) {
+            menu = -1;
+            menuView.setVisibility(INVISIBLE);
+        }
+        errorView.setVisibility(INVISIBLE);
+        bar.invalidate();
         ellipsize();
         hudTo = 1;
         controls.invalidate();
@@ -204,16 +221,19 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         kick();
     }
 
-    void bufferedPct(int pct) {
-        if (pct == bufferedPct) return;
-        bufferedPct = pct;
-        if (hudA > 0) bar.invalidate();
-    }
-
     void seekDone() {
         pendingSeek = -1;
         posAt = 0;
         if (hudA > 0) bar.invalidate();
+    }
+
+    /** Picture subtitles (PGS, DVB), each with its place on the screen. */
+    void subtitleImages(Bitmap[] bitmaps, RectF[] places) {
+        if (subImages.length == 0 && bitmaps.length == 0) return;
+        subImages = bitmaps;
+        subPlaces = places;
+        images.setVisibility(bitmaps.length > 0 ? VISIBLE : INVISIBLE);
+        images.invalidate();
     }
 
     void subtitle(String text) {
@@ -712,6 +732,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         // the strip that changes every second: the bar, the times, the scrub bubble above the bar
         place(bar, 0, Math.round(barCY - 110 * k), W, Math.round(timesBase + 16 * k));
         place(subs, 0, Math.round(H - 380 * k), W, H);
+        place(images, 0, 0, W, H);   // drawn only when a picture subtitle changes
         float cx = W / 2f, cy = H / 2f;
         int g = Math.round(kitGlyph.h / 2f + 6 * k);
         place(glyphView, Math.round(cx - g), Math.round(cy - g), Math.round(cx + g), Math.round(cy + g));
@@ -742,6 +763,9 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
             case CONTROLS: paintControls(c); break;
             case BAR: paintBar(c); break;
             case SUBS: paintSubtitles(c); break;
+            case IMAGES:
+                for (int i = 0; i < subImages.length; i++) c.drawBitmap(subImages[i], null, subPlaces[i], imagePaint);
+                break;
             case MENU: if (menu >= 0) paintMenu(c); break;
             case GLYPH: paintGlyph(c); break;
             case SPINNER: Ui.spinner(c, w / 2f, h / 2f, 30 * k, 0, spin); break;
@@ -793,8 +817,9 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         c.drawRoundRect(track, r, r, fill);
         float frac = Math.max(0, Math.min(1, (float) shown / duration));
         float x = track.left + frac * track.width();
-        if (bufferedPct > 0 && bufferedPct < 100 && !scrubbing) {
-            float bx = track.left + bufferedPct / 100f * track.width();
+        long buffered = host.bufferedPosition();
+        if (buffered > shown && !scrubbing) {
+            float bx = track.left + Math.min(1f, (float) buffered / duration) * track.width();
             if (bx > x) {
                 box.set(track.left, track.top, bx, track.bottom);
                 fill.setColor(0x29FFFFFF);

@@ -2,19 +2,35 @@ package io.freemytv;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Color;
-import android.media.AudioAttributes;
-import android.media.MediaFormat;
-import android.media.MediaPlayer;
-import android.media.TimedText;
+import android.graphics.RectF;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.KeyEvent;
-import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+
+import androidx.media3.common.C;
+import androidx.media3.common.Format;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.TrackSelectionOverride;
+import androidx.media3.common.TrackSelectionParameters;
+import androidx.media3.common.Tracks;
+import androidx.media3.common.VideoSize;
+import androidx.media3.common.text.Cue;
+import androidx.media3.common.text.CueGroup;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
+import androidx.media3.extractor.DefaultExtractorsFactory;
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -24,25 +40,38 @@ import java.util.Locale;
  * One stream, full screen, with tvOS-like controls ({@link PlayerHud}). Started by the home screen with `url` (and
  * `name`, `logo`). OK pauses, left/right skip 10 s (held: scrub), up reaches the subtitle, audio and format buttons,
  * Back closes what is open and then leaves. A film or an episode comes back where it was left.
+ *
+ * <p>The engine is Media3 ExoPlayer: hardware decoders, and tunneled playback where the TV has it (the decoder
+ * hands frames straight to the TV's video plane, synced to the audio in hardware); seeks use the file's index (one
+ * request, not the platform player's back-and-forth between audio and video), and a bounded buffer suits a TV's
+ * memory. The picture is a SurfaceView, so it stays on its own hardware plane.
  */
-public final class Player extends Activity implements SurfaceHolder.Callback, MediaPlayer.OnPreparedListener,
-        MediaPlayer.OnErrorListener, MediaPlayer.OnInfoListener, MediaPlayer.OnVideoSizeChangedListener,
-        MediaPlayer.OnBufferingUpdateListener, MediaPlayer.OnTimedTextListener, MediaPlayer.OnSeekCompleteListener,
-        MediaPlayer.OnCompletionListener {
+public final class Player extends Activity implements androidx.media3.common.Player.Listener {
 
     static final String EXTRA_URL = "url", EXTRA_NAME = "name", EXTRA_LOGO = "logo";
 
     private FrameLayout root;
     private SurfaceView surface;
     private PlayerHud hud;
-    private MediaPlayer player;
+    private ExoPlayer player;
     private String url = "", name = "", logo = "";
-    private boolean prepared, fill;
+    private boolean ready, fill, failed;
     private int videoW, videoH;
+    private long resumeMs = -1;   // where to start when the player is built again (back from standby or Home)
 
-    // track indices (in getTrackInfo()) behind each popover row, and the rows themselves: read once, when the
-    // stream is ready, so opening a popover costs nothing
-    private final List<Integer> audioTracks = new ArrayList<>(), textTracks = new ArrayList<>();
+    /** A track behind a popover row. */
+    private static final class Ref {
+        final Tracks.Group group;
+        final int index;
+
+        Ref(Tracks.Group group, int index) {
+            this.group = group;
+            this.index = index;
+        }
+    }
+
+    // the rows of the three popovers, rebuilt when the tracks change (never while a popover opens)
+    private final List<Ref> audioRefs = new ArrayList<>(), textRefs = new ArrayList<>();
     private final String[][] rowsOf = new String[3][];
 
     @Override protected void onCreate(Bundle state) {
@@ -69,8 +98,29 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
         });
         setContentView(root);
         hud.loading(name, kind());
-        surface.getHolder().addCallback(this);
     }
+
+    /** Another film or channel while this one is open (the activity is single): switch to it. */
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        String next = intent.getStringExtra(EXTRA_URL);
+        if (next == null || next.isEmpty() || next.equals(url)) return;
+        release();
+        setIntent(intent);
+        url = next;
+        name = intent.getStringExtra(EXTRA_NAME);
+        if (name == null) name = "";
+        logo = intent.getStringExtra(EXTRA_LOGO);
+        if (logo == null) logo = "";
+        resumeMs = -1;
+        videoW = videoH = 0;
+        java.util.Arrays.fill(rowsOf, null);
+        hud.subtitle(null);
+        hud.subtitleImages(new Bitmap[0], new RectF[0]);
+        if (started) build(0, "");   // still on screen: start it now (otherwise onStart does)
+    }
+
+    private boolean started;
 
     private boolean isLive() {
         return url.contains("/live/");
@@ -82,92 +132,146 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
 
     // MARK: - Playback
 
-    @Override public void surfaceCreated(SurfaceHolder holder) {
-        player = new MediaPlayer();
-        player.setAudioAttributes(new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build());
-        player.setOnPreparedListener(this);
-        player.setOnErrorListener(this);
-        player.setOnInfoListener(this);
-        player.setOnVideoSizeChangedListener(this);
-        player.setOnBufferingUpdateListener(this);
-        player.setOnTimedTextListener(this);
-        player.setOnSeekCompleteListener(this);
-        player.setOnCompletionListener(this);
-        player.setDisplay(holder);
-        player.setScreenOnWhilePlaying(true);
-        try {
-            player.setDataSource(url);
-            hud.loading(name, kind());
-            player.prepareAsync();
-        } catch (Exception e) {
-            fail(e.toString());
+    @Override protected void onStart() {
+        super.onStart();
+        started = true;
+        if (url == null || url.isEmpty() || player != null) return;
+        long at = resumeMs >= 0 ? resumeMs : isLive() ? 0 : Prefs.positionOf(url);
+        String note = at > 0 && resumeMs < 0 ? "Reprise à " + PlayerHud.clock(at / 1000) : "";
+        build(at, note);
+    }
+
+    private String startNote = "";
+
+    private void build(long startMs, String note) {
+        ready = false;
+        failed = false;
+        startNote = note;
+        hud.loading(name, kind());
+
+        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+                .setUserAgent("FreeMyTV/1.0")
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(10_000)
+                .setReadTimeoutMs(15_000);
+        DefaultExtractorsFactory extractors = new DefaultExtractorsFactory()
+                .setConstantBitrateSeekingEnabled(true)
+                .setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES
+                        | DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS);
+        DefaultTrackSelector selector = new DefaultTrackSelector(this);
+        // tunneled playback when the decoder and the audio allow it; the TV's language first; subtitles off
+        selector.setParameters(selector.buildUponParameters()
+                .setTunnelingEnabled(true)
+                .setPreferredAudioLanguages(Locale.getDefault().getLanguage())
+                .build());
+        // a bounded buffer: 15-50 s ahead, never more than 48 MB (the default allows 128 MB, too much for a TV);
+        // playback starts with half a second in hand
+        DefaultLoadControl load = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(15_000, 50_000, 500, 2_000)
+                .setTargetBufferBytes(48 << 20)
+                .setPrioritizeTimeOverSizeThresholds(false)
+                .setBackBuffer(20_000, true)   // the last 20 s stay: a step back plays at once
+                .build();
+        DefaultRenderersFactory renderers = new DefaultRenderersFactory(this).setEnableDecoderFallback(true);
+
+        player = new ExoPlayer.Builder(this, renderers)
+                .setTrackSelector(selector)
+                .setLoadControl(load)
+                .setMediaSourceFactory(new DefaultMediaSourceFactory(http, extractors))
+                .build();
+        player.addListener(this);
+        player.setVideoSurfaceView(surface);
+        // a jump lands on the nearest keyframe: nothing to decode up to an exact frame, the picture is back at once
+        player.setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC);
+        if (isLive()) player.setMediaItem(MediaItem.fromUri(url));   // a channel starts at its live edge
+        else player.setMediaItem(MediaItem.fromUri(url), Math.max(0, startMs));
+        player.prepare();
+        player.setPlayWhenReady(true);
+    }
+
+    @Override public void onPlaybackStateChanged(int state) {
+        if (player == null) return;
+        if (state == androidx.media3.common.Player.STATE_BUFFERING) {
+            hud.buffering(true);
+        } else if (state == androidx.media3.common.Player.STATE_READY) {
+            hud.buffering(false);
+            if (!ready) {
+                ready = true;
+                onReady();
+            }
+        } else if (state == androidx.media3.common.Player.STATE_ENDED) {
+            remember();
+            finish();
         }
     }
 
-    @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) { }
-
-    @Override public void surfaceDestroyed(SurfaceHolder holder) { release(); }
-
-    @Override public void onPrepared(MediaPlayer mp) {
-        prepared = true;
-        long duration = mp.getDuration();
-        boolean live = isLive() || duration <= 0;
-        readTracks();
+    private void onReady() {
+        long duration = player.getDuration();
+        boolean live = isLive() || player.isCurrentMediaItemLive() || duration == C.TIME_UNSET || duration <= 0;
         buildRows();
-        String meta = kind();
-        String note = "";
-        long at = 0;
+        String meta = live ? "" : kind();   // a channel: the EN DIRECT badge says it
         if (!live) {
             String length = length(duration);
             meta = meta.isEmpty() ? length : meta + "  ·  " + length;
-            at = Prefs.positionOf(url);
-            if (at > 0 && at < duration - 30_000) note = "Reprise à " + PlayerHud.clock(at / 1000);
-            else at = 0;
         }
-        // started first, then sent to where it was left: a seek before start() is dropped by this TV's player
-        mp.start();
-        hud.prepared(live, live ? 0 : duration, meta, note);
-        if (at > 0) hud.resumeAt(at);
+        hud.prepared(live, live ? 0 : duration, meta, live ? "" : startNote);
     }
 
-    @Override public boolean onError(MediaPlayer mp, int what, int extra) {
-        fail("erreur " + what + " / " + extra);
-        return true;
+    @Override public void onRenderedFirstFrame() { hud.buffering(false); }
+
+    @Override public void onPlayerError(PlaybackException e) {
+        if (player != null && e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+            player.seekToDefaultPosition();   // a live stream that fell behind: back to the edge
+            player.prepare();
+            return;
+        }
+        failed = true;
+        AppLog.w("player: " + e.getErrorCodeName() + " " + e.getMessage());
+        hud.fail(e.getErrorCodeName().replace("ERROR_CODE_", "").toLowerCase(Locale.ROOT).replace('_', ' '));
     }
 
-    @Override public boolean onInfo(MediaPlayer mp, int what, int extra) {
-        if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) hud.buffering(true);
-        else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END || what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START)
-            hud.buffering(false);
-        return false;
-    }
-
-    @Override public void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
-        videoW = width;
-        videoH = height;
+    @Override public void onVideoSizeChanged(VideoSize size) {
+        if (size.width <= 0 || size.height <= 0) return;
+        videoW = Math.round(size.width * size.pixelWidthHeightRatio);
+        videoH = size.height;
         applyAspect();
     }
 
-    @Override public void onBufferingUpdate(MediaPlayer mp, int percent) { hud.bufferedPct(percent); }
+    @Override public void onTracksChanged(Tracks tracks) { buildRows(); }
 
-    @Override public void onTimedText(MediaPlayer mp, TimedText text) {
-        hud.subtitle(text == null ? null : text.getText());
+    @Override public void onPositionDiscontinuity(androidx.media3.common.Player.PositionInfo oldPosition,
+                                                  androidx.media3.common.Player.PositionInfo newPosition,
+                                                  int reason) {
+        if (reason == androidx.media3.common.Player.DISCONTINUITY_REASON_SEEK) hud.seekDone();
     }
 
-    @Override public void onSeekComplete(MediaPlayer mp) {
-        hud.seekDone();
+    /** Text cues become lines; picture cues (PGS, DVB) are placed where they belong on the picture. */
+    @Override public void onCues(CueGroup group) {
+        StringBuilder text = new StringBuilder();
+        List<Bitmap> images = new ArrayList<>();
+        List<RectF> places = new ArrayList<>();
+        float vl = surface.getLeft(), vt = surface.getTop(), vw = surface.getWidth(), vh = surface.getHeight();
+        for (Cue cue : group.cues) {
+            if (cue.text != null && cue.text.length() > 0) {
+                if (text.length() > 0) text.append('\n');
+                text.append(cue.text);
+            } else if (cue.bitmap != null && vw > 0 && vh > 0) {
+                float w = (cue.size == Cue.DIMEN_UNSET ? 0.5f : cue.size) * vw;
+                float h = cue.bitmapHeight != Cue.DIMEN_UNSET ? cue.bitmapHeight * vh
+                        : w * cue.bitmap.getHeight() / Math.max(1, cue.bitmap.getWidth());
+                float x = (cue.position == Cue.DIMEN_UNSET ? 0.5f : cue.position) * vw - anchor(cue.positionAnchor, w);
+                float y = cue.line != Cue.DIMEN_UNSET && cue.lineType == Cue.LINE_TYPE_FRACTION
+                        ? cue.line * vh - anchor(cue.lineAnchor, h) : vh * 0.92f - h;
+                images.add(cue.bitmap);
+                places.add(new RectF(vl + x, vt + y, vl + x + w, vt + y + h));
+            }
+        }
+        hud.subtitle(text.length() == 0 ? null : text.toString());
+        hud.subtitleImages(images.toArray(new Bitmap[0]), places.toArray(new RectF[0]));
     }
 
-    @Override public void onCompletion(MediaPlayer mp) {
-        remember();
-        finish();
-    }
-
-    private void fail(String why) {
-        AppLog.w("player: " + why);
-        hud.fail(why);
+    private static float anchor(int type, float size) {
+        return type == Cue.ANCHOR_TYPE_MIDDLE ? size / 2 : type == Cue.ANCHOR_TYPE_END ? size : 0;
     }
 
     /** The picture keeps its proportions: fitted inside the screen, or filling it (cropped) when asked. */
@@ -188,87 +292,87 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
         surface.setLayoutParams(lp);
     }
 
-    // MARK: - For the controls
+    // MARK: - For the controls (all on the main thread, where the player lives)
 
     long currentPosition() {
-        if (player == null || !prepared) return 0;
-        try {
-            return player.getCurrentPosition();
-        } catch (IllegalStateException e) {
-            return 0;
-        }
+        return player == null ? 0 : Math.max(0, player.getCurrentPosition());
+    }
+
+    long bufferedPosition() {
+        return player == null ? 0 : Math.max(0, player.getBufferedPosition());
     }
 
     boolean isPlaying() {
-        try {
-            return player != null && prepared && player.isPlaying();
-        } catch (IllegalStateException e) {
-            return false;
-        }
+        return player != null && player.getPlayWhenReady();
     }
 
     /** Returns whether it plays afterwards. */
     boolean togglePause() {
-        if (player == null || !prepared) return false;
-        try {
-            if (player.isPlaying()) {
-                player.pause();
-                remember();
-                return false;
-            }
-            player.start();
-            return true;
-        } catch (IllegalStateException e) {
-            return false;
-        }
+        if (player == null) return false;
+        boolean play = !player.getPlayWhenReady();
+        player.setPlayWhenReady(play);
+        if (!play) remember();
+        return play;
     }
 
     void seek(long ms) {
-        if (player == null || !prepared) return;
-        try {
-            player.seekTo(ms, MediaPlayer.SEEK_CLOSEST_SYNC);
-        } catch (IllegalStateException ignored) {
-        }
+        if (player != null) player.seekTo(Math.max(0, ms));
     }
 
     String[] menuRows(int menu) {
-        if (menu != PlayerHud.MENU_FORMAT && !prepared) return null;
+        if (menu != PlayerHud.MENU_FORMAT && !ready) return null;
         if (rowsOf[menu] == null) buildRows();
         return rowsOf[menu];
     }
 
     private void buildRows() {
-        for (int m = 0; m < rowsOf.length; m++) rowsOf[m] = rows(m);
-    }
-
-    private String[] rows(int menu) {
-        if (menu == PlayerHud.MENU_FORMAT) return new String[]{"Adapter à l'écran", "Remplir l'écran"};
-        if (!prepared) return new String[0];
-        MediaPlayer.TrackInfo[] info = tracks();
-        if (menu == PlayerHud.MENU_AUDIO) {
-            String[] out = new String[audioTracks.size()];
-            for (int i = 0; i < out.length; i++) out[i] = describe(info[audioTracks.get(i)], i, true);
-            return distinct(out);
+        audioRefs.clear();
+        textRefs.clear();
+        List<String> audio = new ArrayList<>(), text = new ArrayList<>();
+        if (player != null) {
+            for (Tracks.Group g : player.getCurrentTracks().getGroups()) {
+                int type = g.getType();
+                if (type != C.TRACK_TYPE_AUDIO && type != C.TRACK_TYPE_TEXT) continue;
+                for (int i = 0; i < g.length; i++) {
+                    if (!g.isTrackSupported(i)) continue;
+                    Format f = g.getTrackFormat(i);
+                    if (type == C.TRACK_TYPE_AUDIO) {
+                        audio.add(describe(f, audio.size(), true));
+                        audioRefs.add(new Ref(g, i));
+                    } else {
+                        text.add(describe(f, text.size(), false));
+                        textRefs.add(new Ref(g, i));
+                    }
+                }
+            }
         }
-        if (textTracks.isEmpty()) return new String[0];
-        String[] out = new String[textTracks.size() + 1];
-        out[0] = "Désactivés";
-        for (int i = 0; i < textTracks.size(); i++) out[i + 1] = describe(info[textTracks.get(i)], i, false);
-        return distinct(out);
+        rowsOf[PlayerHud.MENU_AUDIO] = distinct(audio.toArray(new String[0]));
+        if (text.isEmpty()) {
+            rowsOf[PlayerHud.MENU_SUBS] = new String[0];
+        } else {
+            text.add(0, "Désactivés");
+            rowsOf[PlayerHud.MENU_SUBS] = distinct(text.toArray(new String[0]));
+        }
+        rowsOf[PlayerHud.MENU_FORMAT] = new String[]{"Adapter à l'écran", "Remplir l'écran"};
     }
 
     int menuChecked(int menu) {
         if (menu == PlayerHud.MENU_FORMAT) return fill ? 1 : 0;
-        if (player == null || !prepared) return -1;
-        try {
-            if (menu == PlayerHud.MENU_AUDIO) {
-                return audioTracks.indexOf(player.getSelectedTrack(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO));
+        if (menu == PlayerHud.MENU_AUDIO) {
+            for (int i = 0; i < audioRefs.size(); i++) {
+                Ref r = audioRefs.get(i);
+                if (r.group.isTrackSelected(r.index)) return i;
             }
-            int sel = player.getSelectedTrack(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT);
-            return sel < 0 ? 0 : textTracks.indexOf(sel) + 1;
-        } catch (RuntimeException e) {
             return -1;
         }
+        if (player == null || player.getTrackSelectionParameters().disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)) {
+            return 0;
+        }
+        for (int i = 0; i < textRefs.size(); i++) {
+            Ref r = textRefs.get(i);
+            if (r.group.isTrackSelected(r.index)) return i + 1;
+        }
+        return 0;
     }
 
     void choose(int menu, int row) {
@@ -277,62 +381,44 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
             applyAspect();
             return;
         }
-        if (player == null || !prepared) return;
-        try {
-            if (menu == PlayerHud.MENU_AUDIO) {
-                if (row >= 0 && row < audioTracks.size()) player.selectTrack(audioTracks.get(row));
-                return;
-            }
-            int sel = player.getSelectedTrack(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT);
-            if (row == 0) {
-                if (sel >= 0) player.deselectTrack(sel);
-                hud.subtitle(null);
-            } else if (row - 1 < textTracks.size()) {
-                player.selectTrack(textTracks.get(row - 1));
-            }
-        } catch (RuntimeException e) {
-            AppLog.w("player: track " + e);
+        if (player == null) return;
+        TrackSelectionParameters.Builder p = player.getTrackSelectionParameters().buildUpon();
+        if (menu == PlayerHud.MENU_AUDIO) {
+            if (row < 0 || row >= audioRefs.size()) return;
+            Ref r = audioRefs.get(row);
+            p.setOverrideForType(new TrackSelectionOverride(r.group.getMediaTrackGroup(), r.index));
+        } else if (row == 0) {
+            p.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true);
+            hud.subtitle(null);
+            hud.subtitleImages(new Bitmap[0], new RectF[0]);
+        } else if (row - 1 < textRefs.size()) {
+            Ref r = textRefs.get(row - 1);
+            p.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setOverrideForType(new TrackSelectionOverride(r.group.getMediaTrackGroup(), r.index));
         }
+        player.setTrackSelectionParameters(p.build());
     }
 
-    private MediaPlayer.TrackInfo[] tracks() {
-        try {
-            MediaPlayer.TrackInfo[] t = player == null ? null : player.getTrackInfo();
-            return t == null ? new MediaPlayer.TrackInfo[0] : t;
-        } catch (RuntimeException e) {
-            return new MediaPlayer.TrackInfo[0];
+    /** "Français · VFF · Dolby Digital Plus 5.1", "Anglais · forcés", "Piste 3". */
+    private static String describe(Format f, int index, boolean audio) {
+        String lang = language(f.language);
+        StringBuilder b = new StringBuilder(lang.isEmpty() ? "Piste " + (index + 1) : lang);
+        if (f.label != null && !f.label.trim().isEmpty() && !f.label.trim().equalsIgnoreCase(lang)) {
+            b.append("  ·  ").append(f.label.trim());
         }
-    }
-
-    private void readTracks() {
-        audioTracks.clear();
-        textTracks.clear();
-        MediaPlayer.TrackInfo[] info = tracks();
-        for (int i = 0; i < info.length; i++) {
-            int type = info[i].getTrackType();
-            if (type == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) audioTracks.add(i);
-            else if (type == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT) textTracks.add(i);
-        }
-    }
-
-    /** "Français · Dolby Digital Plus", "Anglais · AAC", "Piste 3". */
-    private static String describe(MediaPlayer.TrackInfo t, int index, boolean audio) {
-        String lang = language(t.getLanguage());
-        String label = lang.isEmpty() ? "Piste " + (index + 1) : lang;
         if (audio) {
-            try {
-                MediaFormat f = t.getFormat();
-                String codec = f == null ? "" : codec(f.getString(MediaFormat.KEY_MIME));
-                if (!codec.isEmpty()) label += "  ·  " + codec;
-                if (f != null && f.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
-                    int ch = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-                    String layout = ch >= 8 ? "7.1" : ch >= 6 ? "5.1" : ch == 2 ? "stéréo" : ch == 1 ? "mono" : "";
-                    if (!layout.isEmpty()) label += " " + layout;
-                }
-            } catch (RuntimeException ignored) {
+            String codec = codec(f.sampleMimeType);
+            int ch = f.channelCount;
+            String layout = ch >= 8 ? "7.1" : ch >= 6 ? "5.1" : ch == 2 ? "stéréo" : ch == 1 ? "mono" : "";
+            if (!codec.isEmpty() || !layout.isEmpty()) {
+                b.append("  ·  ").append(codec);
+                if (!layout.isEmpty()) b.append(codec.isEmpty() ? "" : " ").append(layout);
             }
+        } else if ((f.selectionFlags & C.SELECTION_FLAG_FORCED) != 0
+                && (f.label == null || !f.label.toLowerCase(Locale.ROOT).contains("forc"))) {
+            b.append("  ·  forcés");
         }
-        return label;
+        return b.toString();
     }
 
     private static String codec(String mime) {
@@ -370,31 +456,10 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
 
     private static String language(String code) {
         if (code == null) return "";
-        String c = code.trim().toLowerCase(Locale.ROOT);
-        if (c.isEmpty() || c.equals("und") || c.equals("unknown") || c.equals("mis") || c.equals("zxx")) return "";
-        // ISO 639-2/B codes Locale does not know
-        switch (c) {
-            case "fre": c = "fra"; break;
-            case "ger": c = "deu"; break;
-            case "dut": c = "nld"; break;
-            case "chi": c = "zho"; break;
-            case "per": c = "fas"; break;
-            case "cze": c = "ces"; break;
-            case "gre": c = "ell"; break;
-            case "rum": c = "ron"; break;
-            case "slo": c = "slk"; break;
-            case "arm": c = "hye"; break;
-            case "geo": c = "kat"; break;
-            case "ice": c = "isl"; break;
-            case "mac": c = "mkd"; break;
-            case "may": c = "msa"; break;
-            case "alb": c = "sqi"; break;
-            case "baq": c = "eus"; break;
-            case "wel": c = "cym"; break;
-            default: break;
-        }
-        String name = new Locale(c).getDisplayLanguage(Locale.FRENCH);
-        if (name == null || name.isEmpty() || name.equalsIgnoreCase(c)) return code.toUpperCase(Locale.ROOT);
+        String c = code.trim();
+        if (c.isEmpty() || c.equalsIgnoreCase("und") || c.equalsIgnoreCase("unknown")) return "";
+        String name = Locale.forLanguageTag(c).getDisplayLanguage(Locale.FRENCH);
+        if (name == null || name.isEmpty() || name.equalsIgnoreCase(c)) return c.toUpperCase(Locale.ROOT);
         return name.substring(0, 1).toUpperCase(Locale.FRENCH) + name.substring(1);
     }
 
@@ -420,24 +485,22 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
 
     /** Remembers where this stream stopped, so the film or episode comes back where it was left. */
     private void remember() {
-        if (player == null || !prepared) return;
-        try {
-            Prefs.saveProgress(url, name, logo, player.getCurrentPosition(), player.getDuration());
-        } catch (IllegalStateException ignored) { }
+        if (player == null || !ready || failed) return;
+        long duration = player.getDuration();
+        if (duration == C.TIME_UNSET) return;
+        Prefs.saveProgress(url, name, logo, player.getCurrentPosition(), duration);
     }
 
     private void release() {
-        if (player != null) {
-            remember();
-            prepared = false;
-            try { player.stop(); } catch (IllegalStateException ignored) { }
-            player.release();
-            player = null;
-        }
-        prepared = false;
+        if (player == null) return;
+        remember();
+        if (ready && !failed) resumeMs = player.getCurrentPosition();
+        player.removeListener(this);
+        player.release();
+        player = null;
+        ready = false;
     }
 
-    /** The surface is gone by the time onStop runs: the position has to be taken here. */
     @Override protected void onPause() {
         super.onPause();
         remember();
@@ -445,6 +508,7 @@ public final class Player extends Activity implements SurfaceHolder.Callback, Me
 
     @Override protected void onStop() {
         super.onStop();
+        started = false;
         release();
     }
 

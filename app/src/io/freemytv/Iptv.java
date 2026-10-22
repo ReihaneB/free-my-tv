@@ -51,7 +51,8 @@ final class Iptv {
     private static final long EVERY = 12 * 3600_000L;       // a catalogue changes slowly
     private static Iptv instance;
 
-    private final File dir;
+    private final File dir, infoDir;
+    private final Context app;
     private final List<Listener> listeners = new ArrayList<>();
     private final Map<String, List<Item>> items = new HashMap<>();
     private final Map<String, List<Category>> categories = new HashMap<>();
@@ -65,9 +66,11 @@ final class Iptv {
     }
 
     private Iptv(Context c) {
+        app = c;
         dir = new File(c.getFilesDir(), "iptv");
+        infoDir = new File(dir, "info");
         //noinspection ResultOfMethodCallIgnored
-        dir.mkdirs();
+        infoDir.mkdirs();
         fetched = new File(dir, "stamp").lastModified();
     }
 
@@ -149,6 +152,8 @@ final class Iptv {
         String trailer = "", backdrop = "", poster = "";
         float rating;
         long durationMs;
+        boolean lite;           // only what the lists say (Facts): no seasons, no episodes, no age
+        long at;                // when the panel gave it
         final List<Integer> seasons = new ArrayList<>();
         final List<Episode> episodes = new ArrayList<>();
     }
@@ -164,21 +169,52 @@ final class Iptv {
         }
     }
 
-    /** A film's details (`get_vod_info`), or null when the panel doesn't answer. Network: call off the UI thread. */
-    Detail film(String vodId) {
-        String key = "vod:" + vodId;
+    /** What the lists said of a film or a series (Facts, on disk, ~1 ms), or null. */
+    Detail lite(boolean series, String id) {
+        return Facts.get(app).read(series, id);
+    }
+
+    /** Facts are written while the catalogue refreshes: this file says the last refresh wrote them. */
+    private File factsMark() { return new File(dir, "facts1.ok"); }
+
+    /**
+     * What the panel told before, from memory or from disk (any age), or null: never the network. Off the UI thread
+     * (a series' answer is parsed). The home screen reads this for the cards around the focus.
+     */
+    Detail cached(boolean series, String id) {
+        String key = (series ? "series:" : "vod:") + id;
         synchronized (details) {
             Detail d = details.get(key);
             if (d != null) return d;
         }
+        File f = infoFile(key);
+        if (!f.isFile()) return null;
         try {
-            JSONObject root = new JSONObject(download(api("&action=get_vod_info&vod_id=" + enc(vodId))));
-            JSONObject info = root.optJSONObject("info");
-            if (info == null) return null;
-            Detail d = new Detail();
-            common(d, info);
-            d.durationMs = clockMs(text(info, "duration"));
-            if (d.durationMs <= 0) d.durationMs = minutes(text(info, "runtime")) * 60_000L;
+            Detail d = series ? seriesFrom(readText(f)) : filmFrom(readText(f));
+            if (d == null) return null;
+            d.at = f.lastModified();
+            synchronized (details) {
+                Detail had = details.get(key);
+                if (had != null) return had;
+                details.put(key, d);
+            }
+            return d;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** A film's details (`get_vod_info`), or null when the panel doesn't answer. Network: call off the UI thread. */
+    Detail film(String vodId) {
+        Detail known = cached(false, vodId);   // a film's facts don't change
+        if (known != null) return known;
+        String key = "vod:" + vodId;
+        try {
+            String json = download(api("&action=get_vod_info&vod_id=" + enc(vodId)));
+            Detail d = filmFrom(json);
+            if (d == null) return null;
+            d.at = System.currentTimeMillis();
+            keep(key, json);
             synchronized (details) { details.put(key, d); }
             return d;
         } catch (Exception e) {
@@ -187,15 +223,41 @@ final class Iptv {
         }
     }
 
-    /** A series' details, seasons and episodes (`get_series_info`), or null. Network: call off the UI thread. */
+    private static Detail filmFrom(String json) throws Exception {
+        JSONObject info = new JSONObject(json).optJSONObject("info");
+        if (info == null) return null;
+        Detail d = new Detail();
+        common(d, info);
+        d.durationMs = clockMs(text(info, "duration"));
+        if (d.durationMs <= 0) d.durationMs = minutes(text(info, "runtime")) * 60_000L;
+        return d;
+    }
+
+    /**
+     * A series' details, seasons and episodes (`get_series_info`), or null. A series grows: what is older than a few
+     * minutes is asked again (and kept if the panel doesn't answer). Network: call off the UI thread.
+     */
     Detail series(String seriesId) {
         String key = "series:" + seriesId;
-        synchronized (details) {
-            Detail d = details.get(key);
-            if (d != null) return d;
-        }
+        Detail known;
+        synchronized (details) { known = details.get(key); }
+        if (known != null && System.currentTimeMillis() - known.at < 20 * 60_000L) return known;
         try {
-            JSONObject root = new JSONObject(download(api("&action=get_series_info&series_id=" + enc(seriesId))));
+            String json = download(api("&action=get_series_info&series_id=" + enc(seriesId)));
+            Detail d = seriesFrom(json);
+            d.at = System.currentTimeMillis();
+            keep(key, json);
+            synchronized (details) { details.put(key, d); }
+            return d;
+        } catch (Exception e) {
+            AppLog.w("series info: " + e.getMessage());
+            return known != null ? known : cached(true, seriesId);
+        }
+    }
+
+    private static Detail seriesFrom(String json) throws Exception {
+        {
+            JSONObject root = new JSONObject(json);
             Detail d = new Detail();
             JSONObject info = root.optJSONObject("info");
             if (info != null) {
@@ -246,12 +308,43 @@ final class Iptv {
                     if (d.episodes.size() > before) d.seasons.add(season);
                 }
             }
-            synchronized (details) { details.put(key, d); }
             return d;
-        } catch (Exception e) {
-            AppLog.w("series info: " + e.getMessage());
-            return null;
         }
+    }
+
+    // The panel's answers on disk: the next start (and the cards around the focus) find them without asking.
+    private int kept;
+
+    private File infoFile(String key) { return new File(infoDir, key.replace(':', '-') + ".json"); }
+
+    private void keep(String key, String json) {
+        File f = infoFile(key), tmp = new File(infoDir, key.replace(':', '-') + ".tmp");
+        try (OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(tmp), StandardCharsets.UTF_8)) {
+            w.write(json);
+        } catch (IOException e) {
+            return;
+        }
+        //noinspection ResultOfMethodCallIgnored
+        tmp.renameTo(f);
+        if (++kept % 100 == 0) trimInfo();
+    }
+
+    /** At most ~3000 answers (~20 MB): the oldest go first. */
+    private void trimInfo() {
+        File[] all = infoDir.listFiles();
+        if (all == null || all.length <= 3000) return;
+        java.util.Arrays.sort(all, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+        for (int i = 0; i < all.length - 2000; i++) delete(all[i]);
+    }
+
+    private static String readText(File f) throws IOException {
+        StringBuilder sb = new StringBuilder((int) Math.min(1 << 20, f.length() + 16));
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8), 1 << 14)) {
+            char[] buf = new char[8 * 1024];
+            int n;
+            while ((n = r.read(buf)) > 0) sb.append(buf, 0, n);
+        }
+        return sb.toString();
     }
 
     /** The fields films and series share. */
@@ -266,10 +359,7 @@ final class Iptv {
         d.country = text(info, "country");
         d.age = text(info, "age");
         d.trailer = text(info, "youtube_trailer");
-        String date = text(info, "releasedate");
-        if (date.isEmpty()) date = text(info, "releaseDate");
-        if (date.isEmpty()) date = text(info, "release_date");
-        if (date.length() >= 4 && date.substring(0, 4).matches("\\d{4}")) d.year = date.substring(0, 4);
+        d.year = year(info);
         d.rating = (float) info.optDouble("rating", 0);
         d.poster = text(info, "cover_big");
         if (d.poster.isEmpty()) d.poster = text(info, "cover");
@@ -279,8 +369,18 @@ final class Iptv {
         else if (b instanceof String) d.backdrop = (String) b;
     }
 
+    /** The year of a film or a series, from whichever date field the panel filled. */
+    static String year(JSONObject o) {
+        String date = text(o, "releasedate");
+        if (date.isEmpty()) date = text(o, "releaseDate");
+        if (date.isEmpty()) date = text(o, "release_date");
+        if (date.length() >= 4 && date.substring(0, 4).matches("\\d{4}")) return date.substring(0, 4);
+        String y = text(o, "year");
+        return y.matches("\\d{4}") ? y : "";
+    }
+
     /** A JSON text field, with the panels' "null", "0" and "N/A" read as nothing. */
-    private static String text(JSONObject o, String key) {
+    static String text(JSONObject o, String key) {
         Object v = o.opt(key);
         if (v == null || v == JSONObject.NULL) return "";
         String s = String.valueOf(v).trim();
@@ -303,7 +403,7 @@ final class Iptv {
 
     void refreshIfStale() {
         if (!configured() || loading) return;
-        if (System.currentTimeMillis() - fetched < EVERY && !load("live").isEmpty()) return;
+        if (System.currentTimeMillis() - fetched < EVERY && !load("live").isEmpty() && factsMark().isFile()) return;
         refresh();
     }
 
@@ -323,6 +423,7 @@ final class Iptv {
                 if (got) {
                     fetched = System.currentTimeMillis();
                     try { new FileOutputStream(new File(dir, "stamp")).close(); } catch (IOException ignored) { }
+                    if (xtream()) try { new FileOutputStream(factsMark()).close(); } catch (IOException ignored) { }
                     synchronized (this) {
                         items.clear();
                         categories.clear();
@@ -355,15 +456,19 @@ final class Iptv {
 
         writeItems("live", parseStreams(new JSONArray(download(api("&action=get_live_streams"))), "live"));
         // Films and series: category by category, so a 14 MB answer never has to be held at once on a TV.
+        // What the lists say of each title (story, genres, a series' backdrop) goes to Facts on the way.
+        Facts facts = Facts.get(app);
         delete(itemsFile("vod"));
         for (Category c : cats("vod")) {
-            appendItems("vod", parseStreams(new JSONArray(download(
-                    api("&action=get_vod_streams&category_id=" + enc(c.id)))), "vod"));
+            JSONArray list = new JSONArray(download(api("&action=get_vod_streams&category_id=" + enc(c.id))));
+            appendItems("vod", parseStreams(list, "vod"));
+            facts.write(false, list);
         }
         delete(itemsFile("series"));
         for (Category c : cats("series")) {
-            appendItems("series", parseSeries(new JSONArray(download(
-                    api("&action=get_series&category_id=" + enc(c.id))))));
+            JSONArray list = new JSONArray(download(api("&action=get_series&category_id=" + enc(c.id))));
+            appendItems("series", parseSeries(list));
+            facts.write(true, list);
         }
         return true;
     }
@@ -545,17 +650,23 @@ final class Iptv {
                 String to = c.getHeaderField("Location");
                 if (to != null) return download(to);
             }
-            if (code != 200) throw new IOException("HTTP " + code);
-            StringBuilder sb = new StringBuilder(1 << 20);
+            if (code != 200) {
+                c.disconnect();
+                throw new IOException("HTTP " + code);
+            }
+            StringBuilder sb = new StringBuilder(1 << 14);
             try (InputStream in = c.getInputStream();
                  BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8), 1 << 16)) {
                 char[] buf = new char[16 * 1024];
                 int n;
                 while ((n = r.read(buf)) > 0) sb.append(buf, 0, n);
             }
+            // no disconnect(): the socket goes back to the pool, so the next answer skips the TCP handshake
+            // (on this TV's Wi-Fi a round trip is 5 to 250 ms)
             return sb.toString();
-        } finally {
+        } catch (IOException e) {
             c.disconnect();
+            throw e;
         }
     }
 

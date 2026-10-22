@@ -107,26 +107,110 @@ final class Posters {
             if (!pending.add(key)) return null;
         }
         io.execute(() -> {
-            Bitmap b = null;
-            File f = file(key);
+            Bitmap b;
             try {
-                if (f.isFile()) {
-                    b = BitmapFactory.decodeFile(f.getAbsolutePath());
-                } else {
-                    b = fetch(url, 1920);
-                    if (b != null) write(f, b);
-                }
+                b = largeNow(url);
+            } finally {
+                synchronized (pending) { pending.remove(key); }
+            }
+            if (b != null && done != null) done.onPoster(url, b);
+        });
+        return null;
+    }
+
+    /** A backdrop at full size, now: memory, else its file, else the network. Blocking: off the UI thread. */
+    Bitmap largeNow(String url) {
+        if (url == null || url.isEmpty()) return null;
+        synchronized (large) {
+            Bitmap b = large.get(url);
+            if (b != null) return b;
+        }
+        Bitmap b = null;
+        File f = file("L:" + url);
+        try {
+            if (!f.isFile()) save(url, f);
+            if (f.isFile()) b = decode(f, 1920);
+        } catch (Exception e) {
+            AppLog.w("backdrop: " + e.getMessage());
+        }
+        if (b != null) synchronized (large) { large.put(url, b); }
+        return b;
+    }
+
+    /** Fetches a backdrop's file ahead of time, without decoding it: the focus will find it on disk. */
+    void warm(String url) {
+        if (url == null || url.isEmpty()) return;
+        final File f = file("L:" + url);
+        if (f.isFile()) return;
+        final String key = "W:" + url;
+        synchronized (pending) {
+            if (!pending.add(key)) return;
+        }
+        io.execute(() -> {
+            try {
+                if (!f.isFile()) save(url, f);
             } catch (Exception e) {
                 AppLog.w("backdrop: " + e.getMessage());
             } finally {
                 synchronized (pending) { pending.remove(key); }
             }
-            if (b != null) {
-                synchronized (large) { large.put(url, b); }
-                if (done != null) done.onPoster(url, b);
-            }
         });
-        return null;
+    }
+
+    /** A poster or a logo, now: memory, else its file, else the network. Blocking: off the UI thread. */
+    Bitmap posterNow(String url) {
+        if (url == null || url.isEmpty()) return null;
+        synchronized (memory) {
+            Bitmap b = memory.get(url);
+            if (b != null) return b;
+        }
+        File f = file(url);
+        Bitmap b = null;
+        try {
+            if (f.isFile()) {
+                b = BitmapFactory.decodeFile(f.getAbsolutePath());
+            } else {
+                b = download(url);
+                if (b != null) write(f, b);
+            }
+        } catch (Exception e) {
+            AppLog.w("poster: " + e.getMessage());
+        }
+        if (b != null) synchronized (memory) { memory.put(url, b); }
+        return b;
+    }
+
+    /** The file as the server sent it (no re-encoding: that cost ~100 ms a backdrop), written whole or not at all. */
+    private static void save(String url, File f) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        if (c instanceof javax.net.ssl.HttpsURLConnection) relax((javax.net.ssl.HttpsURLConnection) c);
+        c.setConnectTimeout(10_000);
+        c.setReadTimeout(20_000);
+        c.setRequestProperty("User-Agent", "FreeMyTV/1.0");
+        if (c.getResponseCode() != 200) {
+            c.disconnect();
+            return;
+        }
+        File tmp = new File(f.getPath() + ".part");
+        try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(tmp)) {
+            byte[] buf = new byte[16 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        tmp.renameTo(f);
+    }
+
+    /** A file decoded at full size, halved only while wider than 1.5 × `maxW`. */
+    private static Bitmap decode(File f, int maxW) {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(f.getAbsolutePath(), bounds);
+        int sample = 1;
+        while (bounds.outWidth / sample > maxW * 1.5f) sample *= 2;
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inSampleSize = sample;
+        return BitmapFactory.decodeFile(f.getAbsolutePath(), o);
     }
 
     private File file(String url) {
@@ -172,7 +256,10 @@ final class Posters {
         c.setReadTimeout(20_000);
         c.setRequestProperty("User-Agent", "FreeMyTV/1.0");
         try {
-            if (c.getResponseCode() != 200) return null;
+            if (c.getResponseCode() != 200) {
+                c.disconnect();
+                return null;
+            }
             try (InputStream in = c.getInputStream()) {
                 // Downsample only what is bigger than the screen: a channel logo served at 65x39 must be decoded as
                 // is, or it gets blown up blurry in a 230x129 tile.
@@ -190,8 +277,10 @@ final class Posters {
                 o.inSampleSize = sample;
                 return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
             }
-        } finally {
+            // no disconnect(): the socket is reused for the next picture from the same server
+        } catch (IOException e) {
             c.disconnect();
+            throw e;
         }
     }
 

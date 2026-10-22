@@ -52,6 +52,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         float progress;             // continue watching: 0..1
         long left;                  // continue watching: what remains, ms
         boolean series, live;
+        volatile Iptv.Detail lite;  // what the panel's lists say of it (Facts), read once
+        volatile boolean liteAsked, fullTried;
         int color;                  // library tile
         int action = -1;            // >= 0: open that library tab; TO_SETTINGS / TO_BROWSE
         // what the frame would otherwise recompute (and allocate) for every card, every frame
@@ -146,23 +148,44 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final List<Fact> spotFacts = new ArrayList<>();
     private float spotSize, spotA = 1, spotInfoA = 1;
     private int spotRoom;                   // lines kept for the story
-    /** The panel is asked one thing at a time, below the UI thread; the pictures are baked on another. */
-    private final java.util.concurrent.ExecutorService infoPool = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(() -> {
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
-            r.run();
-        }, "home-info");
-        t.setDaemon(true);
-        return t;
-    });
-    private final java.util.concurrent.ExecutorService bakePool = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(() -> {
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
-            r.run();
-        }, "home-bake");
-        t.setDaemon(true);
-        return t;
-    });
+    private boolean spotStoryLate;          // the story came after the rest: it fades in
+    private long spotAt;                    // when the focus came to it (uptime)
+    private int way = 1;                    // the way the focus last went along a shelf: 1 right, -1 left
+    /** Until when the layout moves (uptime ms): the picture changes, and the work ahead runs, once it is still. */
+    private volatile long busyUntil;
+    /** Until when a cross-fade runs: the work ahead waits for it too (its frames are the GPU's heaviest). */
+    private volatile long fadingUntil;
+    private final java.util.Set<String> spotShown = new java.util.HashSet<>();
+    /**
+     * Below the UI thread, the cards around the focus get ready before the focus reaches them: two lanes ask the
+     * panel (the focused card first), one decodes and bakes the pictures. Each focus move empties both queues and
+     * fills them again in order of distance, so nothing waits behind a card that was left.
+     */
+    private final java.util.concurrent.ThreadPoolExecutor infoLane = lane("home-info", 2);
+    private final java.util.concurrent.ThreadPoolExecutor bakeLane = lane("home-bake", 1);
+    /** Baked pictures, ready to fade in (GPU memory: 8 MB each). */
+    private final Map<String, Scenery> scenes = new java.util.LinkedHashMap<String, Scenery>(8, 0.75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, Scenery> e) { return size() > 6; }
+    };
+    private final java.util.Set<String> baking = new java.util.HashSet<>();
+    /**
+     * A picture changes once the focus has rested this long: holding a key doesn't flash a picture per card, and the
+     * cross-fade (two full-screen layers, the GPU's heaviest frames) doesn't land on the cards' own movement.
+     */
+    private static final long SCENE_WAIT = 200;
+
+    private static java.util.concurrent.ThreadPoolExecutor lane(String name, int threads) {
+        return new java.util.concurrent.ThreadPoolExecutor(threads, threads, 30, java.util.concurrent.TimeUnit.SECONDS,
+                new java.util.concurrent.LinkedBlockingQueue<>(), r -> {
+            Thread t = new Thread(() -> {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                r.run();
+            }, name);
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
     /** The "continue watching" cards ask on their own thread: the spotlight never waits behind them. */
     private final java.util.concurrent.ExecutorService watchPool = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(() -> {
@@ -185,6 +208,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Paint scenePaint = new Paint(Paint.FILTER_BITMAP_FLAG);   // the picture is 2/3 of the screen
 
     private long sheenAt;
 
@@ -290,14 +314,14 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         Iptv.get(getContext()).removeListener(this);
         main.removeCallbacks(clockTick);
         main.removeCallbacks(autoDrive);
-        main.removeCallbacks(settle);
+        main.removeCallbacks(sceneTick);
     }
 
     void destroy() {
         pause();
-        infoPool.shutdownNow();
+        infoLane.shutdownNow();
         watchPool.shutdownNow();
-        bakePool.shutdownNow();
+        bakeLane.shutdownNow();
     }
 
     /** Home pressed on the home screen: back to the top of the home tab. */
@@ -381,6 +405,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         layout();
         requestFrame();   // rebuild() zeroes the per-card focus: nothing else would start the animation again
         invalidate();
+        if (spot != null && w > 0) planAhead();
     }
 
     private void homeRows() {
@@ -633,8 +658,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         scene = sceneNext = null;
         frostOf = null;
         sceneWant = "";
-        requestScenery(spot, spotDetail);
-        if (spot != null) buildSpot();
+        synchronized (scenes) { scenes.clear(); }
+        if (spot != null) buildSpot(false);
+        requestScenery();
+        // the facts' table opens below the UI thread, before the first card asks it
+        infoLane.execute(() -> Iptv.get(getContext()).lite(false, "0"));
     }
 
     /**
@@ -813,8 +841,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         float dt = lastFrame == 0 ? 0.016f : Math.min(0.05f, (now - lastFrame) / 1000f);
         lastFrame = now;
         boolean moving = stepLens(dt);
+        // how much the layout itself moves this frame (px, a card's focus counting 100): the work ahead and the
+        // picture wait for it to be still, not for the glint or a fade
+        float stir = moving && lensA > 0.04f ? 2 : 0;
         if (Math.abs(offsetTo - offset) > 0.35f) {
-            offset += (offsetTo - offset) * Math.min(1f, dt * 12f);
+            float d = (offsetTo - offset) * Math.min(1f, dt * 12f);
+            offset += d;
+            stir = Math.max(stir, Math.abs(d));
             moving = true;
         } else {
             offset = offsetTo;
@@ -822,14 +855,18 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         for (int i = 0; i < rows.size(); i++) {
             Row row = rows.get(i);
             if (Math.abs(row.slideTo - row.slide) > 0.35f) {
-                row.slide += (row.slideTo - row.slide) * Math.min(1f, dt * 16f);
+                float d = (row.slideTo - row.slide) * Math.min(1f, dt * 16f);
+                row.slide += d;
+                stir = Math.max(stir, Math.abs(d));
                 moving = true;
             } else {
                 row.slide = row.slideTo;
             }
             float show = i >= rowIndex ? 1f : 0f;   // the shelves above the focused one step aside
             if (row.alpha != show) {
+                float was = row.alpha;
                 row.alpha = Math.abs(show - row.alpha) < 0.01f ? show : row.alpha + (show - row.alpha) * Math.min(1f, dt * 14f);
+                stir = Math.max(stir, Math.abs(row.alpha - was) * 100);
                 moving = true;
             }
             if (row.focus.length != row.items.size()) continue;
@@ -840,12 +877,14 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                     row.focus[j] = target;
                     continue;
                 }
-                row.focus[j] = f + (target - f) * Math.min(1f, dt * 15f);
+                float d = (target - f) * Math.min(1f, dt * 15f);
+                row.focus[j] = f + d;
+                stir = Math.max(stir, Math.abs(d) * 100);
                 moving = true;
             }
         }
         if (spotA < 1) {
-            spotA = Math.min(1f, spotA + dt / 0.24f);
+            spotA = Math.min(1f, spotA + dt / 0.2f);
             moving = true;
         }
         if (spotInfoA < 1) {
@@ -854,7 +893,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
         if (sceneNext != null) {
             if (sceneAt == 0) sceneAt = now;
-            sceneT = Math.min(1f, (now - sceneAt) / 480f);
+            sceneT = Math.min(1f, (now - sceneAt) / 260f);
             if (sceneT >= 1) {
                 scene = sceneNext;
                 sceneNext = null;
@@ -863,6 +902,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
         invalidate();
         if (sheenAt != 0 && System.currentTimeMillis() - sheenAt < SHEEN_MS + 20) moving = true;
+        long up = android.os.SystemClock.uptimeMillis();
+        if (stir > 1.5f) busyUntil = up + 50;
+        fadingUntil = sceneNext != null ? up + 50 : 0;
         if (moving) requestFrame();
         wasMoving = moving;
     }
@@ -912,7 +954,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         final int kind;
         final String text;
         final float value;
-        final boolean late;   // known only once the panel answered: fades in with the story
+        boolean late;         // known only once the panel answered: fades in
 
         Fact(int kind, String text, float value, boolean late) {
             this.kind = kind;
@@ -933,15 +975,24 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         return m.find() ? m.group(1) : "";
     }
 
-    /** What the panel already told about this card (nothing is asked here). */
+    /** What the panel already told about this card, in memory (nothing is read or asked here). */
     private Iptv.Detail known(Tile t) {
-        Iptv iptv = Iptv.get(getContext());
-        if (t.series || isEpisode(t)) return t.seriesId.isEmpty() ? null : iptv.peek(true, t.seriesId);
-        if (t.url.contains("/movie/")) {
-            String id = vodId(t.url);
-            return id.isEmpty() ? null : iptv.peek(false, id);
-        }
-        return null;
+        if (!isContent(t)) return null;
+        String id = idOf(t);
+        return id.isEmpty() ? null : Iptv.get(getContext()).peek(seriesOf(t), id);
+    }
+
+    /** A film, a series or an episode: what the panel has facts about. */
+    private static boolean isContent(Tile t) {
+        return t != null && t.app == null && !t.live && (t.series || isEpisode(t) || t.url.contains("/movie/"));
+    }
+
+    private static boolean seriesOf(Tile t) {
+        return t.series || isEpisode(t);
+    }
+
+    private static String idOf(Tile t) {
+        return seriesOf(t) ? t.seriesId : vodId(t.url);
     }
 
     private static boolean sameTile(Tile a, Tile b) {
@@ -949,7 +1000,11 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 && a.app == b.app;
     }
 
-    /** The focus moved to another card: the spotlight takes it at once, the panel is asked when the focus rests. */
+    /**
+     * The focus moved to another card: the spotlight takes it at once — its title, and what the lists say of it
+     * (Facts: story, genres, year, length), so the text is never waited for. Its picture follows once the focus
+     * rests (SCENE_WAIT), usually already baked by the time it does.
+     */
     private void syncSpot() {
         Tile t = focusedTile();
         if (t == null || t == spot) return;
@@ -958,47 +1013,143 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             return;
         }
         spot = t;
+        spotAt = android.os.SystemClock.uptimeMillis();
+        busyUntil = Math.max(busyUntil, spotAt + 120);   // the cards start moving: the lanes wait from now
         spotA = 0;
         spotDetail = known(t);
-        spotInfoA = spotDetail != null ? 1 : 0;
-        buildSpot();
-        main.removeCallbacks(settle);
-        main.postDelayed(settle, spotDetail != null ? 140 : 260);
+        if (t.lite == null && !t.liteAsked && isContent(t)) {   // one indexed read, ~1 ms
+            t.liteAsked = true;
+            t.lite = Iptv.get(getContext()).lite(seriesOf(t), idOf(t));
+        }
+        buildSpot(false);
+        spotInfoA = 1;
+        planAhead();
+        main.removeCallbacks(sceneTick);
+        main.postDelayed(sceneTick, SCENE_WAIT);
         requestFrame();
     }
 
-    private final Runnable settle = new Runnable() {
+    /** The picture changes once the focus has rested SCENE_WAIT and the cards have stopped moving. */
+    private final Runnable sceneTick = new Runnable() {
         @Override public void run() {
-            final Tile t = spot;
-            if (t == null) return;
-            boolean film = t.url.contains("/movie/"), series = t.series || isEpisode(t);
-            if (spotDetail != null || !(film || series)) {
-                requestScenery(t, spotDetail);
+            long wait = busyUntil - android.os.SystemClock.uptimeMillis();
+            if (wait > 0) {
+                main.postDelayed(this, wait + 10);
                 return;
             }
-            final Iptv iptv = Iptv.get(getContext());
-            infoPool.execute(() -> {
-                if (spot != t) return;   // the focus went on meanwhile: not worth asking
-                Iptv.Detail d = series ? (t.seriesId.isEmpty() ? null : iptv.series(t.seriesId)) : iptv.film(vodId(t.url));
-                main.post(() -> {
-                    if (spot != t) return;
-                    if (d != null) {
-                        spotDetail = d;
-                        spotInfoA = 0;
-                        buildSpot();
-                    }
-                    requestScenery(t, d);
-                    requestFrame();
-                });
-            });
+            requestScenery();
         }
     };
 
-    /** The spotlight's lines, worked out when its card or its facts change (never per frame). */
-    private void buildSpot() {
+    /** The full facts of the focused card landed (or it was found that there are none). */
+    private void spotGotFull(Tile t, Iptv.Detail d) {
+        if (spot != t) return;
+        if (d != null && d != spotDetail) {
+            spotDetail = d;
+            // the lists said the rest: lay the lines out again (5 ms) only if the answer adds something
+            if (t.lite == null || !d.age.isEmpty() || isEpisode(t) || (t.series && !d.seasons.isEmpty())) buildSpot(true);
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - spotAt >= SCENE_WAIT && now >= busyUntil) requestScenery();
+        requestFrame();
+    }
+
+    /** Empties both lanes and fills them again: the focused card, its neighbours, the shelf below, then further. */
+    private void planAhead() {
+        infoLane.getQueue().clear();
+        bakeLane.getQueue().clear();
+        if (rows.isEmpty() || rowIndex < 0 || rowIndex >= rows.size()) return;
+        List<Tile> near = new ArrayList<>(), far = new ArrayList<>();
+        Row row = rows.get(rowIndex);
+        int c = Math.max(0, row.col);
+        pick(near, row, c);
+        pick(near, row, c + way);   // the next card the way the focus goes
+        pick(far, row, c - way);
+        if (rowIndex + 1 < rows.size()) {   // baked too: the work ahead only runs while the screen is still
+            Row below = rows.get(rowIndex + 1);
+            pick(near, below, below.col);
+            pick(far, below, below.col + 1);
+        }
+        for (int d = 2; d <= 6; d++) pick(far, row, c + d);
+        pick(far, row, c - 2);
+        if (rowIndex > 0) {
+            Row above = rows.get(rowIndex - 1);
+            pick(far, above, above.col);
+        }
+        for (Tile t : near) infoLane.execute(() -> prepare(t, true));
+        for (Tile t : far) infoLane.execute(() -> prepare(t, false));
+    }
+
+    private static void pick(List<Tile> into, Row row, int col) {
+        if (col < 0 || col >= row.items.size()) return;
+        Tile t = row.items.get(col);
+        if (!into.contains(t)) into.add(t);
+    }
+
+    /**
+     * On the info lane: a card's full facts (memory, disk, else the panel — a film's backdrop is only there), then its
+     * picture: baked when it is next to the focus, only fetched to disk when it is further.
+     */
+    private void prepare(Tile t, boolean near) {
+        // what is next to the focus at background priority; further, only when nothing else wants the CPU
+        android.os.Process.setThreadPriority(near ? android.os.Process.THREAD_PRIORITY_BACKGROUND
+                : android.os.Process.THREAD_PRIORITY_LOWEST);
+        if (!whenStill()) return;
+        Iptv iptv = Iptv.get(getContext());
+        Iptv.Detail full = null;
+        if (isContent(t)) {
+            boolean series = seriesOf(t);
+            String id = idOf(t);
+            if (t.lite == null && !t.liteAsked) {
+                t.liteAsked = true;
+                t.lite = iptv.lite(series, id);
+            }
+            boolean asked = id.isEmpty();
+            if (!id.isEmpty()) {
+                full = iptv.cached(series, id);
+                // a film's picture is only in its full facts; a series' seasons only matter next to the focus
+                if (full == null && (near || !series)) {
+                    full = series ? iptv.series(id) : iptv.film(id);
+                    asked = true;
+                }
+            }
+            if (full != null || asked) t.fullTried = true;
+            final Iptv.Detail d = full;
+            main.post(() -> spotGotFull(t, d));
+        }
+        String key = sceneKey(t, full);
+        if (key == null) return;
+        if (near) bake(t, key);
+        else if (key.startsWith("bd:")) Posters.get(getContext()).warm(key.substring(3));
+    }
+
+    /** The lists' facts first (they were shown first), the panel's full answer for what they don't say. */
+    private static Iptv.Detail merged(Iptv.Detail full, Iptv.Detail lite) {
+        if (lite == null) return full;
+        if (full == null) return lite;
+        Iptv.Detail m = new Iptv.Detail();
+        m.title = lite.title.isEmpty() ? full.title : lite.title;
+        m.plot = lite.plot.isEmpty() ? full.plot : lite.plot;
+        m.genre = lite.genre.isEmpty() ? full.genre : lite.genre;
+        m.year = lite.year.isEmpty() ? full.year : lite.year;
+        m.rating = lite.rating > 0 ? lite.rating : full.rating;
+        m.durationMs = lite.durationMs > 0 ? lite.durationMs : full.durationMs;
+        m.backdrop = lite.backdrop.isEmpty() ? full.backdrop : lite.backdrop;
+        m.age = full.age;
+        m.seasons.addAll(full.seasons);
+        m.episodes.addAll(full.episodes);
+        return m;
+    }
+
+    /**
+     * The spotlight's lines, worked out when its card or its facts change (never per frame). `more`: the same card,
+     * with more facts: what was already on screen stays, what is new fades in.
+     */
+    private void buildSpot(boolean more) {
         Tile t = spot;
         if (t == null || w == 0) return;
-        Iptv.Detail d = spotDetail;
+        Iptv.Detail full = spotDetail, d = merged(full, t.lite);
+        boolean hadStory = !spotStory.isEmpty();
         String title = t.title;
         if ((t.series || isEpisode(t)) && d != null && !d.title.isEmpty()) title = DetailView.seriesTitle(d.title);
         float maxW = SPOT_TITLE_W * k;
@@ -1027,20 +1178,21 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             if (!episode && d == null) spotFacts.add(new Fact(Fact.TEXT, t.series ? "Série" : "Film", 0, false));
             float rating = d == null ? 0 : d.rating > 10 ? d.rating / 10f : d.rating;
             if (rating >= 1 && rating < 9.95f) {
-                spotFacts.add(new Fact(Fact.RATING, String.format(Locale.FRANCE, "%.1f", rating), 0, true));
+                spotFacts.add(new Fact(Fact.RATING, String.format(Locale.FRANCE, "%.1f", rating), 0, false));
             }
             String year = d != null && !d.year.isEmpty() ? d.year : t.meta;
-            if (year != null && !year.isEmpty() && !episode) spotFacts.add(new Fact(Fact.TEXT, year, 0, d != null && t.meta.isEmpty()));
+            if (year != null && !year.isEmpty() && !episode) spotFacts.add(new Fact(Fact.TEXT, year, 0, false));
+            // what the lists know first; what only the full answer knows (seasons, age) last, so it adds on the
+            // right instead of pushing the rest
             if (d != null) {
+                if (!t.series && !episode && d.durationMs > 0) spotFacts.add(new Fact(Fact.TEXT, span(d.durationMs), 0, false));
+                String genres = DetailView.genres(d.genre, 3);
+                if (!genres.isEmpty()) spotFacts.add(new Fact(Fact.TEXT, genres, 0, false));
                 if (t.series && !d.seasons.isEmpty()) {
                     int n = d.seasons.size();
-                    spotFacts.add(new Fact(Fact.TEXT, n > 1 ? n + " saisons" : d.episodes.size() + " épisodes", 0, true));
-                } else if (!t.series && !episode && d.durationMs > 0) {
-                    spotFacts.add(new Fact(Fact.TEXT, span(d.durationMs), 0, true));
+                    spotFacts.add(new Fact(Fact.TEXT, n > 1 ? n + " saisons" : d.episodes.size() + " épisodes", 0, false));
                 }
-                if (!d.age.isEmpty()) spotFacts.add(new Fact(Fact.BADGE, d.age, 0, true));
-                String genres = DetailView.genres(d.genre, 3);
-                if (!genres.isEmpty()) spotFacts.add(new Fact(Fact.TEXT, genres, 0, true));
+                if (!d.age.isEmpty()) spotFacts.add(new Fact(Fact.BADGE, d.age, 0, false));
             }
         }
 
@@ -1049,17 +1201,32 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         spotRoom = content ? Math.max(1, 3 - (spotLines.size() - 1)) : 0;
         if (d != null) {
             String story = d.plot;
-            if (isEpisode(t)) {
-                for (Iptv.Episode e : d.episodes) {
-                    if (e.url.equals(t.url) && !e.plot.isEmpty()) {
-                        story = e.plot;
-                        break;
+            if (isEpisode(t)) {   // an episode tells its own story (only the full answer has it)
+                story = "";
+                if (full != null) {
+                    for (Iptv.Episode e : full.episodes) {
+                        if (e.url.equals(t.url)) {
+                            story = e.plot;
+                            break;
+                        }
                     }
+                    if (story.isEmpty()) story = d.plot;
                 }
             }
             spotStoryP.setTextSize(26 * k);
             spotStory = wrap(story, spotStoryP, SPOT_TEXT_W * k, Math.max(1, spotRoom));
         }
+
+        boolean late = false;
+        for (Fact f : spotFacts) {
+            f.late = more && !spotShown.contains(f.kind + f.text);
+            late |= f.late;
+        }
+        spotShown.clear();
+        for (Fact f : spotFacts) spotShown.add(f.kind + f.text);
+        spotStoryLate = more && !hadStory && !spotStory.isEmpty();
+        if (!more) spotStoryLate = false;
+        if (late || spotStoryLate) spotInfoA = 0;
     }
 
     /** "1 h 35 min", "52 min". */
@@ -1142,9 +1309,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             x += fw;
         }
 
-        if (ia <= 0.003f || spotStory.isEmpty()) return;
+        float sa = spotStoryLate ? ia : a;
+        if (sa <= 0.003f || spotStory.isEmpty()) return;
         spotStoryP.setTextSize(26 * k);
-        spotStoryP.setColor(Ui.alpha(0xD1FFFFFF, ia));
+        spotStoryP.setColor(Ui.alpha(0xD1FFFFFF, sa));
         base = storyBase;
         for (String l : spotStory) {
             c.drawText(l, MARGIN * k, base, spotStoryP);
@@ -1164,51 +1332,107 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     // MARK: - The picture behind everything
 
     /**
-     * What the focused card shows behind the whole screen: its backdrop, else the wash of its poster or of its app's
-     * card, else slate (a channel). Baked once off the UI thread (Scenery), then cross-faded in.
+     * The picture a card wants behind the whole screen: its backdrop, else the colour of its poster, logo or app
+     * card, else slate. Null while a film's full facts (where its backdrop is) are still on their way.
      */
-    private void requestScenery(Tile t, Iptv.Detail d) {
+    private static String sceneKey(Tile t, Iptv.Detail full) {
+        if (t == null) return "slate";
+        if (t.app != null) return t.art != null ? "app:" + t.title : "slate";
+        if (isContent(t)) {
+            Iptv.Detail lite = t.lite;
+            String bd = lite != null && !lite.backdrop.isEmpty() ? lite.backdrop : full != null ? full.backdrop : "";
+            if (!bd.isEmpty()) return "bd:" + bd;
+            if (full == null && !t.fullTried) return null;
+        }
+        return t.image.isEmpty() ? "slate" : "wash:" + t.image;
+    }
+
+    private Scenery sceneCached(String key) {
+        synchronized (scenes) { return scenes.get(key); }
+    }
+
+    /** The focused card's picture: shown at once when it is baked, otherwise baked first. */
+    private void requestScenery() {
         if (w == 0) return;
-        final String key;
-        if (t != null && d != null && !d.backdrop.isEmpty()) key = "bd:" + d.backdrop;
-        else if (t != null && t.app != null && t.art != null) key = "app:" + t.title;
-        else if (t != null && t.app == null && !t.image.isEmpty()) key = "wash:" + t.image;
-        else key = "slate";
+        Tile t = spot;
+        String key = sceneKey(t, spotDetail);
+        if (key == null) return;   // prepare() calls back when the facts land
+        sceneWant = key;
         Scenery front = sceneNext != null ? sceneNext : scene;
-        if (key.equals(sceneWant) || (front != null && key.equals(front.key))) {
-            sceneWant = key;
+        if (front != null && key.equals(front.key)) return;
+        Scenery ready = sceneCached(key);
+        if (ready != null) {
+            showScene(ready);
             return;
         }
-        sceneWant = key;
-        if (key.startsWith("bd:")) {
-            String url = d.backdrop;
-            Bitmap b = Posters.get(getContext()).large(url, (u, bm) -> main.post(() -> bakeScene(key, bm, false)));
-            if (b != null) bakeScene(key, b, false);
-        } else if (key.startsWith("app:")) {
-            bakeScene(key, t.art, true);
-        } else if (key.startsWith("wash:")) {
-            Bitmap p = Posters.get(getContext()).get(t.image, (u, bm) -> main.post(() -> bakeScene(key, bm, true)));
-            if (p != null) bakeScene(key, p, true);
-        } else {
-            bakeScene(key, null, false);
+        bakeLane.execute(() -> bakeNow(t, key));
+    }
+
+    private void bake(Tile t, String key) {
+        if (sceneCached(key) != null) return;
+        bakeLane.execute(() -> bakeNow(t, key));
+    }
+
+    /**
+     * On the bake lane: decodes what the picture is made of and has Scenery render it (on the GPU, ~30 ms), then
+     * shows it if it is still the one the focus wants.
+     */
+    /**
+     * Holds a lane while the screen moves (the cards, a cross-fade): this TV's four cores are already busy with its
+     * own services, and anything decoded, parsed or painted in the background made the moving frames late (frames
+     * 30-38 ms long instead of 16-25). The work ahead is done while the focus rests on a card. False if interrupted.
+     */
+    private boolean whenStill() {
+        try {
+            for (int i = 0; i < 80; i++) {
+                long up = android.os.SystemClock.uptimeMillis();
+                if (up >= busyUntil && up >= fadingUntil) break;
+                Thread.sleep(25);
+            }
+            return true;
+        } catch (InterruptedException e) {
+            return false;
         }
     }
 
-    private void bakeScene(String key, Bitmap src, boolean wash) {
-        if (!key.equals(sceneWant)) return;
-        final int bw = Math.round(w), bh = Math.round(h);
-        bakePool.execute(() -> {
-            if (!key.equals(sceneWant)) return;   // the focus went on: not worth the 100 ms
-            // a backdrop as is; a poster, a logo or an app's card only lend their colour (never a blurred copy)
-            Scenery sc = wash ? Scenery.tinted(key, Scenery.average(src), bw, bh, true)
-                    : Scenery.bake(key, src, false, bw, bh, true);
-            if (sc == null) return;
-            main.post(() -> showScene(sc));
+    private void bakeNow(Tile t, String key) {
+        if (!whenStill()) return;
+        Scenery sc = sceneCached(key);
+        if (sc == null) {
+            synchronized (baking) {
+                if (!baking.add(key)) return;   // under way: its end shows it
+            }
+            try {
+                int bw = Math.round(w), bh = Math.round(h);
+                Posters posters = Posters.get(getContext());
+                if (key.startsWith("bd:")) {
+                    Bitmap b = posters.largeNow(key.substring(3));
+                    sc = b != null ? Scenery.home(key, b, bw, bh)
+                            : Scenery.tinted(key, Scenery.average(t == null ? null : posters.posterNow(t.image)), bw, bh);
+                } else if (key.startsWith("app:")) {
+                    sc = Scenery.tinted(key, Scenery.average(t == null ? null : t.art), bw, bh);
+                } else if (key.startsWith("wash:")) {
+                    // a poster or a logo only lends its colour (never a blurred copy)
+                    sc = Scenery.tinted(key, Scenery.average(posters.posterNow(key.substring(5))), bw, bh);
+                } else {
+                    sc = Scenery.home(key, null, bw, bh);
+                }
+                if (sc != null) synchronized (scenes) { scenes.put(key, sc); }
+            } finally {
+                synchronized (baking) { baking.remove(key); }
+            }
+        }
+        if (sc == null) return;
+        final Scenery ready = sc;
+        main.post(() -> {
+            if (ready.key.equals(sceneWant)) showScene(ready);
         });
     }
 
     private void showScene(Scenery sc) {
         if (!sc.key.equals(sceneWant)) return;
+        Scenery front = sceneNext != null ? sceneNext : scene;
+        if (front == sc) return;
         if (scene == null) {
             scene = sc;
         } else {
@@ -1249,7 +1473,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void drawScene(Canvas c) {
         if (scene != null && !Perf.off(Perf.NO_BACKDROP)) {
-            c.drawBitmap(scene.image, null, screen, null);
+            c.drawBitmap(scene.image, null, screen, scenePaint);
         } else {
             fill.setColor(0xFF000000);
             fill.setShader(bg);
@@ -1257,9 +1481,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             fill.setShader(null);
         }
         if (sceneNext != null && !Perf.off(Perf.NO_BACKDROP)) {
-            art.setAlpha(Math.round(255 * ease(sceneT)));
-            c.drawBitmap(sceneNext.image, null, screen, art);
-            art.setAlpha(255);
+            scenePaint.setAlpha(Math.round(255 * ease(sceneT)));
+            c.drawBitmap(sceneNext.image, null, screen, scenePaint);
+            scenePaint.setAlpha(255);
         }
         drawSpotlight(c);
 
@@ -1635,10 +1859,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
         switch (code) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (down) move(-1);
+                if (down) {
+                    way = -1;
+                    move(-1);
+                }
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (down) move(1);
+                if (down) {
+                    way = 1;
+                    move(1);
+                }
                 return true;
             case KeyEvent.KEYCODE_DPAD_UP:
                 if (down) move(0, -1);

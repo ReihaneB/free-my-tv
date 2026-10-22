@@ -13,9 +13,9 @@ import android.graphics.Shader;
  * screen (or, without one, a wash of the poster's colours, or plain slate), with the scrims already on it — the
  * left side darkest where the text sits, the bottom behind the shelves, a hint at the top behind the bar.
  *
- * Baked once, off the UI thread, into one screen-sized bitmap kept in GPU memory: the frame draws it in a single
- * pass, nothing is uploaded when it first shows, and the process doesn't hold its 8 MB. With it, a 192×108 frosted
- * copy (heavily blurred): what the glass of the bar shows of it.
+ * Baked once, off the UI thread, into one bitmap kept in GPU memory (screen-sized for a film's page, 2/3 for the
+ * home screen, drawn scaled): the frame draws it in a single pass, nothing is uploaded when it first shows. With it,
+ * a 192×108 frosted copy (heavily blurred): what the glass of the bar shows of it.
  */
 final class Scenery {
     static final int FW = 192, FH = 108;
@@ -30,73 +30,86 @@ final class Scenery {
         this.frost = frost;
     }
 
-    /** A film's page: its text sits at the bottom left. */
+    /** A film's page: its text sits at the bottom left; screen-sized, in GPU memory. */
     static Scenery bake(String key, Bitmap src, boolean wash, int w, int h) {
-        return bake(key, src, wash, w, h, false);
+        return make(key, w, h, painter(src, wash, false));
     }
 
     /**
-     * A backdrop (`wash` false) or a poster's wash (`wash` true; pass softOf(poster)). `home`: the shelves cover the
-     * lower half, so the bottom scrim starts higher and is darker. Call off the UI thread.
+     * The home screen's picture: the shelves cover the lower half, so the bottom scrim starts higher and is darker.
+     * Baked at 2/3 of the screen (1280×720, the size the panel's backdrops come in: nothing is lost) and drawn
+     * scaled: 2.25 × fewer pixels for the CPU and for the upload. Never on the render thread: an off-screen
+     * HardwareRenderer shares it with the UI and made every frame late while it baked. Call off the UI thread.
      */
-    static Scenery bake(String key, Bitmap src, boolean wash, int w, int h, boolean home) {
-        Bitmap out;
-        try {
-            out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        } catch (OutOfMemoryError e) {
-            return null;
-        }
-        Canvas c = new Canvas(out);
-        Paint p = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
-        c.drawColor(0xFF0B1116);
-        if (src != null && wash) {
-            c.drawBitmap(src, null, new RectF(0, 0, w, h), p);
-            c.drawColor(0x8C05080B);
-        } else if (src != null) {
-            float sw0 = src.getWidth(), sh0 = src.getHeight();
-            float scale = Math.max(w / sw0, h / sh0);
-            float sw = w / scale, sh = h / scale;
-            // a backdrop keeps its top (faces are rarely at the very bottom)
-            int sx = Math.round((sw0 - sw) / 2), sy = Math.round((sh0 - sh) * 0.3f);
-            c.drawBitmap(src, new Rect(sx, sy, Math.round(sx + sw), Math.round(sy + sh)), new RectF(0, 0, w, h), p);
-        } else {
-            // slate: Infuse's dark background, a little lighter at the top
-            Paint g = new Paint(Paint.DITHER_FLAG);
-            g.setShader(new LinearGradient(0, 0, 0, h, 0xFF121A20, 0xFF05080A, Shader.TileMode.CLAMP));
-            c.drawRect(0, 0, w, h, g);
-        }
-        scrims(c, w, h, home);
-        Bitmap frost = Bitmap.createBitmap(Backdrop.reduce(out, FW, FH, 3, 3), FW, FH, Bitmap.Config.ARGB_8888);
-        return new Scenery(key, Backdrop.gpu(out), frost);
+    static Scenery home(String key, Bitmap src, int w, int h) {
+        return make(key, w * 2 / 3, h * 2 / 3, painter(src, false, true));
+    }
+
+    private static Painter painter(Bitmap src, boolean wash, boolean home) {
+        return (c, cw, ch) -> {
+            Paint p = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
+            c.drawColor(0xFF0B1116);
+            if (src != null && wash) {
+                c.drawBitmap(src, null, new RectF(0, 0, cw, ch), p);
+                c.drawColor(0x8C05080B);
+            } else if (src != null) {
+                float sw0 = src.getWidth(), sh0 = src.getHeight();
+                float scale = Math.max(cw / sw0, ch / sh0);
+                float sw = cw / scale, sh = ch / scale;
+                // a backdrop keeps its top (faces are rarely at the very bottom)
+                int sx = Math.round((sw0 - sw) / 2), sy = Math.round((sh0 - sh) * 0.3f);
+                c.drawBitmap(src, new Rect(sx, sy, Math.round(sx + sw), Math.round(sy + sh)), new RectF(0, 0, cw, ch), p);
+            } else {
+                // slate: Infuse's dark background, a little lighter at the top
+                Paint g = new Paint(Paint.DITHER_FLAG);
+                g.setShader(new LinearGradient(0, 0, 0, ch, 0xFF121A20, 0xFF05080A, Shader.TileMode.CLAMP));
+                c.drawRect(0, 0, cw, ch, g);
+            }
+            scrims(c, cw, ch, home);
+        };
     }
 
     /**
      * No picture to show (a channel, an app, a film without backdrop): a flat light of its colour, never a blurred
      * copy of its logo or poster (that reads as a smear). The colour glows from the top right, where a backdrop's
-     * subject would be, and fades into slate. Call off the UI thread.
+     * subject would be, and fades into slate. For the home screen (2/3 size, like `home`). Call off the UI thread.
      */
-    static Scenery tinted(String key, int color, int w, int h, boolean home) {
+    static Scenery tinted(String key, int color, int w, int h) {
+        float[] hsv = new float[3];
+        android.graphics.Color.colorToHSV(color, hsv);
+        hsv[1] = Math.min(0.75f, Math.max(hsv[1], hsv[1] > 0.08f ? 0.45f : hsv[1]));   // greys stay grey
+        hsv[2] = Math.min(0.62f, Math.max(0.36f, hsv[2]));
+        int glow = android.graphics.Color.HSVToColor(hsv) & 0xFFFFFF;
+        return make(key, w * 2 / 3, h * 2 / 3, (c, cw, ch) -> {
+            Paint g = new Paint(Paint.DITHER_FLAG);
+            g.setShader(new LinearGradient(0, 0, 0, ch, 0xFF121A20, 0xFF05080A, Shader.TileMode.CLAMP));
+            c.drawRect(0, 0, cw, ch, g);
+            g.setShader(new android.graphics.RadialGradient(cw * 0.80f, ch * 0.10f, cw * 0.85f,
+                    new int[]{0xF0000000 | glow, 0x80000000 | glow, glow}, new float[]{0, 0.45f, 1},
+                    Shader.TileMode.CLAMP));
+            c.drawRect(0, 0, cw, ch, g);
+            scrims(c, cw, ch, true);
+        });
+    }
+
+    /** Paints a picture at any size: once at the picture's size, once small for the frost. */
+    private interface Painter { void paint(Canvas c, int w, int h); }
+
+    private static Scenery make(String key, int w, int h, Painter painter) {
         Bitmap out;
         try {
             out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         } catch (OutOfMemoryError e) {
             return null;
         }
-        Canvas c = new Canvas(out);
-        Paint g = new Paint(Paint.DITHER_FLAG);
-        g.setShader(new LinearGradient(0, 0, 0, h, 0xFF121A20, 0xFF05080A, Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, h, g);
-        float[] hsv = new float[3];
-        android.graphics.Color.colorToHSV(color, hsv);
-        hsv[1] = Math.min(0.75f, Math.max(hsv[1], hsv[1] > 0.08f ? 0.45f : hsv[1]));   // greys stay grey
-        hsv[2] = Math.min(0.62f, Math.max(0.36f, hsv[2]));
-        int glow = android.graphics.Color.HSVToColor(hsv) & 0xFFFFFF;
-        g.setShader(new android.graphics.RadialGradient(w * 0.80f, h * 0.10f, w * 0.85f,
-                new int[]{0xF0000000 | glow, 0x80000000 | glow, 0x00000000 | glow}, new float[]{0, 0.45f, 1},
-                Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, h, g);
-        scrims(c, w, h, home);
-        Bitmap frost = Bitmap.createBitmap(Backdrop.reduce(out, FW, FH, 3, 3), FW, FH, Bitmap.Config.ARGB_8888);
+        painter.paint(new Canvas(out), w, h);
+        out.setHasAlpha(false);   // opaque: the GPU draws it without blending
+        // the frost the bar's glass shows: the same painting at 2 × 192×108, then blurred down
+        Bitmap small = Bitmap.createBitmap(FW * 2, FH * 2, Bitmap.Config.ARGB_8888);
+        painter.paint(new Canvas(small), FW * 2, FH * 2);
+        Bitmap frost = Bitmap.createBitmap(Backdrop.reduce(small, FW, FH, 3, 3), FW, FH, Bitmap.Config.ARGB_8888);
+        small.recycle();
+        // HARDWARE: uploaded here, by the uploader's own thread — the frame that first shows it has nothing to upload
         return new Scenery(key, Backdrop.gpu(out), frost);
     }
 

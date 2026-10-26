@@ -85,6 +85,10 @@ public class HomeActivity extends Activity {
                 searchHidden = false;
                 if (resumed) home.resume();
             }
+
+            @Override public void watchingChanged() {
+                home.syncWatching();   // under the page: rebuilt now, nothing moves on screen
+            }
         });
         root.addView(detail, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -106,7 +110,10 @@ public class HomeActivity extends Activity {
             recreate();   // a new language or city: draw everything again
             return;
         }
-        if (detailOpen()) detail.resume();      // back from the player: the page shows where it was left
+        if (detailOpen()) {                     // back from the player: the page shows where it was left
+            detail.resume();
+            if (home != null) home.syncWatching();   // and "En cours" is rebuilt under it, not when it closes
+        }
         else if (home != null) home.resume();
     }
 

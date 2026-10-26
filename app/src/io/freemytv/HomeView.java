@@ -123,6 +123,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private boolean resumed, framePosted;
     private long lastFrame;
     private int prefsVersion = Prefs.version;
+    private int playSeen = -1;              // Prefs.playVersion the shelves were built with
     private String dataKey = "";
     private EditText field;                 // the activity's search box, laid over the pill
     private boolean searchOpen;
@@ -320,6 +321,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             prefsVersion = Prefs.version;
             rebuild();
         }
+        syncWatching();
         requestFrame();
         main.removeCallbacks(clockTick);
         main.postDelayed(clockTick, 20_000);
@@ -395,6 +397,29 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         invalidate();
     }
 
+    /**
+     * A position was saved or forgotten (the player, "Retirer de « En cours »"): the shelves are built again, the
+     * focus staying on the same shelf and as near as it can to the same card. Done while the page still covers the
+     * home screen, so nothing jumps when it closes.
+     */
+    void syncWatching() {
+        if (playSeen == Prefs.playVersion || searchOpen) return;
+        String at = rowIndex < rows.size() ? rows.get(rowIndex).title : "";
+        int col = colIndex;
+        AppLog.w("positions changed: shelves rebuilt" + (isShown() ? "" : " under the page"));
+        rebuild();
+        if (rows.isEmpty() || zone != Z_ROW) return;
+        Row row = rows.get(rowIndex);
+        if (row.title.equals(at) && col >= 0) row.col = Math.max(0, Math.min(col, row.items.size() - 1));
+        colIndex = Math.max(0, row.col);
+        ensureWindow(row);
+        row.slide = row.slideTo;
+        offsetTo = row.y;
+        clampOffset();
+        offset = offsetTo;
+        invalidate();
+    }
+
     // MARK: - The account, as shelves
 
     @Override public void onIptv() {
@@ -413,6 +438,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void rebuild() {
         dataKey = key();
+        playSeen = Prefs.playVersion;
         progress.clear();
         progress.putAll(Prefs.progressAll());
         String keep = rowIndex < rows.size() ? rows.get(rowIndex).title : null;
@@ -459,6 +485,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         for (Iptv.Item i : Prefs.resume("vod")) watching.items.add(resumeTile(i));
         for (Iptv.Item i : Prefs.resume("series")) watching.items.add(resumeTile(i));
         if (!watching.items.isEmpty()) rows.add(watching);
+        StringBuilder names = new StringBuilder();
+        for (Tile t : watching.items) names.append(names.length() == 0 ? "" : " | ").append(t.title);
+        AppLog.w("En cours (" + watching.items.size() + "): " + names);
 
         // Where Infuse shows its Favorites, the TV's apps: Netflix, SmartTube, Twitch, Prime, M6+, Steam Link…
         Row apps = new Row();

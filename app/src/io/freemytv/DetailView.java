@@ -47,9 +47,9 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
     private static final int MARGIN = 96;
     private static final int BTN_W = 440, BTN_H = 68, ICON_D = 64, ICON_GAP = 20, COL_GAP = 64;
     private static final int CARD_W = 448, CARD_H = 252, CARD_GAP = 36, CARD_R = 22, TAB_H = 52;
-    private static final int A_RESTART = 0, A_TRAILER = 1;
-    private static final String[] ACTION_ICON = {"restart", "trailer"};
-    private static final String[] ACTION_NAME = {"Recommencer", "Bande-annonce"};
+    private static final int A_RESTART = 0, A_TRAILER = 1, A_FORGET = 2;
+    private static final String[] ACTION_ICON = {"restart", "trailer", "remove"};
+    private static final String[] ACTION_NAME = {"Recommencer", "Bande-annonce", "Retirer de « En cours »"};
     private static final int Z_PRIMARY = 0, Z_ICONS = 1, Z_SEASONS = 2, Z_EPISODES = 3;
     private static final int BACK = 0, PHOTO = 1, DIM = 2, HERO = 3, SHELF = 4;
     private static final int ACCENT = 0xFFFF8A00;   // the progress, as on the home screen's cards
@@ -65,6 +65,9 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         void covered();
         /** The page is leaving (as a picture of itself): the home screen is shown and alive again. */
         void uncovered();
+
+        /** A film or a series was taken out of "En cours". */
+        void watchingChanged();
     }
 
     private final Host host;
@@ -112,7 +115,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
 
     // animation (all eased toward their target in doFrame)
     private float primaryOn, scroll, scrollTo, slide, slideTo, enter, infoA = 1, infoTo = 1;
-    private float[] actionOn = new float[2], tabOn = new float[0], epOn = new float[0];
+    private float[] actionOn = new float[3], tabOn = new float[0], epOn = new float[0];
     private boolean framePosted;
     private long lastFrame;
 
@@ -479,6 +482,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         actions.clear();
         if (playPos > 0) actions.add(A_RESTART);
         if (detail != null && !detail.trailer.isEmpty()) actions.add(A_TRAILER);
+        if (watching()) actions.add(A_FORGET);   // last, like Apple's "Supprimer de À suivre"
         if (action >= actions.size()) action = Math.max(0, actions.size() - 1);
         if (zone == Z_ICONS && actions.isEmpty()) zone = Z_PRIMARY;
         buildMeta();
@@ -756,6 +760,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
             case Z_ICONS:
                 if (action >= actions.size()) return;
                 if (actions.get(action) == A_RESTART) play(playUrl, true, target);
+                else if (actions.get(action) == A_FORGET) forget();
                 else trailer();
                 break;
             case Z_SEASONS:
@@ -784,6 +789,33 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         it.putExtra(Player.EXTRA_LOGO, logo == null ? "" : logo);
         it.putExtra(Player.EXTRA_FROM_START, fromStart);
         getContext().startActivity(it);
+    }
+
+    /** Whether this film, or an episode of this series, is left halfway: it shows in "En cours". */
+    private boolean watching() {
+        if (!req.series) return playPos > 0;
+        if (detail != null) for (Iptv.Episode e : detail.episodes) if (progress.containsKey(e.url)) return true;
+        return Prefs.resumingSeries(req.seriesId);
+    }
+
+    /**
+     * Out of "En cours": the saved position is dropped (every episode left halfway, for a series). The page says so
+     * at once — Reprendre becomes Lecture, the time left and the progress go — and the focus goes back to Lecture;
+     * the home screen rebuilds its shelf while it is still under the page.
+     */
+    private void forget() {
+        if (req.series) {
+            List<String> urls = new ArrayList<>();
+            if (detail != null) for (Iptv.Episode e : detail.episodes) urls.add(e.url);
+            Prefs.forgetSeries(req.seriesId, urls);
+        } else {
+            Prefs.forget(playUrl);
+        }
+        zone = Z_PRIMARY;
+        action = 0;
+        refresh();
+        kick();
+        host.watchingChanged();
     }
 
     /** The trailer, in the TV's YouTube. */

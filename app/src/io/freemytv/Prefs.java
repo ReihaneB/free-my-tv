@@ -43,6 +43,7 @@ final class Prefs {
      */
     static void saveProgress(String url, String name, String logo, long position, long duration, String series) {
         if (url == null || url.isEmpty()) return;
+        playVersion++;
         if (duration > 0 && position > duration * 0.96) seen().edit().putLong(key(url), System.currentTimeMillis()).apply();
         if (duration <= 0 || position < 45_000 || position > duration * 0.96) {
             play().edit().remove(key(url)).apply();
@@ -50,6 +51,38 @@ final class Prefs {
         }
         play().edit().putString(key(url), name + "\t" + position + "\t" + duration + "\t" + url + "\t"
                 + (logo == null ? "" : logo) + "\t" + (series == null ? "" : series)).apply();
+    }
+
+    /** Bumped whenever a position is saved or forgotten: the home screen's "En cours" knows it must be rebuilt. */
+    static volatile int playVersion;
+
+    /** Out of "En cours": the film's saved position is dropped (it starts from the beginning next time). */
+    static void forget(String url) {
+        if (url == null || url.isEmpty()) return;
+        play().edit().remove(key(url)).apply();
+        playVersion++;
+    }
+
+    /** Out of "En cours": every episode of the series left halfway (saved with its series id, or one of `urls`). */
+    static void forgetSeries(String seriesId, java.util.Collection<String> urls) {
+        SharedPreferences.Editor ed = play().edit();
+        for (java.util.Map.Entry<String, ?> e : new ArrayList<>(play().getAll().entrySet())) {
+            String[] f = String.valueOf(e.getValue()).split("\t", -1);
+            boolean mine = f.length > 5 && seriesId != null && !seriesId.isEmpty() && seriesId.equals(f[5]);
+            if (mine || (f.length > 3 && urls != null && urls.contains(f[3]))) ed.remove(e.getKey());
+        }
+        ed.apply();
+        playVersion++;
+    }
+
+    /** Whether an episode of this series is left halfway (it shows in "En cours"). */
+    static boolean resumingSeries(String seriesId) {
+        if (seriesId == null || seriesId.isEmpty()) return false;
+        for (Object v : play().getAll().values()) {
+            String[] f = String.valueOf(v).split("\t", -1);
+            if (f.length > 5 && seriesId.equals(f[5])) return true;
+        }
+        return false;
     }
 
     private static SharedPreferences seen() {

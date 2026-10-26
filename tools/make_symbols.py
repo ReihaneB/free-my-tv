@@ -21,6 +21,7 @@ MAP = {
     "subtitles": ("subtitles", 0), "audio": ("graphic_eq", 0), "aspect": ("aspect_ratio", 0),
     "pause": ("pause", 1), "replay_10": ("replay_10", 0), "forward_10": ("forward_10", 0),
     "restart": ("restart_alt", 0), "trailer": ("smart_display", 0), "star": ("star", 1),
+    "memory": ("memory", 0), "storage": ("hard_drive", 0),
 }
 
 

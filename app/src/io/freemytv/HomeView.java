@@ -34,7 +34,8 @@ import java.util.Set;
  * the shelves sit below — posters for films and series, 16:9 cards for what is being watched, the channels and the
  * apps. The focused shelf always sits at the same height; the ones above it fade away as it rises.
  *
- * <p>The Liquid Glass bar is kept: search, the libraries (Accueil, Films, Séries, Direct, Apps), three capsules.
+ * <p>The Liquid Glass bar is kept: search, the libraries (Accueil, Films, Séries, Direct, Apps), then on the right
+ * the TV's state — memory in use, storage in use, the weather — and the catalogue's refresh capsule.
  * Everything is drawn on the canvas from the account cached on disk, so the screen opens with no network; the
  * pictures and the facts of the focused item come from the panel when the focus rests.
  */
@@ -83,7 +84,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private static final int TAB_COUNT = LIBRARIES.length;
 
     // Chrome stops, in the order they are laid out.
-    private static final int CH_SEARCH = 0, CH_APPS = 1, CH_SYNC = 2, CH_GEAR = 3;
+    private static final int CH_SEARCH = 0, CH_SYNC = 1;
     private static final int CH_TAB = 100;   // + index of the library
 
     // MARK: - Geometry (designed at 1920×1080, scaled by k)
@@ -127,9 +128,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private boolean searchOpen;
     private String query = "";
 
-    private final RectF[] chromeRects = new RectF[4];
+    private final RectF[] chromeRects = new RectF[2];
     private final RectF[] tabRects = new RectF[TAB_COUNT];
-    private final int[] chromeOrder = new int[1 + TAB_COUNT + 3];
+    private final int[] chromeOrder = new int[1 + TAB_COUNT + 1];
     private int chromeCount;
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -137,6 +138,34 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         @Override public void run() {
             invalidate();
             if (resumed) main.postDelayed(this, 20_000);
+        }
+    };
+
+    // MARK: - The TV's state, on the right of the bar: memory in use, storage in use, the weather
+
+    private static final long STATUS_EVERY = 5000;
+    private static final float STAT_PT = 24, STAT_GAP = 30;
+    /** Read below the UI thread (a binder call to the system and a statfs): the frame never waits for them. */
+    private final java.util.concurrent.ThreadPoolExecutor statusLane = lane("home-status", 1);
+    private int ramPct = -1, diskPct = -1;
+    private String statTemp = "", statSky = "";
+    private final String[] statSymbol = new String[3], statValue = new String[3];
+    private final float[] statIconX = new float[3], statTextX = new float[3];
+    private final boolean[] statWarn = new boolean[3];
+    private int statCount;
+    private Paint statInk;
+    private final HomeData.Listener weatherChanged = this::readStatus;
+    private final Runnable statusTick = new Runnable() {
+        @Override public void run() {
+            if (!resumed) return;
+            long wait = busyUntil - android.os.SystemClock.uptimeMillis();
+            if (wait > 0) {   // the cards are moving: read once they rest
+                main.postDelayed(this, wait + 300);
+                return;
+            }
+            readStatus();
+            HomeData.get(getContext()).refreshIfStale();   // the weather every 30 min (it keeps its own clock)
+            main.postDelayed(this, STATUS_EVERY);
         }
     };
 
@@ -279,6 +308,8 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         spotStoryP = Ui.text(Ui.regular, 25, 0xD1FFFFFF);
         spotBadge = Ui.text(Ui.semibold, 18, 0xE0FFFFFF);
         spotDot = Ui.text(Ui.semibold, 24, 0x73FFFFFF);
+        statInk = Ui.numbers(Ui.medium, 20, 0xEBFFFFFF);
+        statInk.setTextAlign(Paint.Align.LEFT);
         for (Paint p : new Paint[]{spotTitle, spotMeta, spotStoryP, spotBadge, spotDot}) p.setTextAlign(Paint.Align.LEFT);
     }
 
@@ -292,6 +323,12 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         requestFrame();
         main.removeCallbacks(clockTick);
         main.postDelayed(clockTick, 20_000);
+        HomeData data = HomeData.get(getContext());
+        data.addListener(weatherChanged);
+        data.refreshIfStale();
+        readStatus();
+        main.removeCallbacks(statusTick);
+        main.postDelayed(statusTick, STATUS_EVERY);
         Perf.readSkip(getContext());
         main.removeCallbacks(autoDrive);
         if (Perf.off(Perf.AUTO)) main.postDelayed(autoDrive, 4000);
@@ -312,7 +349,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     void pause() {
         resumed = false;
         Iptv.get(getContext()).removeListener(this);
+        HomeData.get(getContext()).removeListener(weatherChanged);
         main.removeCallbacks(clockTick);
+        main.removeCallbacks(statusTick);
         main.removeCallbacks(autoDrive);
         main.removeCallbacks(sceneTick);
     }
@@ -322,6 +361,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         infoLane.shutdownNow();
         watchPool.shutdownNow();
         bakeLane.shutdownNow();
+        statusLane.shutdownNow();
     }
 
     /** Home pressed on the home screen: back to the top of the home tab. */
@@ -781,12 +821,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         chromeRects[CH_SEARCH].set(inL, top, inL + PILL_W * k, top + hh);
         chromeOrder[chromeCount++] = CH_SEARCH;
 
-        float bw = BUTTON_W * k, gb = 4 * k;
-        chromeRects[CH_GEAR].set(inR - bw, top, inR, top + hh);
-        chromeRects[CH_SYNC].set(inR - 2 * bw - gb, top, inR - bw - gb, top + hh);
-        chromeRects[CH_APPS].set(inR - 3 * bw - 2 * gb, top, inR - 2 * bw - 2 * gb, top + hh);
+        float bw = BUTTON_W * k;
+        chromeRects[CH_SYNC].set(inR - bw, top, inR, top + hh);   // concentric with the plate's end, like the search
         sepA = chromeRects[CH_SEARCH].right + 22 * k;
-        sepB = chromeRects[CH_APPS].left - 22 * k;
+        layoutStatus();
 
         tabInk.setTextSize(21 * k);
         float gt = 10 * k, total = -gt;
@@ -799,10 +837,78 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             tx += twi + gt;
             chromeOrder[chromeCount++] = CH_TAB + i;
         }
-        chromeOrder[chromeCount++] = CH_APPS;
         chromeOrder[chromeCount++] = CH_SYNC;
-        chromeOrder[chromeCount++] = CH_GEAR;
         chromeIndex = Math.max(0, Math.min(chromeIndex, chromeCount - 1));
+    }
+
+    /**
+     * The state sits between the libraries and the refresh capsule, set from the right: memory, storage, weather.
+     * Each is a quiet symbol and a number in fixed-width digits; past 90 % a figure turns orange. Not a control: the
+     * focus goes from the last library straight to the refresh capsule.
+     */
+    private void layoutStatus() {
+        statCount = 0;
+        addStat("memory", ramPct < 0 ? "" : ramPct + "\u202F%", ramPct >= 90);
+        addStat("storage", diskPct < 0 ? "" : diskPct + "\u202F%", diskPct >= 90);
+        addStat(statSky, statTemp, false);
+        float x = chromeRects[CH_SYNC].left - 26 * k, pt = STAT_PT * k;
+        for (int i = statCount - 1; i >= 0; i--) {
+            float tw = statInk.measureText(statValue[i]);
+            float iw = Symbols.width(getContext(), statSymbol[i], pt);
+            statTextX[i] = x - tw;
+            statIconX[i] = x - tw - 9 * k - iw / 2;
+            x = x - tw - 9 * k - iw - STAT_GAP * k;
+        }
+        sepB = (statCount == 0 ? chromeRects[CH_SYNC].left : x + STAT_GAP * k) - 22 * k;
+    }
+
+    private void addStat(String symbol, String value, boolean warn) {
+        if (symbol == null || symbol.isEmpty() || value == null || value.isEmpty()) return;
+        statSymbol[statCount] = symbol;
+        statValue[statCount] = value;
+        statWarn[statCount] = warn;
+        statCount++;
+    }
+
+    /** Memory and storage in use (rounded %), and the weather already fetched; repaints only when a figure moves. */
+    private void readStatus() {
+        final android.content.Context app = getContext().getApplicationContext();
+        try {
+            statusLane.execute(() -> {
+                int ram = -1, disk = -1;
+                try {
+                    android.app.ActivityManager am =
+                            (android.app.ActivityManager) app.getSystemService(Context.ACTIVITY_SERVICE);
+                    android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+                    am.getMemoryInfo(mi);
+                    if (mi.totalMem > 0) ram = (int) Math.round(100.0 * (mi.totalMem - mi.availMem) / mi.totalMem);
+                } catch (RuntimeException ignored) {
+                }
+                try {
+                    android.os.StatFs fs = new android.os.StatFs(android.os.Environment.getDataDirectory().getPath());
+                    long total = fs.getTotalBytes(), free = fs.getAvailableBytes();
+                    if (total > 0) disk = (int) Math.round(100.0 * (total - free) / total);
+                } catch (RuntimeException ignored) {
+                }
+                final int r = ram, d = disk;
+                main.post(() -> applyStatus(r, d));
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+        }
+    }
+
+    private void applyStatus(int ram, int disk) {
+        HomeData.Weather wx = HomeData.get(getContext()).weather;
+        boolean has = Prefs.weather() && !Double.isNaN(wx.temp) && wx.code >= 0;
+        String temp = has ? HomeData.degrees(wx.temp) : "";
+        String sky = has ? Symbols.weather(wx.code, wx.isDay) : "";
+        if (ram == ramPct && disk == diskPct && temp.equals(statTemp) && sky.equals(statSky)) return;
+        ramPct = ram;
+        diskPct = disk;
+        statTemp = temp;
+        statSky = sky;
+        if (w > 0) layoutStatus();
+        invalidate();
     }
 
     private RectF chromeRect(int id) {
@@ -1591,9 +1697,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             tabInk.setColor(blend(i == tab ? INK : 0xB8FFFFFF, INK, on2));
             c.drawText(LIBRARIES[i], box.centerX(), box.centerY() + Ui.halfCap(tabInk), tabInk);
         }
-        icon(c, CH_APPS, "apps");
+        float pt = STAT_PT * k, sy = chromeRects[CH_SYNC].centerY(), base = sy + Ui.halfCap(statInk);
+        for (int i = 0; i < statCount; i++) {
+            Symbols.draw(getContext(), c, statSymbol[i], statIconX[i], sy, pt, DIM);
+            statInk.setColor(statWarn[i] ? ACCENT : 0xEBFFFFFF);
+            c.drawText(statValue[i], statTextX[i], base, statInk);
+        }
         icon(c, CH_SYNC, "sync");
-        icon(c, CH_GEAR, "settings");
     }
 
     private void icon(Canvas c, int id, String symbol) {
@@ -2002,27 +2112,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             case CH_SEARCH:
                 openSearch();
                 break;
-            case CH_APPS:
-                selectTab(4);
-                break;
             case CH_SYNC:
                 Iptv.get(getContext()).refresh();
                 showToast("Mise à jour du catalogue…");
                 break;
-            case CH_GEAR:
-                openSettings();
-                break;
             default:
                 break;
         }
-    }
-
-    private void openSettings() {
-        android.app.Activity a = activity();
-        if (a == null) return;
-        RectF box = chromeRects[CH_GEAR];
-        HomeApps.open(a, HomeApps.settings(), this, Math.round(box.left), Math.round(box.top),
-                Math.round(box.width()), Math.round(box.height()));
     }
 
     private void open(Tile t, Row row) {

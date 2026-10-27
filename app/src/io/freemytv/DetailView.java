@@ -364,6 +364,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
             Iptv.Detail d = null;
             if (r.series) {
+                Follow.clear(ctx, r.seriesId);   // its page is opening: what was new has been seen
                 if (!r.seriesId.isEmpty()) d = Iptv.get(ctx).series(r.seriesId);
             } else {
                 Matcher m = MOVIE_ID.matcher(r.url);

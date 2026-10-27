@@ -517,6 +517,14 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         for (Iptv.Item i : Prefs.list()) mine.items.add(tile(i, i.url == null || i.url.isEmpty()));
         if (!mine.items.isEmpty()) rows.add(mine);
 
+        // New episodes of the series followed (Ma liste, or left halfway): flagged when the catalogue moves on
+        Row fresh = new Row();
+        fresh.title = "Nouveaux épisodes";
+        fresh.kind = R_POSTER;
+        for (Iptv.Item i : newestEpisodes(iptv)) fresh.items.add(tile(i, true));
+        if (!fresh.items.isEmpty()) rows.add(fresh);
+        Follow.check(getContext(), () -> main.post(this::syncList));   // at most every six hours
+
         // Where Infuse shows its Favorites, the TV's apps: Netflix, SmartTube, Twitch, Prime, M6+, Steam Link…
         Row apps = new Row();
         apps.title = "Applications";
@@ -532,6 +540,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         else shelf("Chaînes", frenchChannels(iptv, 24), false, 3, R_CARD);
         shelf("Les mieux notés", iptv.best("vod", 24), false, 1, R_POSTER);
         shelf("Séries", firstOf(iptv.series(), 24), true, 2, R_POSTER);
+        suggestions(iptv);
 
         Row inputs = new Row();
         inputs.title = "Entrées";
@@ -728,6 +737,79 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
         if (!row.items.isEmpty()) rows.add(row);
     }
+
+    /** The series followed that have episodes the panel added since the last look, newest first. */
+    private List<Iptv.Item> newestEpisodes(Iptv iptv) {
+        List<Iptv.Item> out = new ArrayList<>();
+        for (Iptv.Item i : iptv.series()) {
+            if (!Follow.series(getContext()).contains(i.id)) continue;
+            if (Follow.newEpisodes(getContext(), i.id) <= 0) continue;
+            out.add(i);
+            if (out.size() >= 24) break;
+        }
+        return out;
+    }
+
+    /**
+     * « Parce que tu as regardé X » — the same category as the last thing watched, best rated first — and the saga it
+     * belongs to, when three titles or more share its name (« John Wick », « Le Seigneur des anneaux »…). Everything
+     * comes from the account: nothing outside the subscription is ever proposed.
+     */
+    private void suggestions(Iptv iptv) {
+        String[] lw = Prefs.lastWatched();
+        if (lw == null) return;
+        String name = lw[0], url = lw[1], seriesId = lw[2];
+        int cut = name == null ? -1 : name.indexOf(" · S");
+        if (cut > 0) name = name.substring(0, cut);   // an episode is saved as « Série · S1, É4 »
+        boolean series = seriesId != null && !seriesId.isEmpty();   // an episode: its series id is set
+        List<Iptv.Item> all = series ? iptv.series() : iptv.movies();
+        Iptv.Item last = null;
+        for (Iptv.Item it : all) {
+            if (series ? seriesId.equals(it.id) : url.equals(it.url)) {
+                last = it;
+                break;
+            }
+        }
+        if (last != null && !last.group.isEmpty()) {
+            List<Iptv.Item> same = new ArrayList<>();
+            for (Iptv.Item it : all) {
+                if (it == last || !last.group.equals(it.group)) continue;
+                if (it.name.startsWith("─") || it.name.contains("✧")) continue;
+                same.add(it);
+                if (same.size() >= 40) break;
+            }
+            if (same.size() >= 4) {
+                same.sort((a, b) -> Float.compare(b.rating, a.rating));
+                shelf("Parce que tu as regardé " + pretty(name), same, series, -1, R_POSTER);
+            }
+        }
+        String stem = sagaTitle(name);
+        if (!series && stem.length() >= 4) {   // a saga is a film's: same name, numbered chapters
+            String key = norm(stem);
+            List<Iptv.Item> saga = new ArrayList<>();
+            int count = 0;
+            for (Iptv.Item it : all) {
+                if (!norm(sagaTitle(it.name)).equals(key)) continue;
+                count++;
+                if (saga.size() < 24) saga.add(it);
+            }
+            if (count >= 3) shelf("La saga " + stem, saga, series, -1, R_POSTER);
+        }
+    }
+
+    /** « John Wick : Chapitre 4 » → « John Wick » : the title without its episode number, for the sagas. */
+    private static String sagaTitle(String title) {
+        String t = pretty(title);
+        for (int i = 0; i < 3; i++) {
+            java.util.regex.Matcher m = SAGA_TAIL.matcher(t);
+            if (!m.find() || m.start() < 3) break;
+            t = t.substring(0, m.start()).trim();
+        }
+        return t;
+    }
+
+    private static final java.util.regex.Pattern SAGA_TAIL = java.util.regex.Pattern.compile(
+            "(?i)\\s*[-–:·,.]?\\s*(chapitre\\s*)?(\\d{1,2}|iv|vi{0,3}|ix|xi{0,3}|x|v|iii|ii|i|partie\\s*\\d)\\s*$");
 
     private void addApps(Row row) {
         for (HomeApps.Item it : HomeApps.shelf(getContext(), false)) row.items.add(appTile(it));

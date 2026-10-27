@@ -44,6 +44,7 @@ final class Prefs {
     static void saveProgress(String url, String name, String logo, long position, long duration, String series) {
         if (url == null || url.isEmpty()) return;
         playVersion++;
+        if (position >= 45_000) setLastWatched(name, url, series, logo);   // what the home screen's suggestions follow
         if (duration > 0 && position > duration * 0.96) seen().edit().putLong(key(url), System.currentTimeMillis()).apply();
         if (duration <= 0 || position < 45_000 || position > duration * 0.96) {
             play().edit().remove(key(url)).apply();
@@ -173,6 +174,24 @@ final class Prefs {
     // MARK: - Ma liste (films et séries mis de côté)
 
     private static volatile int listVersion;
+
+    private static SharedPreferences lastw() {
+        return app.getSharedPreferences("lastwatched", Context.MODE_PRIVATE);
+    }
+
+    /** The last film or episode actually watched: name, stream, series id, poster. */
+    static void setLastWatched(String name, String url, String seriesId, String logo) {
+        lastw().edit().putString("last", (name == null ? "" : name) + "\t" + (url == null ? "" : url) + "\t"
+                + (seriesId == null ? "" : seriesId) + "\t" + (logo == null ? "" : logo)).apply();
+    }
+
+    /** {name, stream, series id, poster}, or null. */
+    static String[] lastWatched() {
+        String v = lastw().getString("last", "");
+        if (v.isEmpty()) return null;
+        String[] f = v.split("\t", -1);
+        return f.length >= 3 ? f : null;
+    }
 
     /** Bumped on every change: the home screen's « Ma liste » knows it must be rebuilt. */
     static int listVersion() { return listVersion; }

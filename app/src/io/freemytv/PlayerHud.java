@@ -37,7 +37,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private static final int RED = 0xFFFF453A;
 
     private static final int CONTROLS = 0, BAR = 1, SUBS = 2, MENU = 3, GLYPH = 4, SPINNER = 5, ERROR = 6, IMAGES = 7,
-            LIST = 8, DIGITS = 9;
+            LIST = 8, DIGITS = 9, NEXT = 10;
     /** In `buttons`: "Depuis le début" (a channel with a replay), the others are the popovers' menus. */
     private static final int START_OVER = -1;
     private static final int[] VOD_BUTTONS = {MENU_SUBS, MENU_AUDIO, MENU_FORMAT};
@@ -65,7 +65,8 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     }
 
     private final Player host;
-    private final Layer controls, bar, subs, images, menuView, glyphView, spinner, errorView, listView, digitsView;
+    private final Layer controls, bar, subs, images, menuView, glyphView, spinner, errorView, listView, digitsView,
+            nextView;
     private final Layer[] layers, fading;
     private float k = 1, w, h;
 
@@ -142,6 +143,13 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private Liquid.Kit kitButton, kitButtonOn, kitRow, kitBubble, kitBadge, kitGlyph, kitDigits, kitListRow;
     private final Runnable liveBarTick = this::barTick;
 
+    // the end of an episode: what comes next, counted down, and the button that skips the credits
+    private String nextTitle = "", nextMeta = "", nextIn = "";
+    private boolean nextShown;
+    private Bitmap nextFace, nextShadow;
+    private final RectF nextPanel = new RectF();
+    private Paint nextP, nextMetaP, nextLabelP;
+
     private final Paint glass = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Paint scrim = new Paint(Paint.DITHER_FLAG);
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -173,13 +181,68 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         errorView = new Layer(c, ERROR);
         listView = new Layer(c, LIST);
         digitsView = new Layer(c, DIGITS);
-        layers = new Layer[]{images, controls, bar, subs, menuView, glyphView, spinner, errorView, listView, digitsView};
+        nextView = new Layer(c, NEXT);
+        layers = new Layer[]{images, controls, bar, subs, menuView, glyphView, spinner, errorView, listView, digitsView,
+                nextView};
         fading = new Layer[]{controls, bar};
         for (Layer l : layers) addView(l);
         Epg.get(c).addListener(guideChanged);
     }
 
     // MARK: - Live TV
+
+    /**
+     * The end of an episode: the next one, its title and season/episode line, counted down. It shows over the picture
+     * whether or not the controls are up, and goes away with the stream that follows it.
+     */
+    void next(String title, String meta) {
+        nextTitle = title == null ? "" : title;
+        nextMeta = meta == null ? "" : meta;
+        nextIn = "";
+        nextShown = true;
+        reveal(nextView);
+        nextView.invalidate();
+        kick();
+    }
+
+    /** The seconds left before the next episode starts by itself. */
+    void nextCountdown(int seconds) {
+        String in = seconds <= 0 ? "maintenant" : "dans " + seconds + " s";
+        if (!in.equals(nextIn)) {
+            nextIn = in;
+            nextView.invalidate();
+        }
+    }
+
+    void clearNext() {
+        nextShown = false;
+        nextIn = "";
+        nextView.setVisibility(INVISIBLE);
+    }
+
+    /** A glass card at the right, above the bar: « À suivre », the episode, and the button that skips the credits. */
+    private void paintNext(Canvas c) {
+        if (nextFace == null) return;
+        float pad = 30 * k;
+        box.set(nextPanel.left - pad, nextPanel.top - pad + 14 * k, nextPanel.right + pad, nextPanel.bottom + pad);
+        c.drawBitmap(nextShadow, null, box, glass);
+        c.drawBitmap(nextFace, null, nextPanel, glass);
+        float x = nextPanel.left + pad;
+        nextMetaP.setTextAlign(Paint.Align.LEFT);
+        c.drawText(nextMeta.isEmpty() ? "À SUIVRE" : "À SUIVRE  ·  " + nextMeta, x, nextPanel.top + 44 * k, nextMetaP);
+        float room = nextPanel.width() - 2 * pad;
+        String t = TextUtils.ellipsize(nextTitle, new TextPaint(nextP), room, TextUtils.TruncateAt.END).toString();
+        c.drawText(t, x, nextPanel.top + 100 * k, nextP);
+        nextLabelP.setTextAlign(Paint.Align.LEFT);
+        Symbols.draw(getContext(), c, "skip_next", x + 11 * k, nextPanel.top + 146 * k - Ui.cap(nextLabelP) / 2 + 4 * k,
+                22 * k, 0xFFFF8A00);
+        c.drawText("Passer le générique", x + 30 * k, nextPanel.top + 146 * k, nextLabelP);
+        if (!nextIn.isEmpty()) {
+            nextMetaP.setTextAlign(Paint.Align.RIGHT);
+            c.drawText(nextIn, nextPanel.right - pad, nextPanel.top + 146 * k, nextMetaP);
+            nextMetaP.setTextAlign(Paint.Align.LEFT);
+        }
+    }
 
     private void onGuide() {
         liveUntil = 0;
@@ -391,6 +454,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
             menuView.setVisibility(INVISIBLE);
         }
         errorView.setVisibility(INVISIBLE);
+        clearNext();
         bar.invalidate();
         ellipsize();
         hudTo = 1;
@@ -510,6 +574,11 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
             closeMenu();
             return true;
         }
+        if (nextShown) {   // the next episode stays on screen; Back only puts it away
+            clearNext();
+            host.cancelNext();
+            return true;
+        }
         if (scrubbing) {
             scrubbing = false;
             removeCallbacks(commitRun);
@@ -526,6 +595,12 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     boolean key(int code, KeyEvent e) {
         if (failed && channel == null) return false;   // a channel that fails can still be zapped away from
         int repeat = e.getRepeatCount();
+        // the episode is ending and its successor is on screen: OK skips the credits and plays it now
+        if (nextShown && (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
+                || code == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+            if (repeat == 0) host.playNext();
+            return true;
+        }
         if (menu >= 0 && !menuClosing) {
             switch (code) {
                 case KeyEvent.KEYCODE_DPAD_UP:
@@ -1069,6 +1144,14 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         listPanel.set(Math.round(64 * k), Math.round(60 * k), Math.round(64 * k) + lw, Math.round(60 * k) + lh);
         listVisible = (int) Math.max(3, Math.floor((lh - listHead - 12 * k) / listRowH));
         listPad = Math.round(30 * k);
+        // the end-of-episode card: baked once, only its countdown is ever redrawn
+        float nbw = Math.round(640 * k), nbh = Math.round(190 * k);
+        nextPanel.set(0, 0, nbw, nbh);
+        nextFace = Liquid.face(Liquid.PANEL, (int) nbw, (int) nbh, 26 * k, k);
+        nextShadow = Liquid.shadow((int) nbw, (int) nbh, 26 * k, Math.round(30 * k), 26 * k, 0.45f, 0.5f, -8 * k);
+        nextP = Ui.text(Ui.semibold, 30 * k, 0xFFFFFFFF);
+        nextMetaP = Ui.text(Ui.medium, 21 * k, 0x99FFFFFF);
+        nextLabelP = Ui.text(Ui.semibold, 21 * k, 0xFFFF8A00);
         final int pw = (int) lw, ph = (int) lh;
         final float kk = k;
         Thread t = new Thread(() -> {   // ~3 MB of glass: baked off the UI thread, the list opens without a frame lost
@@ -1108,6 +1191,11 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         place(listView, Math.round(listPanel.left) - listPad, Math.round(listPanel.top) - listPad,
                 Math.round(listPanel.right) + listPad, Math.round(listPanel.bottom) + listPad + Math.round(14 * k));
         place(digitsView, Math.round(W - margin - 300 * k), Math.round(56 * k), Math.round(W - margin), Math.round(220 * k));
+        float nbw = nextPanel.width(), nbh = nextPanel.height();
+        nextPanel.set(W - margin - nbw, barCY - 96 * k - nbh, W - margin, barCY - 96 * k);
+        int npad = Math.round(30 * k);
+        place(nextView, Math.round(nextPanel.left) - npad, Math.round(nextPanel.top) - npad,
+                Math.round(nextPanel.right) + npad, Math.round(nextPanel.bottom) + npad + Math.round(14 * k));
         if (menu >= 0) layoutMenu();
     }
 
@@ -1153,6 +1241,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
             case ERROR: if (failed) paintError(c); break;
             case LIST: if (listOpen) paintList(c); break;
             case DIGITS: paintDigits(c); break;
+            case NEXT: if (nextShown) paintNext(c); break;
             default: break;
         }
     }

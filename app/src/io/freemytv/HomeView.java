@@ -127,6 +127,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private long lastFrame;
     private int prefsVersion = Prefs.version;
     private int playSeen = -1;              // Prefs.playVersion the shelves were built with
+    private int listSeen = -1;              // Prefs.listVersion the shelves were built with
     private String dataKey = "";
     private EditText field;                 // the activity's search box, laid over the pill
     private boolean searchOpen;
@@ -415,6 +416,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
      */
     void syncWatching() {
         if (playSeen == Prefs.playVersion || searchOpen) return;
+        reflow();
+    }
+
+    /** « Ma liste » changed (from a film's or a series' page): the shelves are built again under the page. */
+    void syncList() {
+        if (listSeen == Prefs.listVersion() || searchOpen) return;
+        reflow();
+    }
+
+    private void reflow() {
         String at = rowIndex < rows.size() ? rows.get(rowIndex).title : "";
         int col = colIndex;
         rebuild();
@@ -444,12 +455,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         Iptv i = Iptv.get(getContext());
         return tab + "|" + i.live().size() + "|" + i.movies().size() + "|" + i.series().size()
                 + "|" + i.movieCategories().size() + "|" + i.seriesCategories().size()
-                + "|" + Prefs.version;
+                + "|" + Prefs.version + "|" + Prefs.listVersion();
     }
 
     private void rebuild() {
         dataKey = key();
         playSeen = Prefs.playVersion;
+        listSeen = Prefs.listVersion();
         progress.clear();
         progress.putAll(Prefs.progressAll());
         String keep = rowIndex < rows.size() ? rows.get(rowIndex).title : null;
@@ -497,6 +509,13 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         for (Iptv.Item i : Prefs.resume("vod")) watching.items.add(resumeTile(i));
         for (Iptv.Item i : Prefs.resume("series")) watching.items.add(resumeTile(i));
         if (!watching.items.isEmpty()) rows.add(watching);
+
+        // What was put aside: Netflix's « Ma liste », a poster row right under what is being watched
+        Row mine = new Row();
+        mine.title = "Ma liste";
+        mine.kind = R_POSTER;
+        for (Iptv.Item i : Prefs.list()) mine.items.add(tile(i, i.url == null || i.url.isEmpty()));
+        if (!mine.items.isEmpty()) rows.add(mine);
 
         // Where Infuse shows its Favorites, the TV's apps: Netflix, SmartTube, Twitch, Prime, M6+, Steam Link…
         Row apps = new Row();

@@ -165,6 +165,10 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         }
     }
 
+    private Iptv.Episode nextEpisode;   // the episode after this one, once the panel has told
+    private boolean nextAsked;
+    private final Runnable episodeTick = this::episodeTickRun;
+
     // MARK: - Live TV: zapping, the previous channel, another stream when one fails, a programme from its start
 
     Channels.Channel channel() { return channel; }
@@ -406,6 +410,10 @@ public final class Player extends Activity implements androidx.media3.common.Pla
                 }
             }
         } else if (state == androidx.media3.common.Player.STATE_ENDED) {
+            if (nextEpisode != null) {   // an episode of a series: the next one goes on by itself
+                playNext();
+                return;
+            }
             if (endedOn()) return;
             remember();
             finish();
@@ -421,6 +429,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         long duration = player.getDuration();
         boolean live = isLive() || player.isCurrentMediaItemLive() || duration == C.TIME_UNSET || duration <= 0;
         buildRows();
+        startEpisodeTicker(live);
         String meta = live ? "" : kind();   // a channel: the EN DIRECT badge says it
         if (!live) {
             String length = length(duration);
@@ -430,6 +439,98 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     }
 
     @Override public void onRenderedFirstFrame() { hud.buffering(false); }
+
+    // MARK: - The next episode
+
+    /** Every second or so: near the end, the next episode is asked for, counted down, then played. */
+    private void startEpisodeTicker(boolean live) {
+        main.removeCallbacks(episodeTick);
+        nextEpisode = null;
+        nextAsked = false;
+        if (live || series == null || series.isEmpty()) return;
+        main.postDelayed(episodeTick, 1000);
+    }
+
+    private void episodeTickRun() {
+        if (player == null || series == null || series.isEmpty() || !ready || isLive()) return;
+        long dur = player.getDuration();
+        if (dur <= 0) {
+            main.postDelayed(episodeTick, 1000);
+            return;
+        }
+        long left = dur - player.getCurrentPosition();
+        if (left <= 30_000) {
+            if (!nextAsked) {
+                nextAsked = true;
+                askNextEpisode();
+            }
+            if (nextEpisode != null) hud.nextCountdown((int) ((Math.max(0, left) + 999) / 1000));
+        }
+        if (left <= 700 && nextEpisode != null) {   // the end: it goes on by itself
+            playNext();
+            return;
+        }
+        if (left > 0) main.postDelayed(episodeTick, 700);
+    }
+
+    /**
+     * The episode after this one, from the panel's episode list (sorted by season then number, so an episode that
+     * ends a season is followed by the first of the next one). Off the UI thread: the list may need a request.
+     */
+    private void askNextEpisode() {
+        final String id = series, here = url;
+        new Thread(() -> {
+            Iptv.Detail d = Iptv.get(this).series(id);
+            Iptv.Episode found = null;
+            if (d != null && !d.episodes.isEmpty()) {
+                List<Iptv.Episode> all = new ArrayList<>(d.episodes);
+                all.sort((a, b) -> a.season != b.season ? Integer.compare(a.season, b.season)
+                        : Integer.compare(a.number, b.number));
+                for (int i = 0; i < all.size(); i++) {
+                    if (!all.get(i).url.equals(here)) continue;
+                    if (i + 1 < all.size()) found = all.get(i + 1);
+                    break;
+                }
+            }
+            final Iptv.Episode n = found;
+            main.post(() -> {
+                nextEpisode = n;
+                if (n != null && nextAsked && player != null && !isLive()) {
+                    String t = n.title == null || n.title.isEmpty() ? "Épisode " + n.number : n.title;
+                    hud.next(t, seriesName() + "  ·  S" + n.season + ", É" + n.number);
+                }
+            });
+        }, "next-episode").start();
+    }
+
+    /** « Série · S1, É2 » → « Série ». */
+    private String seriesName() {
+        int cut = name == null ? -1 : name.indexOf(" · S");
+        return cut > 0 ? name.substring(0, cut) : (name == null ? "" : name);
+    }
+
+    /** « Passer le générique », or the countdown reaching zero: the next episode, now. */
+    void playNext() {
+        Iptv.Episode ep = nextEpisode;
+        if (ep == null) return;
+        nextEpisode = null;
+        nextAsked = true;
+        hud.clearNext();
+        remember();                                  // this one is over: it is marked as watched
+        Intent it = new Intent(this, Player.class);
+        it.putExtra(EXTRA_URL, ep.url);
+        it.putExtra(EXTRA_NAME, seriesName() + " · S" + ep.season + ", É" + ep.number);
+        it.putExtra(EXTRA_LOGO, logo);
+        it.putExtra(EXTRA_SERIES, series);
+        it.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        startActivity(it);
+    }
+
+    /** Back on the next-episode card: it is put away and this episode simply ends. */
+    void cancelNext() {
+        nextEpisode = null;
+        nextAsked = true;
+    }
 
     @Override public void onPlayerError(PlaybackException e) {
         if (player != null && e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
@@ -721,6 +822,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
 
     private void release() {
         if (player == null) return;
+        main.removeCallbacks(episodeTick);
         remember();
         if (ready && !failed) resumeMs = player.getCurrentPosition();
         player.removeListener(this);

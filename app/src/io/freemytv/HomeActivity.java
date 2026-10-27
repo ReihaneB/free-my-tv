@@ -89,6 +89,10 @@ public class HomeActivity extends Activity {
             @Override public void watchingChanged() {
                 home.syncWatching();   // under the page: rebuilt now, nothing moves on screen
             }
+
+            @Override public void listChanged() {
+                home.syncList();
+            }
         });
         root.addView(detail, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));

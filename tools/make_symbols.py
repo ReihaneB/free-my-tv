@@ -22,6 +22,7 @@ MAP = {
     "pause": ("pause", 1), "replay_10": ("replay_10", 0), "forward_10": ("forward_10", 0),
     "restart": ("restart_alt", 0), "trailer": ("smart_display", 0), "star": ("star", 1),
     "memory": ("memory", 0), "storage": ("hard_drive", 0), "remove": ("remove", 0),
+    "add": ("add", 0), "skip_next": ("skip_next", 0), "playlist_add": ("playlist_add", 0),
 }
 
 

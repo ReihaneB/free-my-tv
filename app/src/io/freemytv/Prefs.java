@@ -170,6 +170,75 @@ final class Prefs {
         return Integer.toHexString(url.hashCode());
     }
 
+    // MARK: - Ma liste (films et séries mis de côté)
+
+    private static volatile int listVersion;
+
+    /** Bumped on every change: the home screen's « Ma liste » knows it must be rebuilt. */
+    static int listVersion() { return listVersion; }
+
+    private static SharedPreferences mylist() {
+        return app.getSharedPreferences("mylist", Context.MODE_PRIVATE);
+    }
+
+    /** "s:" + series id, or "m:" + the film's id: one key per title, whatever its stream. */
+    static String listKey(boolean series, String id) {
+        return id == null || id.isEmpty() ? "" : (series ? "s:" : "m:") + id;
+    }
+
+    static boolean inList(String key) {
+        return key != null && !key.isEmpty() && mylist().contains(key);
+    }
+
+    /** Puts the title aside, or takes it out. Stored: name, logo, series id, year, stream, when. */
+    static void toggleList(String key, String name, String logo, String seriesId, String year, String url) {
+        if (key == null || key.isEmpty()) return;
+        SharedPreferences p = mylist();
+        if (p.contains(key)) {
+            p.edit().remove(key).apply();
+        } else {
+            p.edit().putString(key, (name == null ? "" : name) + "\t" + (logo == null ? "" : logo) + "\t"
+                    + (seriesId == null ? "" : seriesId) + "\t" + (year == null ? "" : year) + "\t"
+                    + (url == null ? "" : url) + "\t" + System.currentTimeMillis()).apply();
+        }
+        listVersion++;
+    }
+
+    /** Everything put aside, the last one added first. */
+    static List<Iptv.Item> list() {
+        List<Object[]> sorted = new ArrayList<>();
+        for (java.util.Map.Entry<String, ?> e : new ArrayList<>(mylist().getAll().entrySet())) {
+            String[] f = String.valueOf(e.getValue()).split("\t", -1);
+            if (f.length < 5) continue;
+            sorted.add(new Object[]{f, e.getKey()});
+        }
+        sorted.sort((a, b) -> {
+            String[] fa = (String[]) a[0], fb = (String[]) b[0];
+            long ta = fa.length > 5 ? parse(fa[5]) : 0, tb = fb.length > 5 ? parse(fb[5]) : 0;
+            return Long.compare(tb, ta);
+        });
+        List<Iptv.Item> out = new ArrayList<>();
+        for (Object[] o : sorted) {
+            String[] f = (String[]) o[0];
+            Iptv.Item it = new Iptv.Item();
+            it.name = f[0];
+            it.logo = f[1];
+            it.id = f[2];      // a series: its id, its card opens the series' page
+            it.year = f[3];
+            it.url = f[4];     // a film: its stream
+            out.add(it);
+        }
+        return out;
+    }
+
+    private static long parse(String s) {
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     private static void put(String key, String value) {
         sp().edit().putString(key, value).apply();
         version++;

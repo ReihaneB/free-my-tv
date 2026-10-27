@@ -47,9 +47,9 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
     private static final int MARGIN = 96;
     private static final int BTN_W = 440, BTN_H = 68, ICON_D = 64, ICON_GAP = 20, COL_GAP = 64;
     private static final int CARD_W = 448, CARD_H = 252, CARD_GAP = 36, CARD_R = 22, TAB_H = 52;
-    private static final int A_RESTART = 0, A_TRAILER = 1, A_FORGET = 2;
-    private static final String[] ACTION_ICON = {"restart", "trailer", "remove"};
-    private static final String[] ACTION_NAME = {"Recommencer", "Bande-annonce", "Retirer de « En cours »"};
+    private static final int A_RESTART = 0, A_TRAILER = 1, A_FORGET = 2, A_LIST = 3;
+    private static final String[] ACTION_ICON = {"restart", "trailer", "remove", "add"};
+    private static final String[] ACTION_NAME = {"Recommencer", "Bande-annonce", "Retirer de « En cours »", "Ma liste"};
     private static final int Z_PRIMARY = 0, Z_ICONS = 1, Z_SEASONS = 2, Z_EPISODES = 3;
     private static final int BACK = 0, PHOTO = 1, DIM = 2, HERO = 3, SHELF = 4;
     private static final int ACCENT = 0xFFFF8A00;   // the progress, as on the home screen's cards
@@ -68,6 +68,9 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
 
         /** A film or a series was taken out of "En cours". */
         void watchingChanged();
+
+        /** A film or a series was put in « Ma liste », or taken out: the home screen's row follows. */
+        void listChanged();
     }
 
     private final Host host;
@@ -482,6 +485,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         actions.clear();
         if (playPos > 0) actions.add(A_RESTART);
         if (detail != null && !detail.trailer.isEmpty()) actions.add(A_TRAILER);
+        if (!listKey().isEmpty()) actions.add(A_LIST);
         if (watching()) actions.add(A_FORGET);   // last, like Apple's "Supprimer de À suivre"
         if (action >= actions.size()) action = Math.max(0, actions.size() - 1);
         if (zone == Z_ICONS && actions.isEmpty()) zone = Z_PRIMARY;
@@ -761,6 +765,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
                 if (action >= actions.size()) return;
                 if (actions.get(action) == A_RESTART) play(playUrl, true, target);
                 else if (actions.get(action) == A_FORGET) forget();
+                else if (actions.get(action) == A_LIST) toggleList();
                 else trailer();
                 break;
             case Z_SEASONS:
@@ -789,6 +794,41 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         it.putExtra(Player.EXTRA_LOGO, logo == null ? "" : logo);
         it.putExtra(Player.EXTRA_FROM_START, fromStart);
         getContext().startActivity(it);
+    }
+
+    /** "Depuis le début", "Bande-annonce", "Ma liste", "Retirer de « En cours »": Ma liste changes with its state. */
+    private String iconOf(int a) {
+        if (a == A_LIST) return inList() ? "check" : "add";
+        return ACTION_ICON[a];
+    }
+
+    private String nameOf(int a) {
+        if (a == A_LIST) return inList() ? "Dans ma liste" : "Ma liste";
+        return ACTION_NAME[a];
+    }
+
+    private String listKey() {
+        if (req == null) return "";
+        if (req.series) return Prefs.listKey(true, req.seriesId);
+        Matcher m = MOVIE_ID.matcher(req.url == null ? "" : req.url);
+        return m.find() ? Prefs.listKey(false, m.group(1)) : "";
+    }
+
+    private boolean inList() {
+        return Prefs.inList(listKey());
+    }
+
+    /** Puts the film or the series in « Ma liste », or takes it out; the home screen's row follows at once. */
+    private void toggleList() {
+        String k = listKey();
+        if (k.isEmpty()) return;
+        String name = detail != null && !detail.title.isEmpty() ? detail.title : req.title;
+        String logo = detail != null && !detail.poster.isEmpty() ? detail.poster : req.poster;
+        String year = detail != null && !detail.year.isEmpty() ? detail.year : req.year;
+        Prefs.toggleList(k, name, logo, req.series ? req.seriesId : "", year, req.series ? "" : playUrl);
+        host.listChanged();
+        invalidateAll();
+        kick();
     }
 
     /** Whether this film, or an episode of this series, is left halfway: it shows in "En cours". */
@@ -1105,10 +1145,10 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
             box.set(icx - d / 2, icy - d / 2, icx + d / 2, icy + d / 2);
             if (a < 1) Liquid.draw(c, kitIcon, box, glass, 1 - a, false, 0);
             if (a > 0) Liquid.draw(c, kitIconOn, box, glass, a, true, 6 * k);
-            Symbols.draw(getContext(), c, ACTION_ICON[actions.get(i)], icx, icy, 27 * k * (1 + 0.06f * a),
+            Symbols.draw(getContext(), c, iconOf(actions.get(i)), icx, icy, 27 * k * (1 + 0.06f * a),
                     blend(0xEBFFFFFF, Liquid.INK_ON_LIT, a));
             if (a > 0.01f) {
-                String n = ACTION_NAME[actions.get(i)];
+                String n = nameOf(actions.get(i));
                 float nw = iconNameP.measureText(n);
                 float nx = Math.max((MARGIN - 24) * k, icx - nw / 2);   // centred under it, as tvOS does
                 iconNameP.setColor(Ui.alpha(0xE6FFFFFF, a));

@@ -31,10 +31,8 @@ import java.util.List;
 final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
 
     static final int MENU_SUBS = 0, MENU_AUDIO = 1, MENU_FORMAT = 2;
-    /** The player's own menu (Up / Down on a channel), which is not a list of tracks but of things to do. */
-    private static final int MENU_OPTIONS = 3;
     private static final String[] ICONS = {"subtitles", "audio", "aspect"};
-    private static final String[] MENU_TITLES = {"Sous-titres", "Audio", "Format de l'image", "Options"};
+    private static final String[] MENU_TITLES = {"Sous-titres", "Audio", "Format de l'image"};
     private static final int HIDE_MS = 5000, COMMIT_MS = 700;
     private static final int RED = 0xFFFF453A;
 
@@ -121,11 +119,6 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private int menu = -1, row, checked = -1, first;
     private boolean menuClosing;
     private String[] rows = new String[0];
-    /** The options menu: what each row does, and the value written on its right (a track's name, the picture's fit). */
-    private static final int NOTHING = -2, ACTIONS = -3, A_START = 0, A_LIVE = 1, A_LIST = 2, A_SUBS = 3,
-            A_AUDIO = 4, A_FORMAT = 5;
-    private int[] acts = new int[0];
-    private String[] values = new String[0];
     private float menuA, rowLens;
     private final RectF panel = new RectF();
     private Bitmap panelFace, panelShadow;
@@ -154,7 +147,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint spin = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint titleP = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
-    private Paint metaP, timeP, subP, headP, rowP, valueP, bubbleP, badgeP, errP, errSmallP;
+    private Paint metaP, timeP, subP, headP, rowP, bubbleP, badgeP, errP, errSmallP;
     private final RectF box = new RectF(), track = new RectF();
     private final Runnable hideRun = this::autoHide, commitRun = this::commitScrub;
 
@@ -548,34 +541,16 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
                 case KeyEvent.KEYCODE_DPAD_CENTER:
                 case KeyEvent.KEYCODE_ENTER:
                 case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                    if (repeat == 0 && checked == ACTIONS) {
-                        int pick = row;
-                        closeMenu();
-                        runAction(pick);
-                    } else {
-                        if (repeat == 0 && checked != NOTHING) {
-                            host.choose(menu, row);
-                            checked = row;
-                            menuView.invalidate();
-                        }
-                        closeMenu();
+                    if (repeat == 0 && checked != -2) {
+                        host.choose(menu, row);
+                        checked = row;
+                        menuView.invalidate();
                     }
+                    closeMenu();
                     return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
                 case KeyEvent.KEYCODE_DPAD_RIGHT:
                     closeMenu();
-                    return true;
-                case KeyEvent.KEYCODE_CHANNEL_UP:
-                case KeyEvent.KEYCODE_CHANNEL_DOWN:
-                    // zapping is never swallowed by the menu: it closes and the channel changes
-                    closeMenu();
-                    if (channel != null && repeat == 0) {
-                        host.zap(code == KeyEvent.KEYCODE_CHANNEL_UP ? 1 : -1);
-                    }
-                    return true;
-                case KeyEvent.KEYCODE_GUIDE:
-                    closeMenu();
-                    if (repeat == 0) openList();
                     return true;
                 default:
                     return false;
@@ -606,11 +581,6 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
                 default:
                     break;
             }
-        }
-        // Up / Down never change channel, on the live or in a replay: they open the player's own menu
-        if (channel != null && (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN)) {
-            if (repeat == 0) openOptions();
-            return true;
         }
         if (liveMode() && liveKey(code, repeat)) return true;
         if (failed) return false;
@@ -673,11 +643,26 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     }
 
     /**
-     * A channel, live, as a box does it: OK opens the channel list, right reaches the buttons, left and right only
-     * show the banner otherwise. Up / Down are the options menu, handled before this (see `key`).
+     * A channel, as a box does it: up / down change channel, OK opens the list, right reaches the buttons
+     * (Depuis le début, subtitles, audio, format), left and right only show the banner otherwise.
      */
     private boolean liveKey(int code, int repeat) {
         switch (code) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                if (visible() && focus == ON_BUTTONS) {
+                    show();
+                    return true;
+                }
+                host.zap(1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                if (focus == ON_BUTTONS) {
+                    focus = ON_BAR;
+                    show();
+                    return true;
+                }
+                host.zap(-1);
+                return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 if (visible() && focus == ON_BUTTONS) button = Math.min(buttons.length - 1, button + 1);
                 else if (visible() && ready) {
@@ -812,21 +797,14 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     // MARK: - Popover
 
     private void openMenu(int which) {
-        openMenu(which, false);
-    }
-
-    /** `steady`: the panel already on screen only changes content (a track list opened from the options menu). */
-    private void openMenu(int which, boolean steady) {
         String[] r = host.menuRows(which);
         if (r == null) return;
         menu = which;
         menuClosing = false;
-        acts = new int[0];
-        values = new String[0];
         int sel = host.menuChecked(which);
         if (r.length == 0) {
             rows = new String[]{which == MENU_SUBS ? "Aucun sous-titre disponible" : "Aucune piste"};
-            checked = NOTHING;   // nothing to choose
+            checked = -2;   // nothing to choose
             row = 0;
         } else {
             rows = r;
@@ -837,107 +815,13 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         first = 0;
         layoutMenu();
         keepRowVisible();
-        present(steady);
-    }
-
-    /**
-     * Up / Down on a channel: the menu a box puts there — the programme from its start (or back to the live), the
-     * channel list, and the three tracks with the one playing written on their right. Up / Down walk the rows,
-     * OK runs the row, Back closes. Zapping stays on P+ / P− and on the digits.
-     */
-    private void openOptions() {
-        java.util.ArrayList<String> labels = new java.util.ArrayList<>(), vals = new java.util.ArrayList<>();
-        java.util.ArrayList<Integer> codes = new java.util.ArrayList<>();
-        if (channel != null && replay == null && channel.replay != null) {
-            labels.add("Depuis le début"); vals.add(""); codes.add(A_START);
-        }
-        if (replay != null) {
-            labels.add("Revenir au direct"); vals.add(""); codes.add(A_LIVE);
-        }
-        labels.add("Liste des chaînes"); vals.add(""); codes.add(A_LIST);
-
-        String[] subs = host.menuRows(MENU_SUBS);
-        int si = host.menuChecked(MENU_SUBS);
-        labels.add("Sous-titres");
-        vals.add(subs == null ? "—" : subs.length == 0 ? "Aucun" : short_(subs[Math.max(0, Math.min(si, subs.length - 1))]));
-        codes.add(A_SUBS);
-
-        String[] audio = host.menuRows(MENU_AUDIO);
-        int ai = host.menuChecked(MENU_AUDIO);
-        labels.add("Audio");
-        vals.add(audio == null || ai < 0 || ai >= audio.length ? "—" : short_(audio[ai]));
-        codes.add(A_AUDIO);
-
-        String[] fmt = host.menuRows(MENU_FORMAT);
-        int fi = host.menuChecked(MENU_FORMAT);
-        labels.add("Format de l'image");
-        vals.add(fmt == null || fi < 0 || fi >= fmt.length ? "—" : fmt[fi]);
-        codes.add(A_FORMAT);
-
-        rows = labels.toArray(new String[0]);
-        values = vals.toArray(new String[0]);
-        acts = new int[codes.size()];
-        for (int i = 0; i < acts.length; i++) acts[i] = codes.get(i);
-        menu = MENU_OPTIONS;
-        checked = ACTIONS;
-        menuClosing = false;
-        row = 0;
-        rowLens = 0;
-        first = 0;
-        layoutMenu();
-        present(false);
-    }
-
-    /** A track's name only: "Français · VFF · Dolby Digital Plus 5.1" → "Français". */
-    private static String short_(String s) {
-        int bar = s.indexOf("  ·  ");
-        return bar > 0 ? s.substring(0, bar) : s;
-    }
-
-    /** Puts the popover on screen; `steady` keeps it at full strength while it only changes content. */
-    private void present(boolean steady) {
         removeCallbacks(hideRun);
         hudTo = 1;
-        if (!steady) {
-            menuA = 0;
-            menuView.setAlpha(0);
-        }
+        menuA = 0;
+        menuView.setAlpha(0);
         reveal(menuView);
         menuView.invalidate();
         kick();
-    }
-
-    private void runAction(int i) {
-        if (i < 0 || i >= acts.length) return;
-        switch (acts[i]) {
-            case A_START:
-                if (host.startOver()) flash("restart");
-                break;
-            case A_LIVE:
-                host.backToLive();
-                break;
-            case A_LIST:
-                openList();
-                break;
-            case A_SUBS:
-                openTrack(MENU_SUBS);
-                break;
-            case A_AUDIO:
-                openTrack(MENU_AUDIO);
-                break;
-            case A_FORMAT:
-                openTrack(MENU_FORMAT);
-                break;
-            default:
-                break;
-        }
-    }
-
-    /** A track list, under the icon it belongs to (the icon lights up while its list is open). */
-    private void openTrack(int which) {
-        button = indexOfMenu(which);
-        focus = ON_BUTTONS;
-        openMenu(which, true);
     }
 
     private void closeMenu() {
@@ -950,9 +834,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private float[] panelSize(int which, String[] list) {
         float textW = rowP.measureText(MENU_TITLES[which]);
         for (String s : list) textW = Math.max(textW, rowP.measureText(s));
-        float valW = 0;
-        for (String v : values) valW = Math.max(valW, valueP.measureText(v));
-        float pw = Math.round(Math.max(420 * k, Math.min(760 * k, textW + valW + (valW > 0 ? 132 * k : 112 * k))));
+        float pw = Math.round(Math.max(420 * k, Math.min(680 * k, textW + 112 * k)));
         float bottom = buttonCY - buttonD / 2 - 22 * k;
         int fit = (int) Math.max(1, Math.floor((bottom - 140 * k - headH - 28 * k) / rowH));
         int n = Math.min(list.length, fit);
@@ -963,16 +845,10 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         float[] size = panelSize(menu, rows);
         float pw = size[0], ph = size[1];
         visibleRows = (int) size[2];
-        if (checked == ACTIONS) {
-            // the player's menu stands at the left margin, above the picture's title, like a box's own menu
-            float left = Math.round(margin), top = Math.round(60 * k);
-            panel.set(left, top, left + pw, top + ph);
-        } else {
-            // it ends just past its own button (the one that opened it), kept inside the margin
-            float right = Math.round(Math.min(w - margin, buttonCX(indexOfMenu(menu)) + buttonD / 2 + 22 * k));
-            float bottom = Math.round(buttonCY - buttonD / 2 - 22 * k);
-            panel.set(right - pw, bottom - ph, right, bottom);
-        }
+        // it ends just past its own button (the one that opened it), kept inside the margin
+        float right = Math.round(Math.min(w - margin, buttonCX(indexOfMenu(menu)) + buttonD / 2 + 22 * k));
+        float bottom = Math.round(buttonCY - buttonD / 2 - 22 * k);
+        panel.set(right - pw, bottom - ph, right, bottom);
         int iw = (int) pw, ih = (int) ph;
         panelPad = Math.round(30 * k);
         Bitmap[] baked = panels.get((iw << 16) | ih);
@@ -988,13 +864,8 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         int l = Math.round(panel.left) - panelPad, t = Math.round(panel.top) - panelPad;
         int rr = Math.round(panel.right) + panelPad, b = Math.round(panel.bottom + panelPad + 14 * k);
         place(menuView, l, t, rr, b);
-        if (checked == ACTIONS) {
-            menuView.setPivotX(panelPad);                 // it unfolds from its own corner
-            menuView.setPivotY(panelPad + headH / 2);
-        } else {
-            menuView.setPivotX(buttonCX(indexOfMenu(menu)) - l);   // it grows out of its button
-            menuView.setPivotY(b - t);
-        }
+        menuView.setPivotX(buttonCX(indexOfMenu(menu)) - l);   // it grows out of its button
+        menuView.setPivotY(b - t);
     }
 
     private void keepRowVisible() {
@@ -1172,8 +1043,6 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         headP = Ui.text(Ui.semibold, 21 * k, 0xCCFFFFFF);
         headP.setLetterSpacing(0.02f);
         rowP = Ui.text(Ui.medium, 26 * k, 0xEBFFFFFF);
-        valueP = Ui.text(Ui.medium, 22 * k, 0x99FFFFFF);
-        valueP.setTextAlign(Paint.Align.RIGHT);
         badgeP = Ui.text(Ui.semibold, 19 * k, 0xFFFFFFFF);
         badgeP.setLetterSpacing(0.08f);
         errP = Ui.text(Ui.displaySemibold, 34 * k, 0xFFFFFFFF);
@@ -1619,19 +1488,13 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
             Liquid.draw(c, kitRow, box, glass, 1, false, 0);
         }
         int last = Math.min(rows.length, first + visibleRows + 1);
-        float labelX = panel.left + (checked == ACTIONS ? 40 * k : 68 * k);   // no check column in the options
         for (int i = first; i < last; i++) {
             float cy = top + (i - first) * rowH + rowH / 2;
             float on = checked == -2 ? 0 : Math.max(0, 1 - Math.abs(rowLens - i));
             int ink = blend(checked == -2 ? 0x80FFFFFF : 0xEBFFFFFF, Liquid.INK_ON_LIT, on);
             if (i == checked) Symbols.draw(getContext(), c, "check", panel.left + 40 * k, cy, 20 * k, ink);
             rowP.setColor(ink);
-            c.drawText(rows[i], labelX, cy + Ui.halfCap(rowP), rowP);
-            // the value on the right (a track's name, the picture's fit): what is playing, without opening the list
-            if (i < values.length && !values[i].isEmpty()) {
-                valueP.setColor(blend(0x99FFFFFF, Liquid.INK_ON_LIT, on));
-                c.drawText(values[i], panel.right - 34 * k, cy + Ui.halfCap(valueP), valueP);
-            }
+            c.drawText(rows[i], panel.left + 68 * k, cy + Ui.halfCap(rowP), rowP);
         }
         c.restore();
     }

@@ -270,7 +270,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     }
 
     /** Back from a replay: the channel live again. */
-    private boolean backToLive() {
+    boolean backToLive() {
         if (replaying == null || channel == null) return false;
         replaying = null;
         seekAfterReady = -1;

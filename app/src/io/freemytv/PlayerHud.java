@@ -643,26 +643,13 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     }
 
     /**
-     * A channel, as a box does it: up / down change channel, OK opens the list, right reaches the buttons
-     * (Depuis le début, subtitles, audio, format), left and right only show the banner otherwise.
+     * A channel, as a box does it: OK opens the list, right reaches the buttons (Depuis le début, subtitles, audio,
+     * format), left and right only show the banner otherwise. Up / Down are not zapping here: they fall through to
+     * the same focus walk as a film (Up on the buttons, Down back to the bar and then the controls go), so the remote
+     * never changes channel by accident — that is P+ / P−, the digits, the list and 0.
      */
     private boolean liveKey(int code, int repeat) {
         switch (code) {
-            case KeyEvent.KEYCODE_DPAD_UP:
-                if (visible() && focus == ON_BUTTONS) {
-                    show();
-                    return true;
-                }
-                host.zap(1);
-                return true;
-            case KeyEvent.KEYCODE_DPAD_DOWN:
-                if (focus == ON_BUTTONS) {
-                    focus = ON_BAR;
-                    show();
-                    return true;
-                }
-                host.zap(-1);
-                return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 if (visible() && focus == ON_BUTTONS) button = Math.min(buttons.length - 1, button + 1);
                 else if (visible() && ready) {

@@ -39,6 +39,8 @@ final class Iptv {
         long added;             // when the panel added it: "new this week"
         float rating;           // films and series only
         boolean live;
+        String epg = "";        // a channel: its guide id (tf1.fr), shared by its HD / FHD / HEVC / SD streams
+        int archive;            // a channel: days of replay the panel keeps (0: none)
     }
 
     static final class Category {
@@ -403,8 +405,93 @@ final class Iptv {
 
     void refreshIfStale() {
         if (!configured() || loading) return;
+        // the channels' guide ids and replay came with a new file: only the channels are fetched again for it
+        if (xtream() && !itemsFile("live").isFile() && !load("vod").isEmpty() && factsMark().isFile()) {
+            refreshLive();
+            return;
+        }
         if (System.currentTimeMillis() - fetched < EVERY && !load("live").isEmpty() && factsMark().isFile()) return;
         refresh();
+    }
+
+    /** The channels alone (one 3 MB answer): what a new channel file needs, without the 30 000 films and series. */
+    private void refreshLive() {
+        loading = true;
+        new Thread(() -> {
+            boolean got = false;
+            try {
+                JSONObject root = new JSONObject(download(api("")));
+                keepZone(root);
+                List<Category> list = new ArrayList<>();
+                JSONArray cat = new JSONArray(download(api("&action=get_live_categories")));
+                for (int i = 0; i < cat.length(); i++) {
+                    JSONObject o = cat.getJSONObject(i);
+                    list.add(new Category(o.optString("category_id"), o.optString("category_name").trim()));
+                }
+                writeCats("live", list);
+                writeItems("live", parseStreams(new JSONArray(download(api("&action=get_live_streams"))), "live"));
+                got = true;
+            } catch (Exception e) {
+                error = e.getMessage() == null ? e.toString() : e.getMessage();
+                AppLog.w("iptv live: " + error);
+            } finally {
+                loading = false;
+                if (got) {
+                    synchronized (this) {
+                        items.remove("live");
+                        categories.remove("live");
+                    }
+                    AppLog.w("iptv: " + load("live").size() + " chaînes (guide et replay)");
+                    for (Listener x : new ArrayList<>(listeners)) x.onIptv();
+                }
+            }
+        }, "iptv-live").start();
+    }
+
+    /** The panel's clock (replay addresses are written in its local time), from the account's answer. */
+    private void keepZone(JSONObject root) {
+        JSONObject server = root == null ? null : root.optJSONObject("server_info");
+        String zone = server == null ? "" : server.optString("timezone", "");
+        if (zone.isEmpty()) return;
+        try (OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(new File(dir, "zone")), StandardCharsets.UTF_8)) {
+            w.write(zone);
+        } catch (IOException ignored) {
+        }
+        serverZone = null;
+    }
+
+    private volatile java.util.TimeZone serverZone;
+
+    java.util.TimeZone serverZone() {
+        java.util.TimeZone z = serverZone;
+        if (z != null) return z;
+        String id = "Europe/London";
+        try {
+            String s = readText(new File(dir, "zone")).trim();
+            if (!s.isEmpty()) id = s;
+        } catch (IOException ignored) {
+        }
+        z = java.util.TimeZone.getTimeZone(id);
+        serverZone = z;
+        return z;
+    }
+
+    /** The whole guide of the account (XMLTV, ~11 MB): Epg reads it as it comes. */
+    static String guideUrl() {
+        return Config.IPTV_HOST.trim() + "/xmltv.php?username=" + enc(Config.IPTV_USER.trim())
+                + "&password=" + enc(Config.IPTV_PASS.trim());
+    }
+
+    /**
+     * A programme of the last days, from the panel's replay: /timeshift/user/pass/minutes/yyyy-MM-dd:HH-mm/id.ts,
+     * the start written in the panel's own time zone.
+     */
+    String replayUrl(Item channel, long startMs, long durationMs) {
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd:HH-mm", Locale.US);
+        f.setTimeZone(serverZone());
+        long minutes = Math.max(1, (durationMs + 59_999) / 60_000);
+        return Config.IPTV_HOST.trim() + "/timeshift/" + enc(Config.IPTV_USER.trim()) + "/" + enc(Config.IPTV_PASS.trim())
+                + "/" + minutes + "/" + f.format(new java.util.Date(startMs)) + "/" + channel.id + ".ts";
     }
 
     /** Fetches the catalogue in the background (categories, then the streams) and tells the listeners when it lands. */
@@ -439,7 +526,9 @@ final class Iptv {
     // MARK: - Xtream Codes
 
     private boolean refreshXtream() throws Exception {
-        JSONObject who = new JSONObject(download(api(""))).optJSONObject("user_info");
+        JSONObject root = new JSONObject(download(api("")));
+        keepZone(root);
+        JSONObject who = root.optJSONObject("user_info");
         if (who == null) { error = "identifiants refusés"; return false; }
         String status = who.optString("status");
         if (!status.isEmpty() && !"Active".equalsIgnoreCase(status)) error = "compte " + status.toLowerCase(Locale.ROOT);
@@ -503,6 +592,11 @@ final class Iptv {
             it.added = epoch(o.optString("added"));
             it.year = o.optString("year", "");
             it.rating = (float) o.optDouble("rating", 0);
+            if (it.live) {
+                Object epg = o.opt("epg_channel_id");
+                it.epg = epg == null || epg == JSONObject.NULL ? "" : String.valueOf(epg).trim();
+                if (o.optInt("tv_archive", 0) == 1) it.archive = Math.max(1, o.optInt("tv_archive_duration", 1));
+            }
             if (!it.name.isEmpty()) out.add(it);
         }
         return out;
@@ -542,7 +636,10 @@ final class Iptv {
 
     // MARK: - Files
 
-    private File itemsFile(String type) { return new File(dir, "items2-" + type + ".tsv"); }
+    /** Channels carry two more columns (guide id, replay days) since items3: an older file is fetched again. */
+    private File itemsFile(String type) {
+        return new File(dir, ("live".equals(type) ? "items3-" : "items2-") + type + ".tsv");
+    }
 
     private File catsFile(String type) { return new File(dir, "cats-" + type + ".tsv"); }
 
@@ -564,6 +661,10 @@ final class Iptv {
                 i.id = c[5];
                 i.added = epoch(c[6]);
                 try { i.rating = Float.parseFloat(c[7]); } catch (Exception ignored) { }
+                if (c.length >= 10) {
+                    i.epg = c[8];
+                    try { i.archive = Integer.parseInt(c[9]); } catch (Exception ignored) { }
+                }
                 out.add(i);
             }
         } catch (IOException e) {
@@ -584,7 +685,8 @@ final class Iptv {
 
     private static String line(Item i) {
         return (i.live ? "1" : "0") + "\t" + clean(i.group) + "\t" + clean(i.name) + "\t" + clean(i.logo) + "\t"
-                + clean(i.url) + "\t" + clean(i.id) + "\t" + i.added + "\t" + i.rating + "\n";
+                + clean(i.url) + "\t" + clean(i.id) + "\t" + (i.added / 1000) + "\t" + i.rating + "\t" + clean(i.epg)
+                + "\t" + i.archive + "\n";
     }
 
     private void appendItems(String type, List<Item> list) {

@@ -53,6 +53,13 @@ final class Prefs {
                 + (logo == null ? "" : logo) + "\t" + (series == null ? "" : series)).apply();
     }
 
+    /** The channel last watched (its number): the Direct tab starts there. Not a setting: no version bump. */
+    static int lastChannel() { return sp().getInt("lastChannel", 0); }
+
+    static void setLastChannel(int number) {
+        if (number > 0) sp().edit().putInt("lastChannel", number).apply();
+    }
+
     /** Bumped whenever a position is saved or forgotten: the home screen's "En cours" knows it must be rebuilt. */
     static volatile int playVersion;
 

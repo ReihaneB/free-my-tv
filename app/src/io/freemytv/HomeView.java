@@ -57,6 +57,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         volatile boolean liteAsked, fullTried;
         int color;                  // library tile
         int action = -1;            // >= 0: open that library tab; TO_SETTINGS / TO_BROWSE
+        Channels.Channel ch;        // a channel of the lineup: its number, its streams, its guide id
+        Epg.Show show;              // what it shows now (read from the guide when `showUntil` passes)
+        long showUntil;
         // what the frame would otherwise recompute (and allocate) for every card, every frame
         float capWidth = -1;
         String capTitle = "", capMeta = "";
@@ -137,6 +140,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
+            if (spot != null && spot.ch != null && System.currentTimeMillis() >= spot.showUntil) {
+                Epg.Show before = spot.show;
+                if (showOf(spot, System.currentTimeMillis()) != before) buildSpot(true);
+            }
             invalidate();
             if (resumed) main.postDelayed(this, 20_000);
         }
@@ -325,6 +332,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         requestFrame();
         main.removeCallbacks(clockTick);
         main.postDelayed(clockTick, 20_000);
+        Epg guide = Epg.get(getContext());
+        guide.addListener(guideChanged);
+        guide.refreshIfStale();
         HomeData data = HomeData.get(getContext());
         data.addListener(weatherChanged);
         data.refreshIfStale();
@@ -352,6 +362,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         resumed = false;
         Iptv.get(getContext()).removeListener(this);
         HomeData.get(getContext()).removeListener(weatherChanged);
+        Epg.get(getContext()).removeListener(guideChanged);
         main.removeCallbacks(clockTick);
         main.removeCallbacks(statusTick);
         main.removeCallbacks(autoDrive);
@@ -406,7 +417,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         if (playSeen == Prefs.playVersion || searchOpen) return;
         String at = rowIndex < rows.size() ? rows.get(rowIndex).title : "";
         int col = colIndex;
-        AppLog.w("positions changed: shelves rebuilt" + (isShown() ? "" : " under the page"));
         rebuild();
         if (rows.isEmpty() || zone != Z_ROW) return;
         Row row = rows.get(rowIndex);
@@ -425,6 +435,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     @Override public void onIptv() {
         main.post(() -> {
             if (!resumed) return;
+            Epg.get(getContext()).refreshIfStale();
             if (!key().equals(dataKey)) rebuild();
         });
     }
@@ -472,6 +483,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         requestFrame();   // rebuild() zeroes the per-card focus: nothing else would start the animation again
         invalidate();
         if (spot != null && w > 0) planAhead();
+        warmGuide();
     }
 
     private void homeRows() {
@@ -485,9 +497,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         for (Iptv.Item i : Prefs.resume("vod")) watching.items.add(resumeTile(i));
         for (Iptv.Item i : Prefs.resume("series")) watching.items.add(resumeTile(i));
         if (!watching.items.isEmpty()) rows.add(watching);
-        StringBuilder names = new StringBuilder();
-        for (Tile t : watching.items) names.append(names.length() == 0 ? "" : " | ").append(t.title);
-        AppLog.w("En cours (" + watching.items.size() + "): " + names);
 
         // Where Infuse shows its Favorites, the TV's apps: Netflix, SmartTube, Twitch, Prime, M6+, Steam Link…
         Row apps = new Row();
@@ -499,7 +508,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
         shelf("Nouveautés films", iptv.fresh("vod", 30, 24), false, 1, R_POSTER);
         shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, 2, R_POSTER);
-        shelf("Chaînes", frenchChannels(iptv, 24), false, 3, R_CARD);
+        Channels lineup = Channels.get(getContext());
+        if (!lineup.sections.isEmpty()) channelShelf("Chaînes", lineup.sections.get(0).channels, 3);
+        else shelf("Chaînes", frenchChannels(iptv, 24), false, 3, R_CARD);
         shelf("Les mieux notés", iptv.best("vod", 24), false, 1, R_POSTER);
         shelf("Séries", firstOf(iptv.series(), 24), true, 2, R_POSTER);
 
@@ -591,13 +602,19 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
     }
 
+    /**
+     * The channels as a box lists them: the TNT in its numbers, then the lineup's sections (cinema and series, sport,
+     * youth, news, discovery, music…), each card showing what is on; then the panel's other countries.
+     */
     private void liveRows() {
         Iptv iptv = Iptv.get(getContext());
-        shelf("Chaînes françaises", frenchChannels(iptv, 24), false, -1, R_CARD);
+        Channels lineup = Channels.get(getContext());
+        for (Channels.Section s : lineup.sections) channelShelf(s.title.equals("TNT") ? "TNT" : s.title, s.channels, -1);
+        if (lineup.sections.isEmpty()) shelf("Chaînes françaises", frenchChannels(iptv, 24), false, -1, R_CARD);
         List<Iptv.Item> all = iptv.live();
         int built = 0;
         for (Iptv.Category c : iptv.liveCategories()) {
-            if (built >= 14) break;
+            if (built >= 10) break;
             if (c.name.toUpperCase(Locale.ROOT).contains("FRANCE")) continue;
             List<Iptv.Item> items = new ArrayList<>();
             Set<String> seen = new HashSet<>();
@@ -612,6 +629,58 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             shelf(clean(c.name), items, false, -1, R_CARD);
             built++;
         }
+    }
+
+    /** A shelf of the lineup's channels: logo cards, and under each what it shows now and for how long still. */
+    private void channelShelf(String title, List<Channels.Channel> channels, int seeTab) {
+        if (channels.isEmpty()) return;
+        Row row = new Row();
+        row.title = title;
+        row.kind = R_CARD;
+        row.seeTab = seeTab;
+        row.captions = true;
+        for (Channels.Channel c : channels) row.items.add(channelTile(c));
+        rows.add(row);
+    }
+
+    private static Tile channelTile(Channels.Channel c) {
+        Tile t = new Tile();
+        t.title = c.name;
+        t.image = c.logo;
+        t.url = c.url();
+        t.live = true;
+        t.ch = c;
+        return t;
+    }
+
+    /** What a channel card shows now: read from the guide's memory when the programme ends (and every minute). */
+    private Epg.Show showOf(Tile t, long now) {
+        if (t.ch == null || t.ch.epg.isEmpty()) return null;
+        if (now >= t.showUntil) {
+            Epg.Show s = Epg.get(getContext()).now(t.ch.epg, now);
+            if (s != t.show) t.capWidth = -1;
+            t.show = s;
+            // the time left in the caption moves every minute
+            t.showUntil = s != null ? Math.min(s.stop, now + 60_000 - now % 60_000) : now + 30_000;
+            t.capWidth = -1;
+        }
+        return t.show;
+    }
+
+    /** The guide landed (or more of it): every channel card reads its programme again, the spotlight too. */
+    private final Epg.Listener guideChanged = () -> {
+        for (Row row : rows) for (Tile t : row.items) if (t.ch != null) t.showUntil = 0;
+        if (spot != null && spot.ch != null) {
+            spot.showUntil = 0;
+            buildSpot(true);
+        }
+        invalidate();
+    };
+
+    private void warmGuide() {
+        List<String> ids = new ArrayList<>();
+        for (Row row : rows) for (Tile t : row.items) if (t.ch != null && !t.ch.epg.isEmpty()) ids.add(t.ch.epg);
+        if (!ids.isEmpty()) Epg.get(getContext()).warm(ids);
     }
 
     private void appRows() {
@@ -1287,6 +1356,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         boolean hadStory = !spotStory.isEmpty();
         String title = t.title;
         if ((t.series || isEpisode(t)) && d != null && !d.title.isEmpty()) title = DetailView.seriesTitle(d.title);
+        long now = System.currentTimeMillis();
+        Epg.Show show = t.ch != null ? showOf(t, now) : null;
+        if (show != null) title = show.title;
         float maxW = SPOT_TITLE_W * k;
         spotSize = 66 * k;
         spotTitle.setTextSize(spotSize);
@@ -1302,6 +1374,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         spotFacts.clear();
         if (t.app != null) {
             spotFacts.add(new Fact(Fact.TEXT, t.symbol.isEmpty() ? "Application" : "Entrée", 0, false));
+        } else if (t.ch != null) {
+            // a channel: its programme, as a box's banner says it
+            if (show != null) {
+                String left = Epg.left(show, now);
+                spotFacts.add(new Fact(Fact.PROGRESS, Character.toUpperCase(left.charAt(0)) + left.substring(1),
+                        show.progress(now), false));
+                spotFacts.add(new Fact(Fact.TEXT, Epg.span(show), 0, false));
+            }
+            spotFacts.add(new Fact(Fact.TEXT, t.ch.number + " · " + t.title, 0, false));
+            if (t.ch.replay != null) spotFacts.add(new Fact(Fact.BADGE, "REPLAY " + t.ch.replayDays + " J", 0, false));
         } else if (t.live) {
             spotFacts.add(new Fact(Fact.TEXT, "Chaîne en direct", 0, false));
         } else {
@@ -1332,9 +1414,18 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
 
         spotStory = new ArrayList<>();
-        boolean content = t.app == null && !t.live;
+        boolean content = t.app == null && (!t.live || show != null);
         spotRoom = content ? Math.max(1, 3 - (spotLines.size() - 1)) : 0;
-        if (d != null) {
+        if (show != null) {
+            spotStoryP.setTextSize(26 * k);
+            Epg.Show next = Epg.get(getContext()).next(t.ch.epg, now);
+            int room = Math.max(1, spotRoom - (next != null ? 1 : 0));
+            if (!show.info.isEmpty()) spotStory = wrap(show.info, spotStoryP, SPOT_TEXT_W * k, room);
+            if (next != null) {
+                spotStory = new ArrayList<>(spotStory);
+                spotStory.add(fit(spotStoryP, "À suivre · " + Epg.clock(next.start) + " · " + next.title, SPOT_TEXT_W * k));
+            }
+        } else if (d != null) {
             String story = d.plot;
             if (isEpisode(t)) {   // an episode tells its own story (only the full answer has it)
                 story = "";
@@ -1896,13 +1987,19 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             Symbols.draw(getContext(), c, glyph, r2.centerX(), r2.centerY(), 54 * k, Ui.alpha(0x4DFFFFFF, a));
         }
         art.setAlpha(255);
-        if (t.progress > 0.005f) {
+        float progress = t.progress;
+        if (t.ch != null) {   // a channel: how far its programme is
+            long now = System.currentTimeMillis();
+            Epg.Show s = showOf(t, now);
+            progress = s == null ? 0 : Math.max(0.02f, s.progress(now));
+        }
+        if (progress > 0.005f) {
             // the progress is a capsule inset in the card's foot, like everything else that is a control here
             float ph = 6 * k, inset = (poster ? 14 : 22) * k, py = r2.bottom - (poster ? 12 : 16) * k;
             dst.set(r2.left + inset, py - ph, r2.right - inset, py);
             fill.setColor(Ui.alpha(0x8C000000, a));
             c.drawRoundRect(dst, ph / 2, ph / 2, fill);
-            dst.right = dst.left + Math.max(24 * k, (r2.width() - 2 * inset) * Math.min(1f, t.progress));
+            dst.right = dst.left + Math.max(24 * k, (r2.width() - 2 * inset) * Math.min(1f, progress));
             fill.setColor(Ui.alpha(ACCENT, a));
             c.drawRoundRect(dst, ph / 2, ph / 2, fill);
         }
@@ -1939,7 +2036,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         cardMeta.setTextSize(18 * k);
         cardMeta.setTextAlign(Paint.Align.LEFT);
         float width = box.width();
-        if (t.capWidth != width) {
+        if (t.ch != null) showOf(t, System.currentTimeMillis());
+        if (t.capWidth != width && t.ch != null) {
+            // a channel: what it shows, then its number, its name and the time left
+            long now = System.currentTimeMillis();
+            Epg.Show s = t.show;
+            t.capTitle = fit(cardTitle, s != null ? s.title : t.title, width);
+            String meta = t.ch.number + " · " + t.title + (s != null ? " · " + Epg.left(s, now) : "");
+            t.capMeta = fit(cardMeta, meta, width);
+            t.capWidth = width;
+        } else if (t.capWidth != width) {
             t.capTitle = fit(cardTitle, t.title, width);
             String meta = t.episode;
             if (t.left > 0) meta = meta.isEmpty() ? "Il reste " + span(t.left) : meta + " · il reste " + span(t.left);
@@ -2027,9 +2133,57 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                 // Already the home screen: the system does not re-deliver the intent, so take it here.
                 if (down) reset(true);
                 return true;
+            case KeyEvent.KEYCODE_CHANNEL_UP:
+            case KeyEvent.KEYCODE_CHANNEL_DOWN:
+            case KeyEvent.KEYCODE_LAST_CHANNEL:
+            case KeyEvent.KEYCODE_GUIDE:
+                // as on a box: P+ / P− from the home screen goes back to the channel last watched
+                if (down && e.getRepeatCount() == 0 && !openChannel(Prefs.lastChannel())) openChannel(1);
+                return true;
             default:
+                if (code >= KeyEvent.KEYCODE_0 && code <= KeyEvent.KEYCODE_9 && !searchOpen) {
+                    if (down && e.getRepeatCount() == 0) typeDigit(code - KeyEvent.KEYCODE_0);
+                    return true;
+                }
                 return false;
         }
+    }
+
+    // MARK: - Channel numbers on the home screen
+
+    private final StringBuilder typed = new StringBuilder();
+    private final Runnable typedRun = this::openTyped;
+
+    /** "1", "15": the channel opens after a short pause or at the third digit; the toast says where it goes. */
+    private void typeDigit(int d) {
+        if (typed.length() == 0 && d == 0) return;
+        typed.append(d);
+        removeCallbacks(typedRun);
+        Channels.Channel c = Channels.get(getContext()).byNumber(Integer.parseInt(typed.toString()));
+        showToast(c != null ? typed + "  ·  " + c.name : typed + "–");
+        if (typed.length() >= 3) openTyped();
+        else postDelayed(typedRun, 1500);
+    }
+
+    private void openTyped() {
+        removeCallbacks(typedRun);
+        if (typed.length() == 0) return;
+        int n = Integer.parseInt(typed.toString());
+        typed.setLength(0);
+        if (!openChannel(n)) showToast("Pas de chaîne " + n);
+    }
+
+    /** Opens channel `n` of the lineup on its best stream; false when there is no such channel. */
+    private boolean openChannel(int n) {
+        Channels.Channel c = n > 0 ? Channels.get(getContext()).byNumber(n) : null;
+        if (c == null || c.streams.isEmpty()) return false;
+        Intent it = new Intent(getContext(), Player.class);
+        it.putExtra(Player.EXTRA_URL, c.streams.get(0).url);
+        it.putExtra(Player.EXTRA_NAME, c.name);
+        it.putExtra(Player.EXTRA_LOGO, c.logo);
+        it.putExtra(Player.EXTRA_CHANNEL, c.number);
+        getContext().startActivity(it);
+        return true;
     }
 
     private void move(int dx) {
@@ -2185,6 +2339,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         it.putExtra(Player.EXTRA_URL, t.url);
         it.putExtra(Player.EXTRA_NAME, t.title);
         it.putExtra(Player.EXTRA_LOGO, t.image);
+        if (t.ch != null) it.putExtra(Player.EXTRA_CHANNEL, t.ch.number);
         getContext().startActivity(it);
     }
 

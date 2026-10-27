@@ -49,6 +49,8 @@ import java.util.Locale;
 public final class Player extends Activity implements androidx.media3.common.Player.Listener {
 
     static final String EXTRA_URL = "url", EXTRA_NAME = "name", EXTRA_LOGO = "logo";
+    /** A channel of the lineup (its number): the player zaps from it with P+ / P−, the arrows and the digits. */
+    static final String EXTRA_CHANNEL = "channel";
     /** From the film's page: "Reprendre au début" (the saved place is ignored), and an episode's series. */
     static final String EXTRA_FROM_START = "fromStart", EXTRA_SERIES = "series";
 
@@ -62,6 +64,16 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     private long resumeMs = -1;
     private String series;        // an episode: its series' id, saved with the position
     private boolean fromStart;   // where to start when the player is built again (back from standby or Home)
+
+    // live TV: the channel on screen, the one before it ("0" / Last), which of its streams plays, and a replay
+    private Channels.Channel channel, previous;
+    private int stream;
+    private Epg.Show replaying;          // "Depuis le début": the programme played from the panel's replay
+    private long segmentAt;              // where the replay's current piece starts (the panel cuts at the minute)
+    private long seekAfterReady = -1;
+    private Channels.Channel pendingZap;
+    private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable zapRun = this::commitZap;
 
     /** A track behind a popover row. */
     private static final class Ref {
@@ -90,6 +102,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         series = intent.getStringExtra(EXTRA_SERIES);
         fromStart = intent.getBooleanExtra(EXTRA_FROM_START, false);
         if (url == null || url.isEmpty()) { finish(); return; }
+        channel = channelOf(intent, url);
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -104,6 +117,25 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         });
         setContentView(root);
         hud.loading(name, kind());
+        hud.channel(channel, null);
+    }
+
+    private Channels.Channel channelOf(Intent intent, String u) {
+        Channels lineup = Channels.get(this);
+        int number = intent.getIntExtra(EXTRA_CHANNEL, 0);
+        Channels.Channel c = number > 0 ? lineup.byNumber(number) : null;
+        if (c == null) c = lineup.byUrl(u);
+        if (c != null) {
+            Iptv.Item s = findStream(c, u);
+            stream = s == null ? 0 : c.streams.indexOf(s);
+            Prefs.setLastChannel(c.number);
+        }
+        return c;
+    }
+
+    private static Iptv.Item findStream(Channels.Channel c, String u) {
+        for (Iptv.Item i : c.streams) if (i.url.equals(u)) return i;
+        return null;
     }
 
     /** Another film or channel while this one is open (the activity is single): switch to it. */
@@ -122,10 +154,170 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         fromStart = intent.getBooleanExtra(EXTRA_FROM_START, false);
         resumeMs = -1;
         videoW = videoH = 0;
+        replaying = null;
+        channel = channelOf(intent, url);
         java.util.Arrays.fill(rowsOf, null);
         hud.subtitle(null);
         hud.subtitleImages(new Bitmap[0], new RectF[0]);
-        if (started) build(0, "");   // still on screen: start it now (otherwise onStart does)
+        if (started) {   // still on screen: start it now (otherwise onStart does)
+            build(0, "");
+            hud.channel(channel, null);
+        }
+    }
+
+    // MARK: - Live TV: zapping, the previous channel, another stream when one fails, a programme from its start
+
+    Channels.Channel channel() { return channel; }
+
+    Epg.Show replaying() { return replaying; }
+
+    /** P+ / P− and the arrows: the banner follows each press at once, the stream once the remote rests. */
+    void zap(int step) {
+        Channels.Channel from = pendingZap != null ? pendingZap : channel;
+        if (from == null) return;
+        Channels.Channel to = Channels.get(this).step(from, step);
+        if (to != null) zapLater(to);
+    }
+
+    /** The digits, "0" and the list: straight to that channel. */
+    boolean zapTo(int number) {
+        Channels.Channel to = Channels.get(this).byNumber(number);
+        if (to == null) return false;
+        zapNow(to);
+        return true;
+    }
+
+    void zapTo(Channels.Channel to) { zapNow(to); }
+
+    void zapPrevious() {
+        if (previous != null) zapNow(previous);
+    }
+
+    private void zapLater(Channels.Channel to) {
+        pendingZap = to;
+        hud.channel(to, null);
+        main.removeCallbacks(zapRun);
+        main.postDelayed(zapRun, 420);
+    }
+
+    private void zapNow(Channels.Channel to) {
+        pendingZap = to;
+        main.removeCallbacks(zapRun);
+        commitZap();
+    }
+
+    private void commitZap() {
+        Channels.Channel to = pendingZap;
+        pendingZap = null;
+        if (to == null) return;
+        if (to == channel && replaying == null) {
+            hud.channel(channel, null);
+            return;
+        }
+        if (to != channel) previous = channel;
+        channel = to;
+        stream = 0;
+        replaying = null;
+        Prefs.setLastChannel(to.number);
+        play(to.url(), to.name, to.logo);
+    }
+
+    /** The programme on now, from its start: the panel's replay of this channel, seekable like a film. */
+    boolean startOver() {
+        Channels.Channel c = channel;
+        if (c == null || c.replay == null) return false;
+        long now = System.currentTimeMillis();
+        Epg.Show s = replaying != null ? replaying : Epg.get(this).now(c.epg, now);
+        if (s == null) return false;
+        replaying = s;
+        replayFrom(s.start);
+        return true;
+    }
+
+    /**
+     * The replay from `at`, in pieces. Asked for past what is already recorded, the panel sends at the recording's
+     * pace (0.9x measured: the picture stalls); asked for whole minutes already broadcast, it sends 5x faster and
+     * closes. So each piece stops a little before now, and the next one is asked for when it ends: the programme
+     * goes on a minute or two behind the live, without a stall.
+     */
+    private void replayFrom(long at) {
+        Channels.Channel c = channel;
+        if (c == null || c.replay == null || replaying == null) return;
+        long start = at - at % 60_000;   // the address is written to the minute
+        long recorded = Math.min(replaying.stop, System.currentTimeMillis() - 30_000) - start;
+        long minutes = Math.max(1, Math.min((replaying.stop - start + 59_999) / 60_000, recorded / 60_000));
+        segmentAt = start;
+        seekAfterReady = at - start > 1500 ? at - start : -1;
+        String u = Iptv.get(this).replayUrl(c.replay, start, minutes * 60_000);
+        play(u, replaying.title, c.logo);
+    }
+
+    /** The end of a stream: a replay goes on with its next piece (or back to the live); a channel reconnects. */
+    private boolean endedOn() {
+        if (replaying != null && player != null) {
+            long reached = segmentAt + player.getCurrentPosition();
+            long now = System.currentTimeMillis();
+            if (reached < replaying.stop - 5_000 && now - reached > 45_000) replayFrom(reached);
+            else backToLive();
+            return true;
+        }
+        if (channel != null && player != null && isLive()) {   // a live stream that stopped: take it again
+            player.seekToDefaultPosition();
+            player.prepare();
+            return true;
+        }
+        return false;
+    }
+
+    /** Back from a replay: the channel live again. */
+    private boolean backToLive() {
+        if (replaying == null || channel == null) return false;
+        replaying = null;
+        seekAfterReady = -1;
+        play(channel.url(), channel.name, channel.logo);
+        return true;
+    }
+
+    /** Another stream on the same player (no new decoder pipeline to build: faster, and the picture stays put). */
+    private void play(String u, String n, String l) {
+        url = u;
+        name = n == null ? "" : n;
+        logo = l == null ? "" : l;
+        series = null;
+        resumeMs = -1;
+        java.util.Arrays.fill(rowsOf, null);
+        hud.subtitle(null);
+        hud.subtitleImages(new Bitmap[0], new RectF[0]);
+        hud.loading(name, kind());
+        hud.channel(channel, replaying);
+        if (player == null) {
+            if (started) build(0, "");
+            return;
+        }
+        ready = false;
+        failed = false;
+        startNote = "";
+        player.setMediaItem(MediaItem.fromUri(url));
+        player.prepare();
+        player.setPlayWhenReady(true);
+    }
+
+    /** A channel's stream that fails: its next one (the panel lists 3-7 per channel), before saying it fails. */
+    private boolean nextStream() {
+        Channels.Channel c = channel;
+        if (c == null || replaying != null || stream + 1 >= c.streams.size()) return false;
+        stream++;
+        Iptv.Item s = c.streams.get(stream);
+        AppLog.w("player: " + c.name + " stream " + stream + "/" + c.streams.size());
+        url = s.url;
+        ready = false;
+        failed = false;
+        if (player != null) {
+            player.setMediaItem(MediaItem.fromUri(url));
+            player.prepare();
+            player.setPlayWhenReady(true);
+        }
+        return true;
     }
 
     private boolean started;
@@ -135,7 +327,8 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     }
 
     private String kind() {
-        return url.contains("/movie/") ? "Film" : url.contains("/series/") ? "Série" : isLive() ? "En direct" : "";
+        return url.contains("/movie/") ? "Film" : url.contains("/series/") ? "Série" : isLive() ? "En direct"
+                : url.contains("/timeshift/") ? "Replay" : "";
     }
 
     // MARK: - Playback
@@ -207,14 +400,24 @@ public final class Player extends Activity implements androidx.media3.common.Pla
             if (!ready) {
                 ready = true;
                 onReady();
+                if (seekAfterReady > 0) {   // a replay's next piece: from the second it was left
+                    player.seekTo(seekAfterReady);
+                    seekAfterReady = -1;
+                }
             }
         } else if (state == androidx.media3.common.Player.STATE_ENDED) {
+            if (endedOn()) return;
             remember();
             finish();
         }
     }
 
     private void onReady() {
+        if (replaying != null) {   // a replay: the bar is the programme's, whatever piece plays
+            buildRows();
+            hud.prepared(false, replaying.stop - replaying.start, "Depuis le début  ·  " + Epg.span(replaying), "");
+            return;
+        }
         long duration = player.getDuration();
         boolean live = isLive() || player.isCurrentMediaItemLive() || duration == C.TIME_UNSET || duration <= 0;
         buildRows();
@@ -234,8 +437,9 @@ public final class Player extends Activity implements androidx.media3.common.Pla
             player.prepare();
             return;
         }
-        failed = true;
         AppLog.w("player: " + e.getErrorCodeName() + " " + e.getMessage());
+        if (nextStream()) return;
+        failed = true;
         hud.fail(e.getErrorCodeName().replace("ERROR_CODE_", "").toLowerCase(Locale.ROOT).replace('_', ' '));
     }
 
@@ -304,11 +508,15 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     // MARK: - For the controls (all on the main thread, where the player lives)
 
     long currentPosition() {
-        return player == null ? 0 : Math.max(0, player.getCurrentPosition());
+        if (player == null) return 0;
+        long p = seekAfterReady > 0 ? seekAfterReady : Math.max(0, player.getCurrentPosition());
+        return replaying != null ? segmentAt - replaying.start + p : p;
     }
 
     long bufferedPosition() {
-        return player == null ? 0 : Math.max(0, player.getBufferedPosition());
+        if (player == null) return 0;
+        long b = Math.max(0, player.getBufferedPosition());
+        return replaying != null ? segmentAt - replaying.start + b : b;
     }
 
     boolean isPlaying() {
@@ -325,7 +533,17 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     }
 
     void seek(long ms) {
-        if (player != null) player.seekTo(Math.max(0, ms));
+        if (player == null) return;
+        if (replaying == null) {
+            player.seekTo(Math.max(0, ms));
+            return;
+        }
+        // a replay: in the piece that plays, or a new piece from there (never past what is recorded)
+        long at = Math.min(replaying.start + Math.max(0, ms), System.currentTimeMillis() - 90_000);
+        at = Math.max(replaying.start, at);
+        long piece = player.getDuration();
+        if (at >= segmentAt && piece != C.TIME_UNSET && at < segmentAt + piece - 2_000) player.seekTo(at - segmentAt);
+        else replayFrom(at);
     }
 
     String[] menuRows(int menu) {
@@ -489,12 +707,13 @@ public final class Player extends Activity implements androidx.media3.common.Pla
 
     @Override public void onBackPressed() {
         if (hud != null && hud.back()) return;
+        if (backToLive()) return;
         super.onBackPressed();
     }
 
     /** Remembers where this stream stopped, so the film or episode comes back where it was left. */
     private void remember() {
-        if (player == null || !ready || failed) return;
+        if (player == null || !ready || failed || url.contains("/timeshift/")) return;
         long duration = player.getDuration();
         if (duration == C.TIME_UNSET) return;
         Prefs.saveProgress(url, name, logo, player.getCurrentPosition(), duration, series);
@@ -522,6 +741,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     }
 
     @Override protected void onDestroy() {
+        main.removeCallbacks(zapRun);
         if (hud != null) hud.stopTimers();
         release();
         super.onDestroy();

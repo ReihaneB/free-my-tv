@@ -15,6 +15,8 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 
+import java.util.List;
+
 /**
  * The player's controls, after tvOS 26: a scrim at the foot of the picture, the title, three glass buttons
  * (subtitles, audio, format), a glass progress bar with the elapsed and remaining time under it, and the track
@@ -34,7 +36,12 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private static final int HIDE_MS = 5000, COMMIT_MS = 700;
     private static final int RED = 0xFFFF453A;
 
-    private static final int CONTROLS = 0, BAR = 1, SUBS = 2, MENU = 3, GLYPH = 4, SPINNER = 5, ERROR = 6, IMAGES = 7;
+    private static final int CONTROLS = 0, BAR = 1, SUBS = 2, MENU = 3, GLYPH = 4, SPINNER = 5, ERROR = 6, IMAGES = 7,
+            LIST = 8, DIGITS = 9;
+    /** In `buttons`: "Depuis le début" (a channel with a replay), the others are the popovers' menus. */
+    private static final int START_OVER = -1;
+    private static final int[] VOD_BUTTONS = {MENU_SUBS, MENU_AUDIO, MENU_FORMAT};
+    private static final int[] LIVE_BUTTONS = {START_OVER, MENU_SUBS, MENU_AUDIO, MENU_FORMAT};
 
     /** One part of the controls: draws in screen coordinates, through the HUD. */
     private final class Layer extends View {
@@ -58,7 +65,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     }
 
     private final Player host;
-    private final Layer controls, bar, subs, images, menuView, glyphView, spinner, errorView;
+    private final Layer controls, bar, subs, images, menuView, glyphView, spinner, errorView, listView, digitsView;
     private final Layer[] layers, fading;
     private float k = 1, w, h;
 
@@ -81,7 +88,32 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     private static final int ON_BAR = 0, ON_BUTTONS = 1;
     private int focus = ON_BAR, button;
     private float barOn = 1, hudA, hudTo, scrubA;
-    private final float[] buttonOn = new float[3];
+    private final float[] buttonOn = new float[4];
+    private int[] buttons = VOD_BUTTONS;
+
+    // live TV: the channel, its logo, its programme now and next (read from the guide when it ends)
+    private Channels.Channel channel;
+    private Epg.Show replay;
+    private Bitmap logoBmp, logoFace;
+    private String logoUrl = "";
+    private Epg.Show liveShow, liveNext;
+    private long liveUntil;
+    private String liveMeta = "", liveLeft = "", liveNextText = "";
+    private final Epg.Listener guideChanged = this::onGuide;
+
+    // the channel list (OK on a channel): every channel, its number, its logo and what it shows
+    private boolean listOpen, listClosing;
+    private int listRow, listFirst, listVisible;
+    private float listA, listLens, listRowH, listHead;
+    private final RectF listPanel = new RectF();
+    private Bitmap listFace, listShadow;
+    private int listPad;
+    private Paint listNumP, listNameP, listShowP, digitsP, digitsNameP;
+
+    // the digits: "1", "12" — the channel comes after a short pause or at the third digit
+    private final StringBuilder digits = new StringBuilder();
+    private String digitsNote = "";
+    private final Runnable digitsRun = this::commitDigits, noteRun = this::clearNote;
 
     // the popover
     private int menu = -1, row, checked = -1, first;
@@ -107,7 +139,8 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
 
     // layout
     private float margin, barCY, timesBase, titleBase, metaBase, buttonD, buttonGap, buttonCY, rowH, headH, rise;
-    private Liquid.Kit kitButton, kitButtonOn, kitRow, kitBubble, kitBadge, kitGlyph;
+    private Liquid.Kit kitButton, kitButtonOn, kitRow, kitBubble, kitBadge, kitGlyph, kitDigits, kitListRow;
+    private final Runnable liveBarTick = this::barTick;
 
     private final Paint glass = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Paint scrim = new Paint(Paint.DITHER_FLAG);
@@ -138,15 +171,210 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         glyphView = new Layer(c, GLYPH);
         spinner = new Layer(c, SPINNER);
         errorView = new Layer(c, ERROR);
-        layers = new Layer[]{images, controls, bar, subs, menuView, glyphView, spinner, errorView};
+        listView = new Layer(c, LIST);
+        digitsView = new Layer(c, DIGITS);
+        layers = new Layer[]{images, controls, bar, subs, menuView, glyphView, spinner, errorView, listView, digitsView};
         fading = new Layer[]{controls, bar};
         for (Layer l : layers) addView(l);
+        Epg.get(c).addListener(guideChanged);
+    }
+
+    // MARK: - Live TV
+
+    private void onGuide() {
+        liveUntil = 0;
+        if (channel != null) readShow(System.currentTimeMillis());
+        if (listOpen) listView.invalidate();
+    }
+
+    private void clearNote() {
+        digitsNote = "";
+        digitsView.setVisibility(INVISIBLE);
+    }
+
+    private void barTick() {
+        bar.invalidate();
+    }
+
+    /** The channel on screen (null: a film or an episode), and the programme replayed from its start if any. */
+    void channel(Channels.Channel c, Epg.Show replayed) {
+        channel = c;
+        replay = replayed;
+        buttons = c != null && replayed == null && c.replay != null ? LIVE_BUTTONS : VOD_BUTTONS;
+        button = Math.min(button, buttons.length - 1);
+        if (c == null) return;
+        if (!c.logo.equals(logoUrl)) {
+            logoUrl = c.logo;
+            final String want = c.logo;
+            logoBmp = Posters.get(getContext()).get(want, (u, b) -> post(() -> {
+                if (!u.equals(logoUrl)) return;
+                logoBmp = b;
+                controls.invalidate();
+            }));
+        }
+        liveUntil = 0;
+        readShow(System.currentTimeMillis());
+        controls.invalidate();
+        bar.invalidate();
+        hudTo = 1;
+        scheduleHide();
+        kick();
+    }
+
+    private boolean liveMode() {
+        return channel != null && replay == null;
+    }
+
+    /** The programme now and next, and the lines that say them; true when it changed. */
+    private boolean readShow(long now) {
+        if (channel == null || now < liveUntil) return false;
+        Epg guide = Epg.get(getContext());
+        Epg.Show s = guide.now(channel.epg, now), n = guide.next(channel.epg, now);
+        liveShow = s;
+        liveNext = n;
+        liveUntil = s != null ? Math.min(s.stop, now + 60_000 - now % 60_000) : now + 15_000;
+        if (replay != null) return true;
+        title = s != null ? s.title : channel.name;
+        liveMeta = channel.number + "  ·  " + channel.name + (s != null ? "  ·  " + Epg.span(s) : "");
+        liveLeft = s != null ? Epg.left(s, now) : "";
+        liveNextText = n != null ? "À suivre  ·  " + Epg.clock(n.start) + "  " + n.title : "";
+        ellipsize();
+        controls.invalidate();
+        return true;
+    }
+
+    private void activateButton() {
+        int b = buttons[Math.max(0, Math.min(buttons.length - 1, button))];
+        if (b == START_OVER) {
+            if (host.startOver()) flash("restart");
+            return;
+        }
+        openMenu(b);
+    }
+
+    private int indexOfMenu(int which) {
+        for (int i = 0; i < buttons.length; i++) if (buttons[i] == which) return i;
+        return 0;
+    }
+
+    private String iconOf(int i) {
+        int b = buttons[i];
+        return b == START_OVER ? "restart" : ICONS[b];
+    }
+
+    // MARK: - The channel list
+
+    private void openList() {
+        List<Channels.Channel> all = Channels.get(getContext()).all;
+        if (all.isEmpty()) return;
+        listOpen = true;
+        listClosing = false;
+        Channels.Channel at = channel;
+        listRow = Math.max(0, at == null ? 0 : all.indexOf(at));
+        listLens = listRow;
+        listFirst = Math.max(0, listRow - 3);
+        keepListRow(all.size());
+        List<String> ids = new java.util.ArrayList<>();
+        for (Channels.Channel c : all) if (!c.epg.isEmpty()) ids.add(c.epg);
+        Epg.get(getContext()).warm(ids);
+        hudTo = 0;
+        removeCallbacks(hideRun);
+        listA = Math.min(listA, 0.001f);
+        listView.setAlpha(0);
+        reveal(listView);
+        listView.invalidate();
+        kick();
+    }
+
+    private void closeList() {
+        listClosing = true;
+        kick();
+    }
+
+    private void keepListRow(int count) {
+        if (listVisible <= 0) return;
+        if (listRow < listFirst + 1) listFirst = listRow - 1;
+        if (listRow > listFirst + listVisible - 2) listFirst = listRow - listVisible + 2;
+        listFirst = Math.max(0, Math.min(listFirst, Math.max(0, count - listVisible)));
+    }
+
+    private boolean listKey(int code, KeyEvent e) {
+        List<Channels.Channel> all = Channels.get(getContext()).all;
+        int n = all.size();
+        switch (code) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_CHANNEL_UP:
+            case KeyEvent.KEYCODE_CHANNEL_DOWN:
+            case KeyEvent.KEYCODE_PAGE_UP:
+            case KeyEvent.KEYCODE_PAGE_DOWN: {
+                boolean down = code == KeyEvent.KEYCODE_DPAD_DOWN || code == KeyEvent.KEYCODE_CHANNEL_DOWN
+                        || code == KeyEvent.KEYCODE_PAGE_DOWN;
+                boolean page = code != KeyEvent.KEYCODE_DPAD_UP && code != KeyEvent.KEYCODE_DPAD_DOWN;
+                int step = page ? Math.max(1, listVisible - 2) : e.getRepeatCount() > 8 ? 2 : 1;
+                listRow = Math.max(0, Math.min(n - 1, listRow + (down ? step : -step)));
+                keepListRow(n);
+                listView.invalidate();
+                kick();
+                return true;
+            }
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                if (e.getRepeatCount() == 0 && listRow < n) {
+                    host.zapTo(all.get(listRow));
+                    closeList();
+                }
+                return true;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_GUIDE:
+                closeList();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // MARK: - The digits
+
+    private void digit(int d) {
+        removeCallbacks(noteRun);
+        digitsNote = "";
+        if (digits.length() == 0 && d == 0) {   // "0" alone: the channel before
+            host.zapPrevious();
+            return;
+        }
+        digits.append(d);
+        reveal(digitsView);
+        digitsView.invalidate();
+        removeCallbacks(digitsRun);
+        if (digits.length() >= 3) commitDigits();
+        else postDelayed(digitsRun, 1600);
+    }
+
+    private void commitDigits() {
+        removeCallbacks(digitsRun);
+        if (digits.length() == 0) return;
+        int n;
+        try { n = Integer.parseInt(digits.toString()); } catch (NumberFormatException e) { n = -1; }
+        digits.setLength(0);
+        if (n > 0 && host.zapTo(n)) {
+            if (listOpen) closeList();
+            digitsView.setVisibility(INVISIBLE);
+            return;
+        }
+        digitsNote = "Pas de chaîne " + n;
+        digitsView.invalidate();
+        postDelayed(noteRun, 1600);
     }
 
     // MARK: - From the player
 
     void loading(String title, String meta) {
         this.title = title == null ? "" : title;
+        liveUntil = 0;   // a channel reads its programme again (the title becomes the programme's)
         this.meta = meta;
         ready = false;
         failed = false;
@@ -248,7 +476,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         errorDetail = "";
         buffering = false;
         hudTo = 0;
-        errorView.setVisibility(VISIBLE);
+        reveal(errorView);
         errorView.invalidate();
         kick();
     }
@@ -256,6 +484,10 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     void stopTimers() {
         removeCallbacks(hideRun);
         removeCallbacks(commitRun);
+        removeCallbacks(digitsRun);
+        removeCallbacks(noteRun);
+        removeCallbacks(liveBarTick);
+        Epg.get(getContext()).removeListener(guideChanged);
         Choreographer.getInstance().removeFrameCallback(this);
         framePosted = false;
     }
@@ -264,6 +496,16 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
 
     /** Back: closes what is open first; false when there is nothing left to close (the player leaves). */
     boolean back() {
+        if (listOpen && !listClosing) {
+            closeList();
+            return true;
+        }
+        if (digits.length() > 0) {
+            digits.setLength(0);
+            removeCallbacks(digitsRun);
+            digitsView.setVisibility(INVISIBLE);
+            return true;
+        }
         if (menu >= 0 && !menuClosing) {
             closeMenu();
             return true;
@@ -282,7 +524,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     }
 
     boolean key(int code, KeyEvent e) {
-        if (failed) return false;
+        if (failed && channel == null) return false;   // a channel that fails can still be zapped away from
         int repeat = e.getRepeatCount();
         if (menu >= 0 && !menuClosing) {
             switch (code) {
@@ -314,12 +556,40 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
                     return false;
             }
         }
+        if (code >= KeyEvent.KEYCODE_0 && code <= KeyEvent.KEYCODE_9 && channel != null) {
+            if (repeat == 0) digit(code - KeyEvent.KEYCODE_0);
+            return true;
+        }
+        if (listOpen && !listClosing && listKey(code, e)) return true;
+        if (channel != null) {
+            switch (code) {
+                case KeyEvent.KEYCODE_CHANNEL_UP:
+                    host.zap(1);
+                    return true;
+                case KeyEvent.KEYCODE_CHANNEL_DOWN:
+                    host.zap(-1);
+                    return true;
+                case KeyEvent.KEYCODE_LAST_CHANNEL:
+                    if (repeat == 0) host.zapPrevious();
+                    return true;
+                case KeyEvent.KEYCODE_GUIDE:
+                    if (repeat == 0) openList();
+                    return true;
+                case KeyEvent.KEYCODE_INFO:
+                    show();
+                    return true;
+                default:
+                    break;
+            }
+        }
+        if (liveMode() && liveKey(code, repeat)) return true;
+        if (failed) return false;
         switch (code) {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
                 if (repeat > 0 || !ready) return true;
-                if (visible() && focus == ON_BUTTONS) openMenu(button);
+                if (visible() && focus == ON_BUTTONS) activateButton();
                 else if (scrubbing) commitScrub();
                 else togglePause();
                 return true;
@@ -337,7 +607,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
             case KeyEvent.KEYCODE_DPAD_RIGHT: {
                 boolean forward = code == KeyEvent.KEYCODE_DPAD_RIGHT;
                 if (visible() && focus == ON_BUTTONS) {
-                    button = Math.max(0, Math.min(ICONS.length - 1, button + (forward ? 1 : -1)));
+                    button = Math.max(0, Math.min(buttons.length - 1, button + (forward ? 1 : -1)));
                     show();
                     return true;
                 }
@@ -366,6 +636,54 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
                 } else {
                     show();
                 }
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * A channel, as a box does it: up / down change channel, OK opens the list, right reaches the buttons
+     * (Depuis le début, subtitles, audio, format), left and right only show the banner otherwise.
+     */
+    private boolean liveKey(int code, int repeat) {
+        switch (code) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                if (visible() && focus == ON_BUTTONS) {
+                    show();
+                    return true;
+                }
+                host.zap(1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                if (focus == ON_BUTTONS) {
+                    focus = ON_BAR;
+                    show();
+                    return true;
+                }
+                host.zap(-1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                if (visible() && focus == ON_BUTTONS) button = Math.min(buttons.length - 1, button + 1);
+                else if (visible() && ready) {
+                    focus = ON_BUTTONS;
+                    button = 0;
+                }
+                show();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                if (visible() && focus == ON_BUTTONS) {
+                    if (button == 0) focus = ON_BAR;
+                    else button--;
+                }
+                show();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                if (repeat > 0) return true;
+                if (visible() && focus == ON_BUTTONS && ready) activateButton();
+                else openList();
                 return true;
             default:
                 return false;
@@ -501,7 +819,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         hudTo = 1;
         menuA = 0;
         menuView.setAlpha(0);
-        menuView.setVisibility(VISIBLE);
+        reveal(menuView);
         menuView.invalidate();
         kick();
     }
@@ -528,7 +846,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         float pw = size[0], ph = size[1];
         visibleRows = (int) size[2];
         // it ends just past its own button (the one that opened it), kept inside the margin
-        float right = Math.round(Math.min(w - margin, buttonCX(menu) + buttonD / 2 + 22 * k));
+        float right = Math.round(Math.min(w - margin, buttonCX(indexOfMenu(menu)) + buttonD / 2 + 22 * k));
         float bottom = Math.round(buttonCY - buttonD / 2 - 22 * k);
         panel.set(right - pw, bottom - ph, right, bottom);
         int iw = (int) pw, ih = (int) ph;
@@ -546,7 +864,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         int l = Math.round(panel.left) - panelPad, t = Math.round(panel.top) - panelPad;
         int rr = Math.round(panel.right) + panelPad, b = Math.round(panel.bottom + panelPad + 14 * k);
         place(menuView, l, t, rr, b);
-        menuView.setPivotX(buttonCX(menu) - l);   // it grows out of its button
+        menuView.setPivotX(buttonCX(indexOfMenu(menu)) - l);   // it grows out of its button
         menuView.setPivotY(b - t);
     }
 
@@ -634,10 +952,32 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
             }
         }
 
+        // the channel list slides in from the left and the lit row glides
+        if (listOpen) {
+            float to = listClosing ? 0 : 1;
+            if (listA != to) {
+                listA = approach(listA, to, dt * (listClosing ? 14f : 11f));
+                listView.setAlpha(listA);
+                listView.setTranslationX(-(1 - listA) * 36 * k);
+                more |= listA != to;
+            }
+            if (listLens != listRow) {
+                listLens = approach(listLens, listRow, dt * 20f);
+                if (Math.abs(listLens - listRow) < 0.01f) listLens = listRow;
+                listView.invalidate();
+                more = true;
+            }
+            if (listClosing && listA == 0) {
+                listOpen = false;
+                listClosing = false;
+                listView.setVisibility(INVISIBLE);
+            }
+        }
+
         // the spinner turns (rotation of a drawn arc)
         boolean spinning = !failed && (!ready || buffering);
         if (spinning) {
-            if (spinner.getVisibility() != VISIBLE) spinner.setVisibility(VISIBLE);
+            if (spinner.getVisibility() != VISIBLE) reveal(spinner);
             spinner.setRotation((now % 1100) / 1100f * 360f);
             more = true;
         } else if (spinner.getVisibility() == VISIBLE) {
@@ -657,7 +997,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
                 glyphView.setAlpha(Math.max(0, in * out));
                 glyphView.setScaleX(s);
                 glyphView.setScaleY(s);
-                if (glyphView.getVisibility() != VISIBLE) glyphView.setVisibility(VISIBLE);
+                if (glyphView.getVisibility() != VISIBLE) reveal(glyphView);
                 more = true;
             }
         }
@@ -722,8 +1062,46 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         kitBubble = Liquid.capsule(Liquid.PANEL, Math.round(46 * k), k, true);
         kitBadge = Liquid.capsule(Liquid.PANEL, Math.round(42 * k), k, false);
         kitGlyph = Liquid.capsule(Liquid.PANEL, Math.round(128 * k), k, false);
+
+        // live TV: the logo's glass card, the channel list's panel and its lines, the digits
+        kitDigits = Liquid.capsule(Liquid.PANEL, Math.round(104 * k), k, false);
+        kitListRow = Liquid.capsule(Liquid.LIT, Math.round(86 * k - 12 * k), k, false);
+        float cardH = Math.round(logoCardH()), cardW = Math.round(cardH * 16 / 9f);
+        logoFace = Liquid.face(Liquid.CLEAR, (int) cardW, (int) cardH, 18 * k, k);
+        listNumP = Ui.numbers(Ui.semibold, 24 * k, 0x99FFFFFF);
+        listNumP.setTextAlign(Paint.Align.RIGHT);
+        listNameP = Ui.text(Ui.medium, 25 * k, 0xEBFFFFFF);
+        listShowP = Ui.text(Ui.regular, 20 * k, 0x99FFFFFF);
+        digitsP = Ui.numbers(Ui.semibold, 58 * k, 0xFFFFFFFF);
+        digitsP.setTextAlign(Paint.Align.CENTER);
+        digitsNameP = Ui.text(Ui.medium, 22 * k, 0xCCFFFFFF);
+        digitsNameP.setTextAlign(Paint.Align.CENTER);
+        listRowH = 86 * k;
+        listHead = 78 * k;
+        float lw = Math.round(720 * k), lh = Math.round(h - 2 * 60 * k);
+        listPanel.set(Math.round(64 * k), Math.round(60 * k), Math.round(64 * k) + lw, Math.round(60 * k) + lh);
+        listVisible = (int) Math.max(3, Math.floor((lh - listHead - 12 * k) / listRowH));
+        listPad = Math.round(30 * k);
+        final int pw = (int) lw, ph = (int) lh;
+        final float kk = k;
+        Thread t = new Thread(() -> {   // ~3 MB of glass: baked off the UI thread, the list opens without a frame lost
+            Bitmap face = Liquid.face(Liquid.PANEL, pw, ph, 34 * kk, kk);
+            Bitmap shadow = Liquid.shadow(pw, ph, 34 * kk, Math.round(30 * kk), 26 * kk, 0.45f, 0.5f, -8 * kk);
+            post(() -> {
+                listFace = face;
+                listShadow = shadow;
+                if (listOpen) listView.invalidate();
+            });
+        }, "list glass");
+        t.setPriority(Thread.MIN_PRIORITY);
+        t.start();
         ellipsize();
         kick();
+    }
+
+    /** The logo card spans the channel's two lines (number and name, then the programme). */
+    private float logoCardH() {
+        return (titleBase - metaBase) + Ui.cap(metaP) + 26 * k;
     }
 
     @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
@@ -740,7 +1118,21 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         place(spinner, Math.round(cx - s), Math.round(cy - s), Math.round(cx + s), Math.round(cy + s));
         place(errorView, Math.round(cx - 470 * k), Math.round(cy - 130 * k), Math.round(cx + 470 * k),
                 Math.round(cy + 130 * k));
+        place(listView, Math.round(listPanel.left) - listPad, Math.round(listPanel.top) - listPad,
+                Math.round(listPanel.right) + listPad, Math.round(listPanel.bottom) + listPad + Math.round(14 * k));
+        place(digitsView, Math.round(W - margin - 300 * k), Math.round(56 * k), Math.round(W - margin), Math.round(220 * k));
         if (menu >= 0) layoutMenu();
+    }
+
+    /**
+     * Shows a layer that was hidden. The picture is a SurfaceView, which makes the window transparent wherever no
+     * view was visible at the last layout: a layer that only turns VISIBLE is drawn but never composited over the
+     * video (the digits stayed black). A layout pass is what tells the system the window is opaque there again.
+     */
+    private void reveal(Layer l) {
+        if (l.getVisibility() == VISIBLE) return;
+        l.setVisibility(VISIBLE);
+        requestLayout();
     }
 
     private static void place(View v, int l, int t, int r, int b) {
@@ -751,7 +1143,9 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
 
     private void ellipsize() {
         if (w <= 0) return;
-        float max = w - 2 * margin - 3 * buttonD - 2 * buttonGap - 48 * k;
+        int nb = buttons.length;
+        float max = w - 2 * margin - nb * buttonD - (nb - 1) * buttonGap - 48 * k;
+        if (liveMode() && logoFace != null) max -= logoFace.getWidth() + 28 * k;
         titleShown = TextUtils.ellipsize(title, titleP, max, TextUtils.TruncateAt.END).toString();
     }
 
@@ -770,6 +1164,8 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
             case GLYPH: paintGlyph(c); break;
             case SPINNER: Ui.spinner(c, w / 2f, h / 2f, 30 * k, 0, spin); break;
             case ERROR: if (failed) paintError(c); break;
+            case LIST: if (listOpen) paintList(c); break;
+            case DIGITS: paintDigits(c); break;
             default: break;
         }
     }
@@ -779,6 +1175,10 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         // scrubbing: the time and the bar are all that matter, the title and buttons step aside
         float a = 1 - scrubA;
         if (a <= 0) return;
+        if (liveMode()) {
+            paintLiveControls(c, a);
+            return;
+        }
         String m = note.isEmpty() ? meta : meta + "  ·  " + note;
         if (!m.isEmpty()) {
             metaP.setColor(Ui.alpha(0xB3FFFFFF, a));
@@ -786,22 +1186,73 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         }
         titleP.setColor(Ui.alpha(0xFFFFFFFF, a));
         c.drawText(titleShown, margin - Ui.leftBearing(titleP, titleShown), titleBase, titleP);
-        for (int i = 0; i < ICONS.length; i++) {
+        paintButtons(c, a);
+    }
+
+    private void paintButtons(Canvas c, float a) {
+        for (int i = 0; i < buttons.length; i++) {
             float on = buttonOn[i];
             float cx = buttonCX(i), r = buttonD / 2 * (1 + 0.1f * on);
             box.set(cx - r, buttonCY - r, cx + r, buttonCY + r);
             if (on < 1) Liquid.draw(c, kitButton, box, glass, a * (1 - on), false, 0);
             if (on > 0) Liquid.draw(c, kitButtonOn, box, glass, a * on, true, 7 * k);
-            Symbols.draw(getContext(), c, ICONS[i], cx, buttonCY, 25 * k * (1 + 0.08f * on),
+            Symbols.draw(getContext(), c, iconOf(i), cx, buttonCY, 25 * k * (1 + 0.08f * on),
                     Ui.alpha(0xFFFFFFFF, a * (0.82f + 0.18f * on)));
+        }
+        // the focused button says what it does, under it (as on the film's page)
+        if (focus == ON_BUTTONS && hudTo > 0 && button < buttons.length && buttons[button] == START_OVER) {
+            String n = "Depuis le début";
+            metaP.setColor(Ui.alpha(0xE6FFFFFF, a));
+            float nw = metaP.measureText(n);
+            c.drawText(n, Math.min(w - margin - nw, buttonCX(button) - nw / 2), buttonCY + buttonD / 2 + 36 * k, metaP);
         }
     }
 
+    /** A channel: its logo on a glass card, its number and name with the programme's hours, then the programme. */
+    private void paintLiveControls(Canvas c, float a) {
+        readShow(System.currentTimeMillis());
+        float x = margin;
+        if (logoFace != null) {
+            float ch = logoFace.getHeight(), cw = logoFace.getWidth();
+            float top = titleBase + 12 * k - ch;
+            glass.setAlpha(Math.round(255 * a));
+            c.drawBitmap(logoFace, x, top, glass);
+            glass.setAlpha(255);
+            if (logoBmp != null) {
+                box.set(x + 18 * k, top + 14 * k, x + cw - 18 * k, top + ch - 14 * k);
+                float bw = logoBmp.getWidth(), bh = logoBmp.getHeight();
+                float s = Math.min(box.width() / bw, box.height() / bh);
+                float dw = bw * s, dh = bh * s;
+                track.set(box.centerX() - dw / 2, box.centerY() - dh / 2, box.centerX() + dw / 2, box.centerY() + dh / 2);
+                imagePaint.setAlpha(Math.round(255 * a));
+                c.drawBitmap(logoBmp, null, track, imagePaint);
+                imagePaint.setAlpha(255);
+            } else {
+                titleP.setTextSize(30 * k);
+                titleP.setColor(Ui.alpha(0xE6FFFFFF, a));
+                titleP.setTextAlign(Paint.Align.CENTER);
+                c.drawText(String.valueOf(channel.number), x + cw / 2, top + ch / 2 + Ui.halfCap(titleP), titleP);
+                titleP.setTextAlign(Paint.Align.LEFT);
+                titleP.setTextSize(46 * k);
+            }
+            x += cw + 28 * k;
+        }
+        metaP.setColor(Ui.alpha(0xCCFFFFFF, a));
+        c.drawText(liveMeta, x, metaBase, metaP);
+        titleP.setColor(Ui.alpha(0xFFFFFFFF, a));
+        c.drawText(titleShown, x - Ui.leftBearing(titleP, titleShown), titleBase, titleP);
+        paintButtons(c, a);
+    }
+
     private float buttonCX(int i) {
-        return w - margin - buttonD / 2 - (ICONS.length - 1 - i) * (buttonD + buttonGap);
+        return w - margin - buttonD / 2 - (buttons.length - 1 - i) * (buttonD + buttonGap);
     }
 
     private void paintBar(Canvas c) {
+        if (liveMode()) {   // a channel of the lineup: its programme shows while the stream starts
+            paintLive(c);
+            return;
+        }
         if (!ready) return;
         if (live) {
             paintLive(c);
@@ -865,14 +1316,149 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         if (playing && !scrubbing && hudTo > 0) bar.postInvalidateDelayed(1000 - (shown % 1000) + 8);
     }
 
+    /**
+     * Live: the programme's progress from its start to its end, "● EN DIRECT · il reste 35 min" under its left end
+     * and what comes next under its right end. Without a guide, the badge alone.
+     */
     private void paintLive(Canvas c) {
-        String label = "EN DIRECT";
-        float bh = kitBadge.h, bw = badgeP.measureText(label) + 62 * k;
-        box.set(margin, barCY - bh / 2, margin + bw, barCY + bh / 2);
-        Liquid.draw(c, kitBadge, box, glass, 1, false, 0);
+        long now = System.currentTimeMillis();
+        if (readShow(now)) controls.invalidate();
+        Epg.Show s = channel != null ? liveShow : null;
+        if (s == null) {
+            String label = "EN DIRECT";
+            float bh = kitBadge.h, bw = badgeP.measureText(label) + 62 * k;
+            box.set(margin, barCY - bh / 2, margin + bw, barCY + bh / 2);
+            Liquid.draw(c, kitBadge, box, glass, 1, false, 0);
+            fill.setColor(RED);
+            c.drawCircle(box.left + 24 * k, barCY, 6 * k, fill);
+            c.drawText(label, box.left + 40 * k, barCY + Ui.halfCap(badgeP), badgeP);
+            return;
+        }
+        float bh = 8 * k;
+        track.set(margin, barCY - bh / 2, w - margin, barCY + bh / 2);
+        float r = bh / 2;
+        fill.setColor(0x4DFFFFFF);
+        c.drawRoundRect(track, r, r, fill);
+        float x = track.left + s.progress(now) * track.width();
+        box.set(track.left, track.top, Math.max(track.left + bh, x), track.bottom);
+        fill.setColor(0xF2FFFFFF);
+        c.drawRoundRect(box, r, r, fill);
+
         fill.setColor(RED);
-        c.drawCircle(box.left + 24 * k, barCY, 6 * k, fill);
-        c.drawText(label, box.left + 40 * k, barCY + Ui.halfCap(badgeP), badgeP);
+        float dotY = timesBase - Ui.cap(timeP) / 2;
+        c.drawCircle(margin + 6 * k, dotY, 6 * k, fill);
+        timeP.setTextAlign(Paint.Align.LEFT);
+        String left = "EN DIRECT" + (liveLeft.isEmpty() ? "" : "  ·  " + liveLeft);
+        c.drawText(left, margin + 22 * k, timesBase, timeP);
+        if (!liveNextText.isEmpty()) {
+            float room = w - 2 * margin - timeP.measureText(left) - 80 * k;
+            String next = TextUtils.ellipsize(liveNextText, new TextPaint(timeP), room, TextUtils.TruncateAt.END).toString();
+            timeP.setTextAlign(Paint.Align.RIGHT);
+            c.drawText(next, w - margin, timesBase, timeP);
+        }
+        // the programme moves on: twice a minute is enough for its bar
+        removeCallbacks(liveBarTick);
+        if (hudTo > 0) postDelayed(liveBarTick, 30_000);
+    }
+
+    /**
+     * Every channel, as a box lists them: number, logo, name and what it shows with its progress. The lit row is the
+     * one OK goes to; the channel on screen has a red dot.
+     */
+    private void paintList(Canvas c) {
+        List<Channels.Channel> all = Channels.get(getContext()).all;
+        if (listShadow != null) {
+            box.set(listPanel.left - listPad, listPanel.top - listPad + 14 * k, listPanel.right + listPad,
+                    listPanel.bottom + listPad + 14 * k);
+            c.drawBitmap(listShadow, null, box, glass);
+        }
+        if (listFace != null) c.drawBitmap(listFace, null, listPanel, glass);
+        else {
+            fill.setColor(0xE05A6168);
+            c.drawRoundRect(listPanel, 34 * k, 34 * k, fill);
+        }
+        headP.setTextAlign(Paint.Align.LEFT);
+        c.drawText("Chaînes", listPanel.left + 34 * k, listPanel.top + 48 * k, headP);
+        headP.setTextAlign(Paint.Align.RIGHT);
+        c.drawText(Epg.clock(System.currentTimeMillis()), listPanel.right - 34 * k, listPanel.top + 48 * k, headP);
+        headP.setTextAlign(Paint.Align.LEFT);
+
+        c.save();
+        c.clipRect(listPanel.left, listPanel.top + listHead - 6 * k, listPanel.right, listPanel.bottom - 8 * k);
+        float top = listPanel.top + listHead;
+        float ly = top + (listLens - listFirst) * listRowH;
+        box.set(listPanel.left + 12 * k, ly + 6 * k, listPanel.right - 12 * k, ly + listRowH - 6 * k);
+        Liquid.draw(c, kitListRow, box, glass, 1, false, 0);
+        long now = System.currentTimeMillis();
+        Epg guide = Epg.get(getContext());
+        Posters posters = Posters.get(getContext());
+        int last = Math.min(all.size(), listFirst + listVisible + 1);
+        for (int i = listFirst; i < last; i++) {
+            Channels.Channel ch = all.get(i);
+            float y = top + (i - listFirst) * listRowH, cy = y + listRowH / 2;
+            float on = Math.max(0, 1 - Math.abs(listLens - i));
+            int ink = blend(0xEBFFFFFF, Liquid.INK_ON_LIT, on), dim = blend(0x99FFFFFF, 0xB30B1116, on);
+            listNumP.setColor(dim);
+            c.drawText(String.valueOf(ch.number), listPanel.left + 92 * k, cy + Ui.halfCap(listNumP), listNumP);
+            Bitmap logo = posters.get(ch.logo, (u, b) -> post(listView::invalidate));
+            float lx = listPanel.left + 112 * k, lw = 96 * k, lh = 54 * k;
+            // logos are white more often than not: they sit on a dark chip, so the lit row doesn't swallow them
+            track.set(lx - 8 * k, cy - lh / 2 - 6 * k, lx + lw + 8 * k, cy + lh / 2 + 6 * k);
+            fill.setColor(blend(0x1F000000, 0xF21A2329, on));
+            c.drawRoundRect(track, 12 * k, 12 * k, fill);
+            if (logo != null) {
+                float bw = logo.getWidth(), bh = logo.getHeight();
+                float s = Math.min(lw / bw, lh / bh);
+                track.set(lx + (lw - bw * s) / 2, cy - bh * s / 2, lx + (lw + bw * s) / 2, cy + bh * s / 2);
+                c.drawBitmap(logo, null, track, imagePaint);
+            }
+            float tx = lx + lw + 22 * k, right = listPanel.right - 44 * k;
+            Epg.Show s = guide.now(ch.epg, now);
+            listNameP.setColor(ink);
+            String name = TextUtils.ellipsize(ch.name, new TextPaint(listNameP), right - tx, TextUtils.TruncateAt.END).toString();
+            if (s == null) {
+                c.drawText(name, tx, cy + Ui.halfCap(listNameP), listNameP);
+            } else {
+                c.drawText(name, tx, cy - 6 * k, listNameP);
+                listShowP.setColor(dim);
+                String what = TextUtils.ellipsize(Epg.clock(s.start) + "  " + s.title, new TextPaint(listShowP),
+                        right - tx, TextUtils.TruncateAt.END).toString();
+                c.drawText(what, tx, cy + 24 * k, listShowP);
+                float pw = right - tx, py = cy + 34 * k;
+                track.set(tx, py, tx + pw, py + 3 * k);
+                fill.setColor(on > 0.5f ? 0x330B1116 : 0x33FFFFFF);
+                c.drawRoundRect(track, 1.5f * k, 1.5f * k, fill);
+                track.right = tx + Math.max(4 * k, pw * s.progress(now));
+                fill.setColor(on > 0.5f ? 0xCC0B1116 : 0xCCFFFFFF);
+                c.drawRoundRect(track, 1.5f * k, 1.5f * k, fill);
+            }
+            if (ch == channel) {
+                fill.setColor(RED);
+                c.drawCircle(listPanel.right - 26 * k, cy, 5 * k, fill);
+            }
+        }
+        c.restore();
+    }
+
+    /** "12–" in a glass capsule at the top right, the channel it will be under it. */
+    private void paintDigits(Canvas c) {
+        if (digits.length() == 0 && digitsNote.isEmpty()) return;
+        float cx = w - margin - 150 * k, cy = 56 * k + 64 * k;
+        box.set(cx - 130 * k, cy - 52 * k, cx + 130 * k, cy + 52 * k);
+        Liquid.draw(c, kitDigits, box, glass, 1, false, 0);
+        if (!digitsNote.isEmpty()) {
+            c.drawText(digitsNote, cx, cy + Ui.halfCap(digitsNameP), digitsNameP);
+            return;
+        }
+        StringBuilder shown = new StringBuilder(digits);
+        while (shown.length() < 2) shown.append('–');
+        c.drawText(shown.toString(), cx, cy + Ui.halfCap(digitsP) - 8 * k, digitsP);
+        Channels.Channel to = null;
+        try { to = Channels.get(getContext()).byNumber(Integer.parseInt(digits.toString())); } catch (Exception ignored) { }
+        if (to != null) {
+            String n = TextUtils.ellipsize(to.name, new TextPaint(digitsNameP), 230 * k, TextUtils.TruncateAt.END).toString();
+            c.drawText(n, cx, cy + 40 * k, digitsNameP);
+        }
     }
 
     private void paintSubtitles(Canvas c) {

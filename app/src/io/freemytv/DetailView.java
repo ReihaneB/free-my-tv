@@ -875,7 +875,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         host.watchingChanged();
     }
 
-    /** The trailer, in the TV's YouTube. */
+    /** The trailer, in SmartTube (the TV's YouTube app is gone: SmartTube is the only player). */
     private void trailer() {
         if (detail == null || detail.trailer.isEmpty()) return;
         String t = detail.trailer.trim();
@@ -883,7 +883,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         String id = m.find() ? m.group(1) : t;
         Uri uri = Uri.parse("https://www.youtube.com/watch?v=" + id);
         Intent it = new Intent(Intent.ACTION_VIEW, uri);
-        it.setPackage("com.google.android.youtube.tv");
+        it.setPackage("org.smarttube.stable");
         it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
             getContext().startActivity(it);

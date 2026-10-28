@@ -413,7 +413,7 @@ final class Prefs {
     private static String defaultApp(int keyCode) {
         switch (keyCode) {
             case KEY_NETFLIX: return "com.netflix.ninja";
-            case KEY_YOUTUBE: return "com.google.android.youtube.tv";
+            case KEY_YOUTUBE: return "org.smarttube.stable";   // the TV's YouTube app is gone: SmartTube takes the key
             case KEY_PRIME: return "com.amazon.amazonvideo.livingroom";
             case KEY_TCL_CHANNEL: return "";
             default: return "";

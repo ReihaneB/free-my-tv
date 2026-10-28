@@ -89,7 +89,6 @@ final class HomeApps {
         {"steam", "Steam Link", "com.valvesoftware.steamlink", "1B2838", "", "1"},
         {"moonlight", "Moonlight", "com.limelight", "2E7D32", "", "1"},
         {"disney", "Disney+", "com.disney.disneyplus", "1838C8", "", "1"},
-        {"youtube", "YouTube", "com.google.android.youtube.tv", "FF0033", "play", "1"},
         {"max", "Max", "com.wbd.stream", "6C3BE0", "", "1.32"},
         {"appletv", "Apple TV", "com.apple.atve.androidtv.appletv", "B8BCC6", "", "1.1"},
         {"hulu", "Hulu", "com.hulu.livingroomplus", "1CE783", "", "1"},

@@ -826,6 +826,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
 
     private String nameOf(int a) {
         if (a == A_LIST) return inList() ? "Dans ma liste" : "Ma liste";
+        if (a == A_FORGET && req.series) return zone == Z_EPISODES ? "Retirer cet épisode" : "Retirer de « En cours »";
         if (a == A_WATCHED) return Prefs.isWatched(playUrl) ? "Vu — décocher" : "Marquer comme vu";
         return ACTION_NAME[a];
     }
@@ -876,13 +877,12 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
      * the home screen rebuilds its shelf while it is still under the page.
      */
     private void forget() {
-        if (req.series) {
-            List<String> urls = new ArrayList<>();
-            if (detail != null) for (Iptv.Episode e : detail.episodes) urls.add(e.url);
-            Prefs.forgetSeries(req.seriesId, urls);
-        } else {
-            Prefs.forget(playUrl);
-        }
+        // Only what the page is about: the episode under the focus in the grid when there is one, else the one
+        // Lecture / Reprendre would start. A series is not wiped for one episode left halfway.
+        String url = playUrl;
+        if (req.series && zone == Z_EPISODES && episode >= 0 && episode < episodes.size()) url = episodes.get(episode).url;
+        if (url == null || url.isEmpty()) return;
+        Prefs.forget(url);
         zone = Z_PRIMARY;
         action = 0;
         refresh();

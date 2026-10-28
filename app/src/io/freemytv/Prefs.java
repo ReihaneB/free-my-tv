@@ -129,6 +129,9 @@ final class Prefs {
             boolean movie = url.contains("/movie/"), series = url.contains("/series/"), live = url.contains("/live/");
             if (("vod".equals(type) && !movie) || ("series".equals(type) && !series) || ("live".equals(type) && !live))
                 continue;
+            // Left with a couple of minutes to go, it is as good as seen: « En cours » is for what is worth resuming.
+            long pos = parse(f[1]), dur = parse(f[2]);
+            if (dur > 600_000L && dur - pos <= 180_000L) continue;
             Iptv.Item it = new Iptv.Item();
             it.name = f[0];
             it.url = url;

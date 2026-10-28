@@ -820,7 +820,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
     /** "Depuis le début", "Bande-annonce", "Ma liste", "Retirer de « En cours »": Ma liste changes with its state. */
     private String iconOf(int a) {
         if (a == A_LIST) return inList() ? "check" : "add";
-        if (a == A_WATCHED) return "check";
+        if (a == A_WATCHED) return Prefs.isWatched(playUrl) ? "visibility" : "visibility_off";
         return ACTION_ICON[a];
     }
 

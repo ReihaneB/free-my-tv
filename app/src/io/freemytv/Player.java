@@ -559,8 +559,17 @@ public final class Player extends Activity implements androidx.media3.common.Pla
             return;
         }
         AppLog.w("player: " + e.getErrorCodeName() + " " + e.getMessage());
-        // the panel refuses a stream past the account's two connections with an empty text/html page: ask it plainly
         final String why = e.getErrorCodeName().replace("ERROR_CODE_", "").toLowerCase(Locale.ROOT).replace('_', ' ');
+        // The account's limit shows up as a container error (200 + empty text/html page). Only that case is worth a
+        // probe: a stream that dies with an IO error must fail over to the next one at once, not wait for a request.
+        boolean maybeRefused = e.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
+                || e.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED;
+        if (!maybeRefused) {
+            if (nextStream()) return;
+            failed = true;
+            hud.fail(why);
+            return;
+        }
         final String probed = url;
         new Thread(() -> {
             boolean refused = looksRefused(probed);

@@ -34,6 +34,13 @@ final class RemoteKeys {
         if (pkg.isEmpty()) return false;   // "Nothing": the key goes on as if we weren't here
         if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
             Intent intent = HomeApps.launchIntent(c.getPackageManager(), pkg);
+            if (intent == null) {   // the app chosen for this key is gone: fall back to the key's own default
+                String fallback = Prefs.defaultApp(e.getKeyCode());
+                if (!fallback.isEmpty() && !fallback.equals(pkg)) {
+                    intent = HomeApps.launchIntent(c.getPackageManager(), fallback);
+                    if (intent != null) pkg = fallback;
+                }
+            }
             AppLog.w("remote key " + e.getKeyCode() + " -> " + pkg + (intent == null ? " (not installed)" : ""));
             if (intent != null) c.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         }

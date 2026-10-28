@@ -410,7 +410,7 @@ final class Prefs {
 
     // MARK: - Remote buttons
 
-    private static String defaultApp(int keyCode) {
+    static String defaultApp(int keyCode) {
         switch (keyCode) {
             case KEY_NETFLIX: return "com.netflix.ninja";
             case KEY_YOUTUBE: return "org.smarttube.stable";   // the TV's YouTube app is gone: SmartTube takes the key

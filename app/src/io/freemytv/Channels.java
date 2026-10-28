@@ -164,6 +164,13 @@ final class Channels {
             sec.channels.add(ch);
         }
         for (Section s : bySection.values()) if (!s.channels.isEmpty()) sections.add(s);
+        // a channel the panel gives no logo for (or only its placeholder): the open tv-logos set, by name
+        for (Channel ch : all) {
+            if (ch.logo.isEmpty() || ch.logo.contains("tonicarep")) {
+                String open = Logos.url(ch.name);
+                if (!open.isEmpty()) ch.logo = open;   // tv-logos, the same Posters cache as the panel's images
+            }
+        }
     }
 
     private static int firstNon4k(Channel ch) {

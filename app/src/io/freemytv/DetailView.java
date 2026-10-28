@@ -375,6 +375,21 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         }, "detail").start();
     }
 
+    /**
+     * The episodes' missing pictures, from TMDB (the series is found by its title once, then one request per season).
+     * Off the UI thread; when they arrive the cards are rebuilt in place, nothing else moves.
+     */
+    private void askStills(final Iptv.Detail d) {
+        if (!Tmdb.available()) return;
+        final String name = d.title.isEmpty() ? title : seriesName(d.title);
+        final String year = d.year;
+        new Thread(() -> Tmdb.fill(getContext(), d, name, year, () -> post(() -> {
+            if (!open || detail != d) return;
+            buildSeason();
+            shelf.invalidate();
+        })), "tmdb-stills").start();
+    }
+
     private void loaded(Iptv.Detail d, int gen) {
         if (!open || gen != generation) return;
         detail = d;
@@ -410,6 +425,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
             }
         }
         refresh();
+        if (req.series && d != null) askStills(d);   // the panel gives some episodes no picture: TMDB has them
         if (req.series && target != null) {
             season = Math.max(0, seasonsOf().indexOf(target.season));
             buildSeason();

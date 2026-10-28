@@ -500,6 +500,24 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
     private void homeRows() {
         Iptv iptv = Iptv.get(getContext());
+        Channels lineup = Channels.get(getContext());
+
+        // En tête, les chaînes qu'il suit, avec leurs numéros (« 1 · TF1 ») : la TNT, puis ce qu'il a mis en favori
+        List<Channels.Channel> favs = new ArrayList<>();
+        for (Integer n : Prefs.favorites()) {
+            Channels.Channel c = lineup.byNumber(n);
+            if (c != null) favs.add(c);
+            if (favs.size() >= 30) break;
+        }
+        if (!favs.isEmpty()) {
+            Row row = new Row();
+            row.title = "Mes chaînes";
+            row.kind = R_CARD;
+            row.seeTab = 3;
+            row.captions = true;
+            for (Channels.Channel c : favs) row.items.add(channelTile(c));   // the caption already carries the number
+            rows.add(row);
+        }
 
         // What was left unfinished, as Apple's "Up Next": 16:9 pictures, the title and the time left under them.
         Row watching = new Row();
@@ -535,7 +553,6 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
 
         shelf("Nouveautés films", iptv.fresh("vod", 30, 24), false, 1, R_POSTER);
         shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, 2, R_POSTER);
-        Channels lineup = Channels.get(getContext());
         if (!lineup.sections.isEmpty()) channelShelf("Chaînes", lineup.sections.get(0).channels, 3);
         else shelf("Chaînes", frenchChannels(iptv, 24), false, 3, R_CARD);
         shelf("Les mieux notés", iptv.best("vod", 24), false, 1, R_POSTER);

@@ -247,7 +247,12 @@ final class GuideView extends View {
                 invalidate();
                 return true;
             case KeyEvent.KEYCODE_INFO:
-                toast(hint());
+                if (!channels.isEmpty() && row < channels.size()) {
+                    Channels.Channel ch = channels.get(row);
+                    Prefs.toggleFavorite(ch.number);   // en tête de l'accueil, ou plus
+                    toast(Prefs.favorite(ch.number) ? ch.name + " dans « Mes chaînes »"
+                            : ch.name + " retirée de « Mes chaînes »");
+                }
                 return true;
             default:
                 return true;
@@ -487,7 +492,8 @@ final class GuideView extends View {
         }
         boolean past = s.stop <= now;
         Channels.Channel ch = row < channels.size() ? channels.get(row) : null;
-        String head = ch == null ? "" : ch.number + "  ·  " + ch.name + "  ·  " + Epg.span(s);
+        String head = ch == null ? "" : (Prefs.favorite(ch.number) ? "★  " : "")
+                + ch.number + "  ·  " + ch.name + "  ·  " + Epg.span(s);
         headP.setColor(0x99FFFFFF);
         headP.setTextAlign(Paint.Align.LEFT);
         c.drawText(head, MARGIN * k, y - 30 * k, headP);
@@ -501,10 +507,9 @@ final class GuideView extends View {
         hintP.setTextAlign(Paint.Align.RIGHT);
         c.drawText(right, w - MARGIN * k, y + 6 * k, hintP);
         hintP.setTextAlign(Paint.Align.LEFT);
-        if (past) {
-            headP.setColor(0x73FFFFFF);
-            c.drawText("↑ ↓ chaînes   ← → heures   OK regarder   Retour fermer", MARGIN * k, h - 26 * k, headP);
-        }
+        headP.setColor(0x73FFFFFF);
+        c.drawText("↑ ↓ chaînes   ← → heures   OK regarder   INFO ★ mes chaînes   Retour fermer",
+                MARGIN * k, h - 26 * k, headP);
     }
 
     @Override protected void onAttachedToWindow() {

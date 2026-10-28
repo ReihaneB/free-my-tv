@@ -171,6 +171,45 @@ final class Prefs {
         return Integer.toHexString(url.hashCode());
     }
 
+    // MARK: - Chaînes favorites
+
+    /** The channels that go first on the home screen, by number; the TNT until the user picks (null = never picked). */
+    static List<Integer> favorites() {
+        String v = sp().getString("favs", null);
+        List<Integer> out = new ArrayList<>();
+        if (v == null) {
+            for (int i = 1; i <= 26; i++) out.add(i);   // the TNT, in the box's numbers
+            return out;
+        }
+        for (String s : v.split(",")) {
+            if (s.isEmpty()) continue;
+            try {
+                out.add(Integer.parseInt(s));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return out;
+    }
+
+    static boolean favorite(int number) {
+        if (number <= 0) return false;
+        String v = sp().getString("favs", null);
+        if (v == null) return number <= 26;   // the TNT, until the list is edited
+        for (String s : v.split(",")) if (s.equals(String.valueOf(number))) return true;
+        return false;
+    }
+
+    /** Adds the channel to the favourites, or takes it out (the first edit freezes the TNT default). */
+    static void toggleFavorite(int number) {
+        if (number <= 0) return;
+        List<Integer> now = favorites();
+        Integer n = number;
+        if (!now.remove(n)) now.add(n);
+        StringBuilder b = new StringBuilder();
+        for (Integer i : now) b.append(b.length() == 0 ? "" : ",").append(i);
+        put("favs", b.toString());
+    }
+
     // MARK: - Ma liste (films et séries mis de côté)
 
     private static volatile int listVersion;

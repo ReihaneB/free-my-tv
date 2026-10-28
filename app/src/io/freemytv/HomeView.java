@@ -615,6 +615,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         shelf("Nouveautés", iptv.fresh("vod", 30, 24), false, -1, R_POSTER);
         shelf("Les mieux notés", iptv.best("vod", 24), false, -1, R_POSTER);
         List<Iptv.Item> all = iptv.movies();
+        java.util.Comparator<Iptv.Item> order = Prefs.sortOrder();
         int built = 0;
         for (Iptv.Category c : iptv.movieCategories()) {
             if (built >= 12) break;
@@ -622,8 +623,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             for (Iptv.Item i : all) {
                 if (!c.id.equals(i.group) || i.name.startsWith("─") || i.name.contains("✧")) continue;
                 items.add(i);
-                if (items.size() >= 24) break;
             }
+            if (order != null) items.sort(order);   // l'ordre choisi dans Réglages, avant de n'en garder que 24
+            if (items.size() > 24) items = new ArrayList<>(items.subList(0, 24));
             if (items.size() < 4) continue;
             shelf(clean(c.name), items, false, -1, R_POSTER);
             built++;
@@ -635,6 +637,7 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         shelf("Nouvelles séries", iptv.fresh("series", 60, 24), true, -1, R_POSTER);
         shelf("Les mieux notées", iptv.best("series", 24), true, -1, R_POSTER);
         List<Iptv.Item> all = iptv.series();
+        java.util.Comparator<Iptv.Item> order = Prefs.sortOrder();
         int built = 0;
         for (Iptv.Category c : iptv.seriesCategories()) {
             if (built >= 12) break;
@@ -642,8 +645,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             for (Iptv.Item i : all) {
                 if (!c.id.equals(i.group)) continue;
                 items.add(i);
-                if (items.size() >= 24) break;
             }
+            if (order != null) items.sort(order);   // l'ordre choisi dans Réglages, avant de n'en garder que 24
+            if (items.size() > 24) items = new ArrayList<>(items.subList(0, 24));
             if (items.size() < 4) continue;
             shelf(clean(c.name), items, true, -1, R_POSTER);
             built++;

@@ -286,11 +286,17 @@ final class Prefs {
         version++;
     }
 
+    /** A year as text, with the ones the panel leaves empty pushed to the end instead of the top. */
+    private static String yearOf(Iptv.Item i) {
+        String y = i.year == null ? "" : i.year.trim();
+        return y.isEmpty() ? "0000" : y;
+    }
+
     /** The comparator the library rows use, or null for the panel's own order. */
     static java.util.Comparator<Iptv.Item> sortOrder() {
         switch (sort()) {
             case 1: return (a, b) -> Float.compare(b.rating, a.rating);
-            case 2: return (a, b) -> String.valueOf(b.year).compareTo(String.valueOf(a.year));
+            case 2: return (a, b) -> yearOf(b).compareTo(yearOf(a));
             case 3: return (a, b) -> a.name.compareToIgnoreCase(b.name);
             default: return null;
         }

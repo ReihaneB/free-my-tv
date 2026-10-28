@@ -116,10 +116,10 @@ public class SettingsActivity extends Activity {
 
     static final class SettingsView extends View implements Choreographer.FrameCallback {
         private static final int MAIN = 0, HOME_CHOICE = 1, HOME_SETTINGS = 2, REMOTE_KEYS = 3, PICKER = 4, SHELF_EDIT = 5,
-                CHANNELS = 6, CATS = 7;
+                CHANNELS = 6, CATS = 7, SORT = 8;
         private static final float LIST_ROW_H = 68, LIST_ROW_GAP = 6;
         private static final int PICK_VISIBLE = 9;
-        private static final float LIST_X = 1000, LIST_R = 1824, LIST_TOP = 186, ROW_H = 62, ROW_GAP = 6, CHOICE_H = 104;
+        private static final float LIST_X = 1000, LIST_R = 1824, LIST_TOP = 186, ROW_H = 56, ROW_GAP = 5, CHOICE_H = 104;
         private static final int AMBER = 0xFFFFC266, INK = 0xFF1C1C1E;
 
         private final SettingsActivity activity;
@@ -215,7 +215,7 @@ public class SettingsActivity extends Activity {
                     }
                     String[] names = {Ui.tr("Tela de Descanso, ver agora", "Screensaver, preview"), Ui.tr("Ajustes do Início", "Home Settings"),
                             Ui.tr("Prateleira", "Shelf"), Ui.tr("Botões do Controle", "Remote Buttons"),
-                            "Mes chaînes", "Catégories du Direct",
+                            "Mes chaînes", "Catégories du Direct", "Tri des bibliothèques",
                             Ui.tr("Ajustes da TV", "TV Settings")};
                     return row - 1 < names.length ? names[row - 1] : "";
                 }
@@ -257,6 +257,9 @@ public class SettingsActivity extends Activity {
                     String[] r = catRows.get(at);
                     return r[1] + ("1".equals(r[2]) ? ", " + Ui.tr("escondida", "hidden") : "");
                 }
+                case SORT:
+                    return row >= 0 && row < Prefs.SORT_NAMES.length
+                            ? Prefs.SORT_NAMES[row] + (row == Prefs.sort() ? ", choisi" : "") : "";
                 default:
                     return "";
             }
@@ -357,9 +360,10 @@ public class SettingsActivity extends Activity {
 
         private int rowCount() {
             switch (screen) {
-                case MAIN: return 8;
+                case MAIN: return 9;
                 case CHANNELS: return Math.min(PICK_VISIBLE, chanRows.size());
                 case CATS: return Math.min(PICK_VISIBLE, catRows.size());
+                case SORT: return Prefs.SORT_NAMES.length;
                 case HOME_CHOICE: return 2;
                 case HOME_SETTINGS: return settingLabels().length;
                 case PICKER: return Math.min(PICK_VISIBLE, pickLabels.size());
@@ -393,6 +397,7 @@ public class SettingsActivity extends Activity {
             if (screen == MAIN) drawMain(c, seconds); else if (screen == HOME_CHOICE) drawChoice(c); else if (screen == PICKER) drawPicker(c); else if (screen == SHELF_EDIT) drawShelfEditor(c);
             else if (screen == CHANNELS) drawLongList(c, "Mes chaînes", chanRows, chanScroll);
             else if (screen == CATS) drawLongList(c, "Catégories du Direct", catRows, chanScroll);
+            else if (screen == SORT) drawSort(c);
             else drawList(c);
         }
 
@@ -403,9 +408,10 @@ public class SettingsActivity extends Activity {
             String[] labels = {Ui.tr("Início", "Home Screen"), Ui.tr("Tela de Descanso", "Screensaver"),
                     Ui.tr("Ajustes do Início", "Home Settings"), Ui.tr("Prateleira", "Shelf"),
                     Ui.tr("Botões do Controle", "Remote Buttons"), "Mes chaînes",
-                    "Catégories du Direct", Ui.tr("Ajustes da TV", "TV Settings")};
-            String[] values = {working ? "" : mode, Ui.tr("Ver agora", "Preview"), "", "", "", "", "", ""};
-            for (int i = 0; i < 8; i++) {
+                    "Catégories du Direct", "Tri des bibliothèques", Ui.tr("Ajustes da TV", "TV Settings")};
+            String[] values = {working ? "" : mode, Ui.tr("Ver agora", "Preview"), "", "", "", "", "",
+                    Prefs.SORT_NAMES[Prefs.sort()], ""};
+            for (int i = 0; i < 9; i++) {
                 float y = (LIST_TOP + i * (ROW_H + ROW_GAP)) * k;
                 rowRect.set(LIST_X * k, y, LIST_R * k, y + ROW_H * k);
                 float f = drawRowBackground(c, i);
@@ -416,6 +422,11 @@ public class SettingsActivity extends Activity {
                 float right = rowRect.right - 30 * k;
                 if (i >= 2) {
                     float cw = Symbols.width(getContext(), "chevron_right", 22 * k);
+                    if (!values[i].isEmpty()) {   // « Tri » : la valeur en cours, puis le chevron
+                        rowValue.setColor(blend(0x8CFFFFFF, 0x8C1C1C1E, f));
+                        String shown = TextUtils.ellipsize(values[i], new TextPaint(rowValue), 470 * k, TextUtils.TruncateAt.END).toString();
+                        c.drawText(shown, right - cw - 16 * k, base, rowValue);
+                    }
                     Symbols.draw(getContext(), c, "chevron_right", right - cw / 2, rowRect.centerY(), 22 * k, blend(0x66FFFFFF, 0x991C1C1E, f));
                 } else if (i == 0 && working) {
                     // Switching: the current step in place of the value, with the spinning arc.
@@ -432,7 +443,7 @@ public class SettingsActivity extends Activity {
                 }
             }
 
-            float y = (LIST_TOP + 8 * (ROW_H + ROW_GAP) + 20) * k;
+            float y = (LIST_TOP + 9 * (ROW_H + ROW_GAP) + 20) * k;
             String error = state.optString("error");
             if (working && (busyText.contains("Permitir") || busyText.contains("Allow"))) {
                 c.drawText(Ui.tr("Na TV: marque “Sempre permitir” e aperte OK.", "On the TV: tick “Always allow” and press OK."),
@@ -671,7 +682,8 @@ public class SettingsActivity extends Activity {
                                 focus = pickFor - 1;
                                 screen = REMOTE_KEYS;
                             } else {
-                                focus = screen == HOME_SETTINGS ? 2 : screen == SHELF_EDIT ? 3 : screen == REMOTE_KEYS ? 4 : 0;
+                                focus = screen == HOME_SETTINGS ? 2 : screen == SHELF_EDIT ? 3 : screen == REMOTE_KEYS ? 4
+                                        : screen == CHANNELS ? 5 : screen == CATS ? 6 : screen == SORT ? 7 : 0;
                                 screen = MAIN;
                             }
                         }
@@ -853,6 +865,30 @@ public class SettingsActivity extends Activity {
                             ? "OK ajoute ou retire"
                             : "OK masque ou rétablit")
                             + "  ·  " + "Retour revient",
+                    LIST_X * k + 30 * k, hy, hint);
+        }
+
+        /** Tri : l'ordre des rangées de Films et Séries (le panel, la note, l'année, l'alphabet). */
+        private void drawSort(Canvas c) {
+            Paint head = Ui.text(Ui.displaySemibold, 34 * k, 0xFFFFFFFF);
+            c.drawText("Tri des bibliothèques", LIST_X * k + 30 * k, (LIST_TOP - 24) * k, head);
+            int active = Prefs.sort();
+            for (int i = 0; i < Prefs.SORT_NAMES.length; i++) {
+                float y = (LIST_TOP + 20 + i * (LIST_ROW_H + LIST_ROW_GAP)) * k;
+                rowRect.set(LIST_X * k, y, LIST_R * k, y + LIST_ROW_H * k);
+                float f = drawRowBackground(c, i);
+                rowLabel.setColor(blend(0xF2FFFFFF, INK, f));
+                c.drawText(Prefs.SORT_NAMES[i], rowRect.left + 30 * k, rowRect.centerY() + Ui.halfCap(rowLabel), rowLabel);
+                if (i == active) {
+                    float cw = Symbols.width(getContext(), "check", 26 * k);
+                    Symbols.draw(getContext(), c, "check", rowRect.right - 30 * k - cw / 2, rowRect.centerY(),
+                            26 * k, blend(0xFFFFFFFF, INK, f));
+                }
+            }
+            Paint hint = Ui.text(Ui.regular, 23 * k, 0x8CFFFFFF);
+            float hy = (LIST_TOP + 20 + Prefs.SORT_NAMES.length * (LIST_ROW_H + LIST_ROW_GAP) + 36) * k;
+            c.drawText(TextUtils.ellipsize("Les rangées de Films et Séries montrent leurs 24 titres dans cet ordre. Retour revient.",
+                    new TextPaint(hint), (LIST_R - LIST_X - 70) * k, TextUtils.TruncateAt.END).toString(),
                     LIST_X * k + 30 * k, hy, hint);
         }
 
@@ -1049,6 +1085,12 @@ public class SettingsActivity extends Activity {
                 invalidate();
                 spoken.focusMoved();
                 return;
+            } else if (screen == SORT) {
+                Prefs.setSort(focus);
+                HomeData.get(c).settingsChanged();   // les rangées se refont avec le nouvel ordre
+                invalidate();
+                spoken.focusMoved();
+                return;
             } else if (screen == HOME_SETTINGS) {
                 adjust(1);
                 invalidate();
@@ -1074,6 +1116,9 @@ public class SettingsActivity extends Activity {
                 openChannels();
             } else if (focus == 6) {
                 openCategories();
+            } else if (focus == 7) {
+                screen = SORT;
+                focus = Prefs.sort();
             } else {
                 activity.startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             }

@@ -115,10 +115,11 @@ public class SettingsActivity extends Activity {
     }
 
     static final class SettingsView extends View implements Choreographer.FrameCallback {
-        private static final int MAIN = 0, HOME_CHOICE = 1, HOME_SETTINGS = 2, REMOTE_KEYS = 3, PICKER = 4, SHELF_EDIT = 5;
+        private static final int MAIN = 0, HOME_CHOICE = 1, HOME_SETTINGS = 2, REMOTE_KEYS = 3, PICKER = 4, SHELF_EDIT = 5,
+                CHANNELS = 6, CATS = 7;
         private static final float LIST_ROW_H = 68, LIST_ROW_GAP = 6;
         private static final int PICK_VISIBLE = 9;
-        private static final float LIST_X = 1000, LIST_R = 1824, LIST_TOP = 186, ROW_H = 74, ROW_GAP = 8, CHOICE_H = 104;
+        private static final float LIST_X = 1000, LIST_R = 1824, LIST_TOP = 186, ROW_H = 62, ROW_GAP = 6, CHOICE_H = 104;
         private static final int AMBER = 0xFFFFC266, INK = 0xFF1C1C1E;
 
         private final SettingsActivity activity;
@@ -137,6 +138,9 @@ public class SettingsActivity extends Activity {
         private final List<String[]> shelfRows = new ArrayList<>();
         private final List<String> shelfOrder = new ArrayList<>();
         private int pickFor, pickCurrent, pickScroll;   // pickFor: the remote button (index + 1)
+        // « Mes chaînes » (les favorites) et « Catégories du Direct » (celles qui sont masquées)
+        private final List<String[]> chanRows = new ArrayList<>(), catRows = new ArrayList<>();
+        private int chanScroll;
         private final RectF tmp = new RectF(), rowRect = new RectF(), focusBox = new RectF();
         private JSONObject state = new JSONObject(), recs = new JSONObject();
         private boolean hasKey;
@@ -210,7 +214,9 @@ public class SettingsActivity extends Activity {
                         return Ui.tr("Início, ", "Home Screen, ") + value;
                     }
                     String[] names = {Ui.tr("Tela de Descanso, ver agora", "Screensaver, preview"), Ui.tr("Ajustes do Início", "Home Settings"),
-                            Ui.tr("Prateleira", "Shelf"), Ui.tr("Botões do Controle", "Remote Buttons"), Ui.tr("Ajustes da TV", "TV Settings")};
+                            Ui.tr("Prateleira", "Shelf"), Ui.tr("Botões do Controle", "Remote Buttons"),
+                            "Mes chaînes", "Catégories du Direct",
+                            Ui.tr("Ajustes da TV", "TV Settings")};
                     return row - 1 < names.length ? names[row - 1] : "";
                 }
                 case HOME_CHOICE: {
@@ -239,6 +245,18 @@ public class SettingsActivity extends Activity {
                     return app[1] + ", " + (place >= 0 ? Ui.tr("na prateleira, posição ", "on the shelf, place ") + (place + 1)
                             : Ui.tr("fora da prateleira", "not on the shelf"));
                 }
+                case CHANNELS: {
+                    int at = chanScroll + row;
+                    if (at < 0 || at >= chanRows.size()) return "";
+                    String[] r = chanRows.get(at);
+                    return r[0] + " · " + r[1] + ("1".equals(r[2]) ? ", " + Ui.tr("na lista", "in the list") : "");
+                }
+                case CATS: {
+                    int at = chanScroll + row;
+                    if (at < 0 || at >= catRows.size()) return "";
+                    String[] r = catRows.get(at);
+                    return r[1] + ("1".equals(r[2]) ? ", " + Ui.tr("escondida", "hidden") : "");
+                }
                 default:
                     return "";
             }
@@ -266,6 +284,7 @@ public class SettingsActivity extends Activity {
             startedAt = SystemClock.uptimeMillis();
             lastNanos = 0;
             handler.post(poll);
+            Iptv.get(getContext()).refreshPanel();   // the subscription's expiry and connections, for the status line
             if (lights != null) lights.start();
             Choreographer.getInstance().postFrameCallback(this);
             spoken.readAgain();
@@ -338,7 +357,9 @@ public class SettingsActivity extends Activity {
 
         private int rowCount() {
             switch (screen) {
-                case MAIN: return 6;
+                case MAIN: return 8;
+                case CHANNELS: return Math.min(PICK_VISIBLE, chanRows.size());
+                case CATS: return Math.min(PICK_VISIBLE, catRows.size());
                 case HOME_CHOICE: return 2;
                 case HOME_SETTINGS: return settingLabels().length;
                 case PICKER: return Math.min(PICK_VISIBLE, pickLabels.size());
@@ -369,7 +390,10 @@ public class SettingsActivity extends Activity {
             c.drawText(Ui.tr("Início e tela de descanso da TV", "Your TV's home screen and screensaver"), cx, 660 * k, subtitle);
             c.drawText(versionName(getContext()), cx, 704 * k, version);
 
-            if (screen == MAIN) drawMain(c, seconds); else if (screen == HOME_CHOICE) drawChoice(c); else if (screen == PICKER) drawPicker(c); else if (screen == SHELF_EDIT) drawShelfEditor(c); else drawList(c);
+            if (screen == MAIN) drawMain(c, seconds); else if (screen == HOME_CHOICE) drawChoice(c); else if (screen == PICKER) drawPicker(c); else if (screen == SHELF_EDIT) drawShelfEditor(c);
+            else if (screen == CHANNELS) drawLongList(c, "Mes chaînes", chanRows, chanScroll);
+            else if (screen == CATS) drawLongList(c, "Catégories du Direct", catRows, chanScroll);
+            else drawList(c);
         }
 
         private void drawMain(Canvas c, float seconds) {
@@ -378,9 +402,10 @@ public class SettingsActivity extends Activity {
             String mode = freeActive() ? "Free My TV" : Ui.tr("Original", "Original");
             String[] labels = {Ui.tr("Início", "Home Screen"), Ui.tr("Tela de Descanso", "Screensaver"),
                     Ui.tr("Ajustes do Início", "Home Settings"), Ui.tr("Prateleira", "Shelf"),
-                    Ui.tr("Botões do Controle", "Remote Buttons"), Ui.tr("Ajustes da TV", "TV Settings")};
-            String[] values = {working ? "" : mode, Ui.tr("Ver agora", "Preview"), "", "", "", ""};
-            for (int i = 0; i < 6; i++) {
+                    Ui.tr("Botões do Controle", "Remote Buttons"), "Mes chaînes",
+                    "Catégories du Direct", Ui.tr("Ajustes da TV", "TV Settings")};
+            String[] values = {working ? "" : mode, Ui.tr("Ver agora", "Preview"), "", "", "", "", "", ""};
+            for (int i = 0; i < 8; i++) {
                 float y = (LIST_TOP + i * (ROW_H + ROW_GAP)) * k;
                 rowRect.set(LIST_X * k, y, LIST_R * k, y + ROW_H * k);
                 float f = drawRowBackground(c, i);
@@ -407,7 +432,7 @@ public class SettingsActivity extends Activity {
                 }
             }
 
-            float y = (LIST_TOP + 6 * (ROW_H + ROW_GAP) + 20) * k;
+            float y = (LIST_TOP + 8 * (ROW_H + ROW_GAP) + 20) * k;
             String error = state.optString("error");
             if (working && (busyText.contains("Permitir") || busyText.contains("Allow"))) {
                 c.drawText(Ui.tr("Na TV: marque “Sempre permitir” e aperte OK.", "On the TV: tick “Always allow” and press OK."),
@@ -427,9 +452,45 @@ public class SettingsActivity extends Activity {
                 c.restore();
                 y += errorLayout.getLineBaseline(errorLayout.getLineCount() - 1) - errorLayout.getLineBaseline(0) + 46 * k;
             }
+            y = drawStatus(c, y);
             y = drawComparison(c, y);
             y = drawRecs(c, y + 26 * k);
             drawNotices(c, y + 40 * k);
+        }
+
+        /** État : ce que la télé et l'abonnement disent, sur une seule ligne. */
+        private float drawStatus(Canvas c, float y) {
+            String line = statusLine();
+            if (line.isEmpty()) return y;
+            c.drawText(TextUtils.ellipsize(line, notice, 790 * k, TextUtils.TruncateAt.END).toString(),
+                    LIST_X * k + 30 * k, y, notice);
+            return y + 32 * k;
+        }
+
+        private String statusLine() {
+            java.util.List<String> out = new ArrayList<>();
+            try {
+                out.add(Channels.get(getContext()).all.size() + " chaînes");
+            } catch (Exception ignored) {
+            }
+            long expiry = Prefs.panelExpiry();
+            if (expiry > 0) {
+                long days = (expiry - System.currentTimeMillis()) / 86_400_000L;
+                String when = new java.text.SimpleDateFormat("dd/MM/yyyy", java.util.Locale.FRANCE)
+                        .format(new java.util.Date(expiry));
+                out.add(days >= 0 ? "abo " + days + " j (" + when + ")" : "abo expiré (" + when + ")");
+            }
+            if (Prefs.panelMaxCons() > 0) {
+                out.add(Prefs.panelActiveCons() + "/" + Prefs.panelMaxCons() + " conn.");
+            }
+            try {
+                android.os.StatFs fs = new android.os.StatFs(getContext().getFilesDir().getAbsolutePath());
+                out.add((fs.getAvailableBytes() >> 20) + " Mo libres");
+            } catch (Exception ignored) {
+            }
+            StringBuilder b = new StringBuilder();
+            for (String s : out) b.append(b.length() == 0 ? "" : "  ·  ").append(s);
+            return b.toString();
         }
 
         /** Home screen picks: status, and the credit TMDB asks for. */
@@ -739,11 +800,69 @@ public class SettingsActivity extends Activity {
             HomeData.get(getContext()).settingsChanged();
         }
 
+        // MARK: - Mes chaînes et les catégories du Direct
+
+        /** Every channel of the lineup, its number, its name, and whether it is one of « Mes chaînes ». */
+        private void openChannels() {
+            chanRows.clear();
+            for (Channels.Channel ch : Channels.get(getContext()).all) {
+                chanRows.add(new String[]{String.valueOf(ch.number), ch.name, Prefs.favorite(ch.number) ? "1" : "0"});
+            }
+            chanScroll = 0;
+            focus = 0;
+            screen = CHANNELS;
+        }
+
+        /** The live categories the panel lists: OK hides or brings back each one on the home screen. */
+        private void openCategories() {
+            catRows.clear();
+            for (Iptv.Category c : Iptv.get(getContext()).liveCategories()) {
+                catRows.add(new String[]{c.id, c.name, Prefs.hiddenCategory(c.id) ? "1" : "0"});
+            }
+            chanScroll = 0;
+            focus = 0;
+            screen = CATS;
+        }
+
+        private void drawLongList(Canvas c, String heading, List<String[]> list, int scroll) {
+            Paint head = Ui.text(Ui.displaySemibold, 34 * k, 0xFFFFFFFF);
+            c.drawText(heading, LIST_X * k + 30 * k, (LIST_TOP - 24) * k, head);
+            int rows = rowCount();
+            for (int i = 0; i < rows; i++) {
+                int at = scroll + i;
+                if (at >= list.size()) break;
+                String[] r = list.get(at);
+                float y = (LIST_TOP + 20 + i * (LIST_ROW_H + LIST_ROW_GAP)) * k;
+                rowRect.set(LIST_X * k, y, LIST_R * k, y + LIST_ROW_H * k);
+                float f = drawRowBackground(c, i);
+                rowLabel.setColor(blend(0xF2FFFFFF, INK, f));
+                String label = list == chanRows ? r[0] + "  ·  " + r[1] : r[1];
+                float room = (LIST_R - LIST_X - 130) * k;
+                c.drawText(TextUtils.ellipsize(label, new TextPaint(rowLabel), room, TextUtils.TruncateAt.END).toString(),
+                        rowRect.left + 30 * k, rowRect.centerY() + Ui.halfCap(rowLabel), rowLabel);
+                if ("1".equals(r[2])) {
+                    float cw = Symbols.width(getContext(), "check", 26 * k);
+                    Symbols.draw(getContext(), c, "check", rowRect.right - 30 * k - cw / 2, rowRect.centerY(),
+                            26 * k, blend(0xFFFFFFFF, INK, f));
+                }
+            }
+            Paint hint = Ui.text(Ui.regular, 23 * k, 0x8CFFFFFF);
+            float hy = (LIST_TOP + 20 + rows * (LIST_ROW_H + LIST_ROW_GAP) + 36) * k;
+            c.drawText((Math.min(list.size(), scroll + focus + 1)) + " / " + list.size()
+                            + "  ·  " + (list == chanRows
+                            ? "OK ajoute ou retire"
+                            : "OK masque ou rétablit")
+                            + "  ·  " + "Retour revient",
+                    LIST_X * k + 30 * k, hy, hint);
+        }
+
         private boolean scrolling() {
-            return screen == PICKER || screen == SHELF_EDIT;
+            return screen == PICKER || screen == SHELF_EDIT || screen == CHANNELS || screen == CATS;
         }
 
         private int listSize() {
+            if (screen == CHANNELS) return chanRows.size();
+            if (screen == CATS) return catRows.size();
             return screen == SHELF_EDIT ? shelfRows.size() : pickLabels.size();
         }
 
@@ -911,6 +1030,25 @@ public class SettingsActivity extends Activity {
                 return;
             } else if (screen == REMOTE_KEYS) {
                 openPicker(focus + 1);
+            } else if (screen == CHANNELS) {
+                int at = Math.min(chanRows.size() - 1, chanScroll + focus);
+                if (at < 0 || at >= chanRows.size()) return;
+                int number = Integer.parseInt(chanRows.get(at)[0]);
+                Prefs.toggleFavorite(number);
+                chanRows.get(at)[2] = Prefs.favorite(number) ? "1" : "0";
+                invalidate();
+                spoken.focusMoved();
+                return;
+            } else if (screen == CATS) {
+                int at = Math.min(catRows.size() - 1, chanScroll + focus);
+                if (at < 0 || at >= catRows.size()) return;
+                String[] r = catRows.get(at);
+                if (Prefs.hiddenCategory(r[0])) Prefs.showCategory(r[0]);
+                else Prefs.hideCategory(r[0], r[1]);
+                r[2] = Prefs.hiddenCategory(r[0]) ? "1" : "0";
+                invalidate();
+                spoken.focusMoved();
+                return;
             } else if (screen == HOME_SETTINGS) {
                 adjust(1);
                 invalidate();
@@ -932,6 +1070,10 @@ public class SettingsActivity extends Activity {
                 loadApps();
                 screen = REMOTE_KEYS;
                 focus = 0;
+            } else if (focus == 5) {
+                openChannels();
+            } else if (focus == 6) {
+                openCategories();
             } else {
                 activity.startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             }

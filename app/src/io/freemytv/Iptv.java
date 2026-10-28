@@ -523,6 +523,21 @@ final class Iptv {
         }, "iptv").start();
     }
 
+    /** Only the subscription's state (expiry, connections): one small call, for the settings screen. */
+    void refreshPanel() {
+        new Thread(() -> {
+            try {
+                JSONObject root = new JSONObject(download(api("")));
+                JSONObject who = root.optJSONObject("user_info");
+                if (who == null) return;
+                long e = who.optLong("exp_date", 0);
+                if (e > 0) Prefs.setPanel(e * 1000L, who.optInt("max_connections", 0), who.optInt("active_cons", 0));
+            } catch (Exception ex) {
+                AppLog.w("panel info: " + ex.getMessage());
+            }
+        }, "panel-info").start();
+    }
+
     // MARK: - Xtream Codes
 
     private boolean refreshXtream() throws Exception {
@@ -532,6 +547,8 @@ final class Iptv {
         if (who == null) { error = "identifiants refusés"; return false; }
         String status = who.optString("status");
         if (!status.isEmpty() && !"Active".equalsIgnoreCase(status)) error = "compte " + status.toLowerCase(Locale.ROOT);
+        long expires = who.optLong("exp_date", 0);
+        if (expires > 0) Prefs.setPanel(expires * 1000L, who.optInt("max_connections", 0), who.optInt("active_cons", 0));
 
         for (String type : new String[]{"live", "vod", "series"}) {
             List<Category> list = new ArrayList<>();

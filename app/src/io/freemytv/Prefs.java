@@ -262,6 +262,20 @@ final class Prefs {
         put("favs", b.toString());
     }
 
+    // MARK: - Ce que le panel a dit de l'abonnement (dernier rafraîchissement)
+
+    static void setPanel(long expiresAt, int maxCons, int activeCons) {
+        put("panelExpiry", expiresAt);
+        put("panelMaxCons", maxCons);
+        put("panelActiveCons", activeCons);
+        put("panelAt", System.currentTimeMillis());
+    }
+
+    static long panelExpiry() { return sp().getLong("panelExpiry", 0); }
+    static int panelMaxCons() { return sp().getInt("panelMaxCons", 0); }
+    static int panelActiveCons() { return sp().getInt("panelActiveCons", 0); }
+    static long panelAt() { return sp().getLong("panelAt", 0); }
+
     // MARK: - Langues de lecture (mémoire entre les films)
 
     /** The audio language last chosen ("fra", "eng"…); "" = the TV's own. */
@@ -377,6 +391,16 @@ final class Prefs {
 
     private static void put(String key, boolean value) {
         sp().edit().putBoolean(key, value).apply();
+        version++;
+    }
+
+    private static void put(String key, long value) {
+        sp().edit().putLong(key, value).apply();
+        version++;
+    }
+
+    private static void put(String key, int value) {
+        sp().edit().putInt(key, value).apply();
         version++;
     }
 

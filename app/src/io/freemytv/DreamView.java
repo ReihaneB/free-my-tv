@@ -20,6 +20,9 @@ import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.text.TextUtils;
+
+import java.util.ArrayList;
+import java.util.List;
 import android.view.Choreographer;
 import android.view.View;
 
@@ -41,7 +44,7 @@ import java.util.concurrent.Executors;
  * Dark scrims only where there is text, stronger where the photo is bright. Any key exits (as on Apple TV).
  * Without photos (no TMDB key, or before the first fetch): the big clock over the night aurora.
  */
-final class DreamView extends View implements Choreographer.FrameCallback, HomeData.Listener, Recs.Listener {
+final class DreamView extends View implements Choreographer.FrameCallback, HomeData.Listener {
     private static final long SHOW_MS = 30_000, FADE_MS = 3_000, FIRST_MS = 1_600;
     private static final float ZOOM = 0.1f;
     /** Photos 10% larger than the screen (the zoom goes up to 1.1 without upscaling). */
@@ -97,7 +100,8 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
 
     private final Scene scene = new Scene();
     private final HomeData data;
-    private final Recs recs;
+    private final Aerials aerials;
+    private final Aerials.Listener dreamListener = this::onAerials;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ExecutorService worker = Executors.newSingleThreadExecutor();
     private final RenderNode content = new RenderNode("clock");     // without photos: the clock over the aurora
@@ -131,8 +135,8 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         @Override public void run() {
             if (!running) return;
             data.refreshIfStale();
-            recs.refreshIfStale();
-            recs.prefetchAll();
+            aerials.refresh();
+            aerials.prefetch();
             dirty = true;
             chromeDirty = true;
             prepareNext();
@@ -143,7 +147,7 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
     DreamView(Context c) {
         super(c);
         data = HomeData.get(c);
-        recs = Recs.get(c);
+        aerials = Aerials.get(c);
         Shaders.dream(scene.palette);
         scene.setMotion(0.4f, 0.32f);
         scene.applyPalette();
@@ -166,12 +170,11 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         startedAt = clock();
         lastFrame = 0;
         failed.clear();
-        fallback = recs.showcase().isEmpty();
+        fallback = photos().isEmpty();
         data.addListener(this);
-        recs.addListener(this);
         data.refreshIfStale();
-        recs.refreshIfStale();
-        recs.prefetchAll();
+        aerials.refresh();
+        aerials.prefetch();
         prepareNext();
         handler.postDelayed(tick, 60_000);
         Choreographer.getInstance().postFrameCallback(this);
@@ -186,7 +189,7 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         Choreographer.getInstance().removeFrameCallback(this);
         handler.removeCallbacks(tick);
         data.removeListener(this);
-        recs.removeListener(this);
+        Aerials.forget(dreamListener);
         // The photos stay in GPU memory until the garbage collector runs: release them now (after the last frame).
         final java.util.Set<Bitmap> gone = new java.util.HashSet<>();
         for (Slide s : new Slide[] {current, incoming, prepared}) {
@@ -210,10 +213,6 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         dirty = true;
         chromeDirty = true;
         invalidate();
-    }
-
-    @Override public void onRecs() {
-        if (running) prepareNext();
     }
 
     @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
@@ -254,12 +253,34 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         for (Slide s : new Slide[] {current, incoming, prepared}) if (s != null) recordCaption(s);
     }
 
+    /** Une photo de paysage vient d'arriver : l'écran de veille la prépare. */
+    private void onAerials() {
+        if (running) prepareNext();
+    }
+
     // MARK: - Photos
+
+    /** Les paysages du jour, vus comme des cartes : l'identifiant vient de l'URL, la légende sert de titre. */
+    private List<Recs.Pick> photos() {
+        List<Recs.Pick> out = new ArrayList<>();
+        for (Aerials.Photo ph : aerials.photos()) {
+            Recs.Pick p = new Recs.Pick();
+            p.id = Math.abs(ph.url.hashCode());
+            p.kind = "scenery";
+            p.title = ph.caption;
+            p.meta = "";
+            p.backdrop = ph.url;
+            p.detailed = true;
+            out.add(p);
+        }
+        return out;
+    }
 
     /** Loads the next photo in the background (one at a time); once ready, it comes in at the right moment. */
     private void prepareNext() {
         if (!running || decoding || prepared != null) return;
-        List<Recs.Pick> list = recs.showcase();
+        if (fallback && !photos().isEmpty()) fallback = false;   // les paysages sont arrivés
+        List<Recs.Pick> list = photos();
         if (list.isEmpty()) return;
         Slide last = incoming != null ? incoming : current;
         int start = 0;
@@ -285,7 +306,7 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
             prepared = newSlide(pick, last.image, last.frost, last.lightCaption, last.lightClock);
             return;
         }
-        File file = recs.readyImage(pick);
+        File file = aerials.readyImage(pick.backdrop);
         if (file == null) {
             failed.add(Recs.key(pick));   // the image is gone from disk: try the next one
             prepareNext();
@@ -682,7 +703,7 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
                     .setIncludePad(false).build();
             float originY = titleBase - t.getLineBaseline(t.getLineCount() - 1);
             float capTop = originY + t.getLineBaseline(0) - Ui.cap(titlePaint);
-            c.drawText(Recs.periodLabel(), x, capTop - 30 * k, labelPaint);
+            if (!"scenery".equals(s.pick.kind)) c.drawText(Recs.periodLabel(), x, capTop - 30 * k, labelPaint);
             c.save();
             c.translate(x - Ui.leftBearing(titlePaint, title), originY);
             t.draw(c);

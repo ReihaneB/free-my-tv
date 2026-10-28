@@ -107,6 +107,18 @@ final class Prefs {
         return url != null && all.contains(key(url));
     }
 
+    /** « Vu » for one stream, marked by hand on a film's page (the same store as played-to-the-end). */
+    static boolean isWatched(String url) {
+        return url != null && !url.isEmpty() && seen().contains(key(url));
+    }
+
+    static void setWatched(String url, boolean on) {
+        if (url == null || url.isEmpty()) return;
+        if (on) seen().edit().putBoolean(key(url), true).apply();
+        else seen().edit().remove(key(url)).apply();
+        version++;
+    }
+
     static List<Iptv.Item> resume(String type) {
         List<Iptv.Item> out = new ArrayList<>();
         List<Object[]> found = new ArrayList<>();
@@ -261,6 +273,27 @@ final class Prefs {
         for (Integer i : now) b.append(b.length() == 0 ? "" : ",").append(i);
         put("favs", b.toString());
     }
+
+    // MARK: - Tri des bibliothèques (0 = ordre du panel, 1 = note, 2 = année, 3 = A → Z)
+
+    static int sort() { return sp().getInt("sort", 0); }
+
+    static void setSort(int v) {
+        sp().edit().putInt("sort", v).apply();
+        version++;
+    }
+
+    /** The comparator the library rows use, or null for the panel's own order. */
+    static java.util.Comparator<Iptv.Item> sortOrder() {
+        switch (sort()) {
+            case 1: return (a, b) -> Float.compare(b.rating, a.rating);
+            case 2: return (a, b) -> String.valueOf(b.year).compareTo(String.valueOf(a.year));
+            case 3: return (a, b) -> a.name.compareToIgnoreCase(b.name);
+            default: return null;
+        }
+    }
+
+    static final String[] SORT_NAMES = {"Ordre du panel", "Note", "Année", "A → Z"};
 
     // MARK: - Ce que le panel a dit de l'abonnement (dernier rafraîchissement)
 

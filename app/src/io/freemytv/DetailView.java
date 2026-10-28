@@ -47,9 +47,9 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
     private static final int MARGIN = 96;
     private static final int BTN_W = 440, BTN_H = 68, ICON_D = 64, ICON_GAP = 20, COL_GAP = 64;
     private static final int CARD_W = 448, CARD_H = 252, CARD_GAP = 36, CARD_R = 22, TAB_H = 52;
-    private static final int A_RESTART = 0, A_TRAILER = 1, A_FORGET = 2, A_LIST = 3;
-    private static final String[] ACTION_ICON = {"restart", "trailer", "remove", "add"};
-    private static final String[] ACTION_NAME = {"Recommencer", "Bande-annonce", "Retirer de « En cours »", "Ma liste"};
+    private static final int A_RESTART = 0, A_TRAILER = 1, A_FORGET = 2, A_LIST = 3, A_WATCHED = 4;
+    private static final String[] ACTION_ICON = {"restart", "trailer", "remove", "add", "check"};
+    private static final String[] ACTION_NAME = {"Recommencer", "Bande-annonce", "Retirer de « En cours »", "Ma liste", "Marquer comme vu"};
     private static final int Z_PRIMARY = 0, Z_ICONS = 1, Z_SEASONS = 2, Z_EPISODES = 3;
     private static final int BACK = 0, PHOTO = 1, DIM = 2, HERO = 3, SHELF = 4;
     private static final int ACCENT = 0xFFFF8A00;   // the progress, as on the home screen's cards
@@ -503,6 +503,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         if (playPos > 0) actions.add(A_RESTART);
         if (detail != null && !detail.trailer.isEmpty()) actions.add(A_TRAILER);
         if (!listKey().isEmpty()) actions.add(A_LIST);
+        if (!req.series && !listKey().isEmpty()) actions.add(A_WATCHED);   // a film: seen, by hand
         if (watching()) actions.add(A_FORGET);   // last, like Apple's "Supprimer de À suivre"
         if (action >= actions.size()) action = Math.max(0, actions.size() - 1);
         if (zone == Z_ICONS && actions.isEmpty()) zone = Z_PRIMARY;
@@ -783,6 +784,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
                 if (actions.get(action) == A_RESTART) play(playUrl, true, target);
                 else if (actions.get(action) == A_FORGET) forget();
                 else if (actions.get(action) == A_LIST) toggleList();
+                else if (actions.get(action) == A_WATCHED) toggleWatched();
                 else trailer();
                 break;
             case Z_SEASONS:
@@ -816,12 +818,23 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
     /** "Depuis le début", "Bande-annonce", "Ma liste", "Retirer de « En cours »": Ma liste changes with its state. */
     private String iconOf(int a) {
         if (a == A_LIST) return inList() ? "check" : "add";
+        if (a == A_WATCHED) return "check";
         return ACTION_ICON[a];
     }
 
     private String nameOf(int a) {
         if (a == A_LIST) return inList() ? "Dans ma liste" : "Ma liste";
+        if (a == A_WATCHED) return Prefs.isWatched(playUrl) ? "Vu — décocher" : "Marquer comme vu";
         return ACTION_NAME[a];
+    }
+
+    /** « Vu » à la main : le film est marqué (ou plus), la fiche et l'accueil le disent. */
+    private void toggleWatched() {
+        if (playUrl == null || playUrl.isEmpty()) return;
+        Prefs.setWatched(playUrl, !Prefs.isWatched(playUrl));
+        refresh();
+        kick();
+        host.watchingChanged();
     }
 
     private String listKey() {

@@ -72,6 +72,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     private Channels.Channel channel, previous;
     private int stream;
     private Epg.Show replaying;          // "Depuis le début": the programme played from the panel's replay
+    private boolean replayRetried;       // the replay was rebuilt once after a failure: no endless loop
     private long replayStart;            // from the guide: the past programme to open, in ms (0: none)
     private long segmentAt;              // where the replay's current piece starts (the panel cuts at the minute)
     private long seekAfterReady = -1;
@@ -117,6 +118,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
             String title = intent.getStringExtra(EXTRA_REPLAY_TITLE);
             replaying = new Epg.Show(replayAt, stop, title == null ? name : title, "");
             replayStart = replayAt;
+            replayRetried = false;
         }
 
         root = new FrameLayout(this);
@@ -250,6 +252,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         Epg.Show s = replaying != null ? replaying : Epg.get(this).now(c.epg, now);
         if (s == null) return false;
         replaying = s;
+        replayRetried = false;
         replayFrom(s.start);
         return true;
     }
@@ -489,7 +492,10 @@ public final class Player extends Activity implements androidx.media3.common.Pla
             return;
         }
         long left = dur - player.getCurrentPosition();
-        if (left <= 30_000) {
+        // The card must come up before the outro, not on top of its last seconds: the panel gives no marker, so the
+        // lead is two minutes (a typical outro lasts 60-90 s), and a tenth of the episode when it is a short one.
+        long lead = Math.min(120_000L, Math.max(15_000L, dur / 10));
+        if (left <= lead) {
             if (!nextAsked) {
                 nextAsked = true;
                 askNextEpisode();
@@ -570,6 +576,16 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         }
         AppLog.w("player: " + e.getErrorCodeName() + " " + e.getMessage());
         final String why = e.getErrorCodeName().replace("ERROR_CODE_", "").toLowerCase(Locale.ROOT).replace('_', ' ');
+        // A replay that dies mid-programme: the panel's segment is rebuilt from where we were, not from its start.
+        if (replaying != null && channel != null && channel.replay != null && !replayRetried && player != null) {
+            long at = segmentAt + Math.max(0, player.getCurrentPosition());
+            if (at > segmentAt + 30_000 && at < replaying.stop - 5_000) {
+                replayRetried = true;
+                AppLog.w("player: replay repris à " + PlayerHud.clock(at / 1000));
+                replayFrom(at - 5_000);   // five seconds back: the decoder wants a run-up
+                return;
+            }
+        }
         // The account's limit shows up as a container error (200 + empty text/html page). Only that case is worth a
         // probe: a stream that dies with an IO error must fail over to the next one at once, not wait for a request.
         boolean maybeRefused = e.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED

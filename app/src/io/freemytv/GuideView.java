@@ -2,6 +2,7 @@ package io.freemytv;
 
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -15,7 +16,9 @@ import android.view.View;
 
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Le guide, as a box draws it: the channels down the side, three hours across, a programme in each cell. The days
@@ -31,11 +34,14 @@ final class GuideView extends View {
         void uncovered();
     }
 
-    private static final int MARGIN = 64, HEAD_H = 140, GUTTER = 250, ROWS = 7, ROW_H = 118, COLS = 6;
+    private static final int MARGIN = 64, HEAD_H = 140, GUTTER = 330, ROWS = 7, ROW_H = 118, COLS = 6;
     private static final int ZONE_GRID = 0, ZONE_DAYS = 1;
     /** -2, -1, today, tomorrow. */
     private static final String[] DAYS = {"Avant-hier", "Hier", "Aujourd'hui", "Demain"};
     private static final int[] DAY_OFFSET = {-2, -1, 0, 1};
+    /** The day pills, then « Ce soir » and the section filter. */
+    private static final int PILLS = 6, PILL_SOON = 4, PILL_SECTION = 5;
+    private static final float LOGO_W = 46, LOGO_H = 26;
     private static final long SLOT = 30 * 60_000L, WINDOW = COLS * SLOT, MINUTE = 60_000L;
     private static final long BACK_LIMIT = 71 * 3600_000L;   // the panel's three days of replay, minus an hour of slack
 
@@ -48,6 +54,15 @@ final class GuideView extends View {
     private long toastAt;
     private long frameAt;
     private final List<Channels.Channel> channels = new ArrayList<>();
+    /** Every channel the guide knows, the filter applies to it. */
+    private final List<Channels.Channel> all = new ArrayList<>();
+    private final List<String> sections = new ArrayList<>();
+    private String section = "";   // "" = every channel
+    private final Map<String, Bitmap> logos = new HashMap<>();
+    private final Paint logoP = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final StringBuilder typed = new StringBuilder();
+    private long typedAt;
+    private final Runnable numberJump = this::jumpToTyped;
     private final List<Epg.Show> shown = new ArrayList<>();
     private final RectF box = new RectF();
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -86,8 +101,20 @@ final class GuideView extends View {
 
     void show() {
         long now = System.currentTimeMillis();
-        channels.clear();
-        for (Channels.Channel ch : Channels.get(getContext()).all) if (!ch.epg.isEmpty()) channels.add(ch);
+        all.clear();
+        for (Channels.Channel ch : Channels.get(getContext()).all) if (!ch.epg.isEmpty()) all.add(ch);
+        sections.clear();
+        section = "";   // the guide opens on everything, as a box does
+        for (Channels.Channel ch : all) {
+            if (!sections.contains(ch.section)) sections.add(ch.section);
+        }
+        // a section with a single channel is not worth a filter: drop those
+        for (int i = sections.size() - 1; i >= 0; i--) {
+            int n = 0;
+            for (Channels.Channel ch : all) if (ch.section.equals(sections.get(i)) && ++n > 1) break;
+            if (n < 2) sections.remove(i);
+        }
+        refilter();
         day = 2;
         dayFocus = 2;
         zone = ZONE_GRID;
@@ -108,8 +135,102 @@ final class GuideView extends View {
     void close() {
         if (!open) return;
         open = false;
+        removeCallbacks(numberJump);
         setVisibility(INVISIBLE);
         host.uncovered();
+    }
+
+    // MARK: - The filter, « ce soir », and jumping by number
+
+    /** The visible channels: every one, or the section the pill chose. */
+    private void refilter() {
+        channels.clear();
+        for (Channels.Channel ch : all) if (section.isEmpty() || section.equals(ch.section)) channels.add(ch);
+        if (row >= channels.size()) row = Math.max(0, channels.size() - 1);
+        warm();
+    }
+
+    /** The pill cycles « Toutes » then each section that holds more than one channel. */
+    private void cycleSection() {
+        int at = section.isEmpty() ? -1 : sections.indexOf(section);
+        at++;
+        section = at >= sections.size() ? "" : sections.get(at);
+        refilter();
+        row = 0;
+        toast(section.isEmpty() ? "Toutes les chaînes (" + channels.size() + ")"
+                : section + "  ·  " + channels.size() + " chaînes");
+        invalidate();
+    }
+
+    /** « Ce soir » : today at 20:30, where the evening starts. */
+    private void jumpToSoon() {
+        Calendar c = Calendar.getInstance();
+        c.set(Calendar.HOUR_OF_DAY, 20);
+        c.set(Calendar.MINUTE, 30);
+        c.set(Calendar.SECOND, 0);
+        c.set(Calendar.MILLISECOND, 0);
+        long at = c.getTimeInMillis();
+        if (at < System.currentTimeMillis()) at += 86_400_000L;
+        day = 2;
+        windowStart = align(at);
+        clampWindow();
+        col = 2;
+        warm();
+        invalidate();
+    }
+
+    /** The numbers typed on the remote: the guide goes to that channel (as a box does). */
+    private void type(int digit) {
+        long now = System.currentTimeMillis();
+        if (now - typedAt > 1800) typed.setLength(0);
+        if (typed.length() >= 4) typed.setLength(0);
+        typed.append(digit);
+        typedAt = now;
+        removeCallbacks(numberJump);
+        postDelayed(numberJump, 1100);
+        toast(String.valueOf(typed));
+    }
+
+    private void jumpToTyped() {
+        if (typed.length() == 0) return;
+        String t = typed.toString();
+        typed.setLength(0);
+        int n;
+        try {
+            n = Integer.parseInt(t);
+        } catch (NumberFormatException e) {
+            return;
+        }
+        for (int i = 0; i < channels.size(); i++) {
+            if (channels.get(i).number != n) continue;
+            row = i;
+            zone = ZONE_GRID;
+            windowStart = align(System.currentTimeMillis()) - SLOT;
+            clampWindow();
+            col = 2;
+            warm();
+            toast(channels.get(i).number + "  ·  " + channels.get(i).name);
+            invalidate();
+            return;
+        }
+        toast("Pas de chaîne n° " + n + (section.isEmpty() ? "" : " dans « " + section + " »"));
+        AppLog.w("guide: pas de chaîne n° " + n + " sur " + channels.size());
+        invalidate();
+    }
+
+    /** The channel's logo, scaled to the gutter once and kept. */
+    private Bitmap logo(Channels.Channel ch) {
+        if (ch.logo == null || ch.logo.isEmpty()) return null;
+        Bitmap b = logos.get(ch.logo);
+        if (b != null) return b;
+        Bitmap full = Posters.get(getContext()).get(ch.logo, (url, bitmap) -> {
+            logos.put(url, Bitmap.createScaledBitmap(bitmap, (int) (LOGO_W * 2), (int) (LOGO_H * 2), true));
+            postInvalidateOnAnimation();
+        });
+        if (full == null) return null;
+        b = Bitmap.createScaledBitmap(full, (int) (LOGO_W * 2), (int) (LOGO_H * 2), true);
+        logos.put(ch.logo, b);
+        return b;
     }
 
     private void clearToast() {
@@ -216,7 +337,7 @@ final class GuideView extends View {
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 if (zone == ZONE_DAYS) {
-                    if (dayFocus < DAYS.length - 1) dayFocus++;
+                    if (dayFocus < PILLS - 1) dayFocus++;
                 } else if (windowStart < maxWindow()) {
                     windowStart += SLOT;
                     warm();
@@ -238,6 +359,15 @@ final class GuideView extends View {
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
                 if (repeat > 0) return true;
                 if (zone == ZONE_DAYS) {
+                    if (dayFocus == PILL_SECTION) {
+                        cycleSection();
+                        return true;
+                    }
+                    if (dayFocus == PILL_SOON) {
+                        zone = ZONE_GRID;
+                        jumpToSoon();
+                        return true;
+                    }
                     day = dayFocus;
                     zone = ZONE_GRID;
                     jumpToDay();
@@ -255,6 +385,10 @@ final class GuideView extends View {
                 }
                 return true;
             default:
+                if (code >= KeyEvent.KEYCODE_0 && code <= KeyEvent.KEYCODE_9) {
+                    type(code - KeyEvent.KEYCODE_0);
+                    return true;
+                }
                 return true;
         }
     }
@@ -383,11 +517,22 @@ final class GuideView extends View {
         titleP.setTextAlign(Paint.Align.LEFT);
         c.drawText("Guide", MARGIN * k, 74 * k, titleP);
 
-        float x = 330 * k, y = 34 * k, pw = 210 * k, ph = 52 * k;
-        for (int i = 0; i < DAYS.length; i++) {
-            box.set(x, y, x + pw, y + ph);
-            boolean active = DAY_OFFSET[i] == DAY_OFFSET[day];
-            boolean focusHere = zone == ZONE_DAYS && dayFocus == i;
+        float x = 330 * k, y = 34 * k, pw = 175 * k, ph = 52 * k;
+        for (int i = 0; i < PILLS; i++) {
+            String label;
+            boolean active, focusHere = zone == ZONE_DAYS && dayFocus == i;
+            if (i < DAYS.length) {
+                label = DAYS[i];
+                active = DAY_OFFSET[i] == DAY_OFFSET[day];
+            } else if (i == PILL_SOON) {
+                label = "Ce soir";
+                active = false;
+            } else {
+                label = section.isEmpty() ? "Toutes" : section;
+                active = !section.isEmpty();
+            }
+            float wpx = i < DAYS.length ? pw : i == PILL_SOON ? 130 * k : 300 * k;
+            box.set(x, y, x + wpx, y + ph);
             if (active) {
                 fill.setColor(0x26FFFFFF);
                 c.drawRoundRect(box, ph / 2, ph / 2, fill);
@@ -398,15 +543,17 @@ final class GuideView extends View {
                 stroke.setColor(0xFFFFFFFF);
                 c.drawRoundRect(box, ph / 2, ph / 2, stroke);
             }
-            dayP.setColor(active ? 0xFFFFFFFF : 0xB3FFFFFF);
+            dayP.setColor(active || focusHere ? 0xFFFFFFFF : 0xB3FFFFFF);
             dayP.setTextAlign(Paint.Align.CENTER);
-            c.drawText(DAYS[i], box.centerX(), box.centerY() + Ui.halfCap(dayP), dayP);
-            x += pw + 14 * k;
+            String shown = i == PILL_SECTION
+                    ? TextUtils.ellipsize(label, new TextPaint(dayP), wpx - 28 * k, TextUtils.TruncateAt.END).toString()
+                    : label;
+            c.drawText(shown, box.centerX(), box.centerY() + Ui.halfCap(dayP), dayP);
+            x += wpx + 14 * k;
         }
         dayP.setTextAlign(Paint.Align.RIGHT);
         dayP.setColor(0xCCFFFFFF);
-        c.drawText(Epg.clock(now) + "  ·  " + Epg.clock(windowStart) + " – " + Epg.clock(windowStart + WINDOW),
-                w - MARGIN * k, 74 * k, dayP);
+        c.drawText(Epg.clock(now), w - MARGIN * k, 74 * k, dayP);
         dayP.setTextAlign(Paint.Align.LEFT);
     }
 
@@ -437,11 +584,20 @@ final class GuideView extends View {
                 fill.setColor(0x0AFFFFFF);
                 c.drawRect(0, top, w, bottom, fill);
             }
-            numP.setColor(0xFF8798A0);
-            c.drawText(String.valueOf(ch.number), (GUTTER - 24) * k, top + ROW_H * k / 2 + Ui.halfCap(numP), numP);
+            Bitmap lg = logo(ch);
+            float lx = 24 * k;
+            if (lg != null) {
+                float ly = top + (ROW_H * k - LOGO_H * k) / 2;
+                box.set(lx, ly, lx + LOGO_W * k, ly + LOGO_H * k);
+                c.drawBitmap(lg, null, box, logoP);
+            }
             nameP.setColor(0xFFE7EDEE);
-            c.drawText(TextUtils.ellipsize(ch.name, new TextPaint(nameP), (GUTTER - 108) * k,
-                    TextUtils.TruncateAt.END).toString(), 24 * k, top + ROW_H * k / 2 + Ui.halfCap(nameP), nameP);
+            float nameX = lx + (lg == null ? 0 : (LOGO_W + 12) * k);
+            float nameRoom = (GUTTER - 66) * k - nameX;
+            c.drawText(TextUtils.ellipsize(ch.name, new TextPaint(nameP), Math.max(48 * k, nameRoom),
+                    TextUtils.TruncateAt.END).toString(), nameX, top + ROW_H * k / 2 + Ui.halfCap(nameP), nameP);
+            numP.setColor(0xFF8798A0);
+            c.drawText(String.valueOf(ch.number), (GUTTER - 20) * k, top + ROW_H * k / 2 + Ui.halfCap(numP), numP);
 
             List<Epg.Show> list = guide.between(ch.epg, windowStart - 2 * SLOT, windowStart + WINDOW + 2 * SLOT);
             for (Epg.Show s : list) {

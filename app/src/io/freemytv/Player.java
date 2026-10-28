@@ -93,6 +93,9 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     // the rows of the three popovers, rebuilt when the tracks change (never while a popover opens)
     private final List<Ref> audioRefs = new ArrayList<>(), textRefs = new ArrayList<>();
     private final String[][] rowsOf = new String[3][];
+    /** The language of each track, in the same order as the refs: the choice is remembered from film to film. */
+    private final List<String> audioLangOf = new ArrayList<>(), textLangOf = new ArrayList<>();
+    private boolean subsApplied;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -319,6 +322,12 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         player.setPlayWhenReady(true);
     }
 
+    /** The audio language he chose last time; the TV's own until then. */
+    private static String audioWant() {
+        String saved = Prefs.audioLang();
+        return saved.isEmpty() ? Locale.getDefault().getLanguage() : saved;
+    }
+
     /** A channel's stream that fails: its next one (the panel lists 3-7 per channel), before saying it fails. */
     private boolean nextStream() {
         Channels.Channel c = channel;
@@ -370,6 +379,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
 
     private void build(long startMs, String note) {
         ready = false;
+        subsApplied = false;
         failed = false;
         startNote = note;
         hud.loading(name, kind());
@@ -388,7 +398,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         // tunneled playback when the decoder and the audio allow it; the TV's language first; subtitles off
         selector.setParameters(selector.buildUponParameters()
                 .setTunnelingEnabled(true)
-                .setPreferredAudioLanguages(Locale.getDefault().getLanguage())
+                .setPreferredAudioLanguages(audioWant())
                 .build());
         // a bounded buffer: 15-50 s ahead, never more than 48 MB (the default allows 128 MB, too much for a TV);
         // playback starts with half a second in hand
@@ -723,6 +733,8 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     private void buildRows() {
         audioRefs.clear();
         textRefs.clear();
+        audioLangOf.clear();
+        textLangOf.clear();
         List<String> audio = new ArrayList<>(), text = new ArrayList<>();
         if (player != null) {
             for (Tracks.Group g : player.getCurrentTracks().getGroups()) {
@@ -734,9 +746,11 @@ public final class Player extends Activity implements androidx.media3.common.Pla
                     if (type == C.TRACK_TYPE_AUDIO) {
                         audio.add(describe(f, audio.size(), true));
                         audioRefs.add(new Ref(g, i));
+                        audioLangOf.add(f.language == null ? "" : f.language);
                     } else {
                         text.add(describe(f, text.size(), false));
                         textRefs.add(new Ref(g, i));
+                        textLangOf.add(f.language == null ? "" : f.language);
                     }
                 }
             }
@@ -749,6 +763,29 @@ public final class Player extends Activity implements androidx.media3.common.Pla
             rowsOf[PlayerHud.MENU_SUBS] = distinct(text.toArray(new String[0]));
         }
         rowsOf[PlayerHud.MENU_FORMAT] = new String[]{"Adapter à l'écran", "Remplir l'écran"};
+        applySubsOnce();   // the subtitle left on last time, once the tracks are known
+    }
+
+    /** The subtitles the user left on (and in which language) come back with the next film, once per stream. */
+    private void applySubsOnce() {
+        if (subsApplied || player == null) return;
+        subsApplied = true;
+        boolean on = Prefs.subs();
+        String want = Prefs.subsLang();
+        TrackSelectionParameters.Builder p = player.getTrackSelectionParameters().buildUpon();
+        if (!on) {
+            p.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true);
+            player.setTrackSelectionParameters(p.build());
+            return;
+        }
+        for (int i = 0; i < textRefs.size(); i++) {
+            if (!want.isEmpty() && i < textLangOf.size() && !want.equalsIgnoreCase(textLangOf.get(i))) continue;
+            Ref r = textRefs.get(i);
+            p.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setOverrideForType(new TrackSelectionOverride(r.group.getMediaTrackGroup(), r.index));
+            player.setTrackSelectionParameters(p.build());
+            return;
+        }
     }
 
     int menuChecked(int menu) {
@@ -782,14 +819,18 @@ public final class Player extends Activity implements androidx.media3.common.Pla
             if (row < 0 || row >= audioRefs.size()) return;
             Ref r = audioRefs.get(row);
             p.setOverrideForType(new TrackSelectionOverride(r.group.getMediaTrackGroup(), r.index));
+            if (row < audioLangOf.size()) Prefs.setAudioLang(audioLangOf.get(row));   // kept for the next films
         } else if (row == 0) {
             p.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true);
             hud.subtitle(null);
             hud.subtitleImages(new Bitmap[0], new RectF[0]);
+            Prefs.setSubs(false);
         } else if (row - 1 < textRefs.size()) {
             Ref r = textRefs.get(row - 1);
             p.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                     .setOverrideForType(new TrackSelectionOverride(r.group.getMediaTrackGroup(), r.index));
+            Prefs.setSubs(true);
+            if (row - 1 < textLangOf.size()) Prefs.setSubsLang(textLangOf.get(row - 1));
         }
         player.setTrackSelectionParameters(p.build());
     }

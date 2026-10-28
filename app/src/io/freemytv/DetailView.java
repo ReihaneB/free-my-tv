@@ -1465,10 +1465,13 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         if (list == null || list.isEmpty()) return "";
         String[] p = list.split("\\s*,\\s*");
         StringBuilder b = new StringBuilder();
+        java.util.Set<String> seen = new java.util.HashSet<>();
         for (int i = 0, n = 0; i < p.length && n < max; i++) {
-            if (p[i].trim().isEmpty()) continue;
+            String name = p[i].trim();
+            if (name.isEmpty()) continue;
+            if (!seen.add(name.toLowerCase(java.util.Locale.ROOT))) continue;   // the panel repeats the director
             if (b.length() > 0) b.append(", ");
-            b.append(p[i].trim());
+            b.append(name);
             n++;
         }
         return b.toString();

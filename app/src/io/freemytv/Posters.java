@@ -43,6 +43,29 @@ final class Posters {
         dir = new File(c.getCacheDir(), "posters3");   // new decode: old 65x39 files must not be reused
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
+        trim();
+    }
+
+    /**
+     * A cap on the pictures kept on disk (300 Mo): past it, the oldest go until it is back under 250 Mo. The home
+     * screen walks thousands of posters; without this the cache grows until the TV is full.
+     */
+    private void trim() {
+        final long cap = 300L << 20, keep = 250L << 20;
+        io.execute(() -> {
+            File[] files = dir.listFiles();
+            if (files == null || files.length == 0) return;
+            long total = 0;
+            for (File f : files) total += f.length();
+            if (total <= cap) return;
+            java.util.Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            for (File f : files) {
+                if (total <= keep) break;
+                long n = f.length();
+                if (f.delete()) total -= n;
+            }
+            AppLog.w("posters: cache ramené à " + (total >> 20) + " Mo");
+        });
     }
 
     /** The bitmap if it's already here (memory or disk); otherwise null and it's fetched in the background. */

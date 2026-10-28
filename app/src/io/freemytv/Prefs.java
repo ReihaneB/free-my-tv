@@ -51,7 +51,8 @@ final class Prefs {
             return;
         }
         play().edit().putString(key(url), name + "\t" + position + "\t" + duration + "\t" + url + "\t"
-                + (logo == null ? "" : logo) + "\t" + (series == null ? "" : series)).apply();
+                + (logo == null ? "" : logo) + "\t" + (series == null ? "" : series) + "\t"
+                + System.currentTimeMillis()).apply();
     }
 
     /** The channel last watched (its number): the Direct tab starts there. Not a setting: no version bump. */
@@ -108,6 +109,7 @@ final class Prefs {
 
     static List<Iptv.Item> resume(String type) {
         List<Iptv.Item> out = new ArrayList<>();
+        List<Object[]> found = new ArrayList<>();
         for (java.util.Map.Entry<String, ?> e : new ArrayList<>(play().getAll().entrySet())) {
             String[] f = String.valueOf(e.getValue()).split("\t", -1);
             if (f.length < 4) continue;
@@ -120,8 +122,18 @@ final class Prefs {
             it.url = url;
             it.logo = f.length > 4 ? f[4] : "";
             it.id = f.length > 5 ? f[5] : "";   // an episode: its series
-            out.add(it);
+            long t = 0;
+            if (f.length > 6) {
+                try {
+                    t = Long.parseLong(f[6]);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            found.add(new Object[]{it, t});
         }
+        // the last one watched first: the row must read like a history, not like the store's own order
+        found.sort((a, b) -> Long.compare((Long) b[1], (Long) a[1]));
+        for (Object[] o : found) out.add((Iptv.Item) o[0]);
         return out;
     }
 
@@ -250,6 +262,18 @@ final class Prefs {
         put("favs", b.toString());
     }
 
+    // MARK: - Langues de lecture (mémoire entre les films)
+
+    /** The audio language last chosen ("fra", "eng"…); "" = the TV's own. */
+    static String audioLang() { return sp().getString("audioLang", ""); }
+    static void setAudioLang(String v) { put("audioLang", v == null ? "" : v); }
+
+    /** Subtitles last left on, and in which language. */
+    static boolean subs() { return sp().getBoolean("subs", false); }
+    static void setSubs(boolean on) { put("subs", on); }
+    static String subsLang() { return sp().getString("subsLang", ""); }
+    static void setSubsLang(String v) { put("subsLang", v == null ? "" : v); }
+
     // MARK: - Ma liste (films et séries mis de côté)
 
     private static volatile int listVersion;
@@ -300,6 +324,15 @@ final class Prefs {
                     + (url == null ? "" : url) + "\t" + System.currentTimeMillis()).apply();
         }
         listVersion++;
+    }
+
+    /** Takes a title out of « Ma liste » (the row's INFO), without touching the rest. */
+    static void removeFromList(String key) {
+        if (key == null || key.isEmpty()) return;
+        if (mylist().contains(key)) {
+            mylist().edit().remove(key).apply();
+            listVersion++;
+        }
     }
 
     /** Everything put aside, the last one added first. */

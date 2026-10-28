@@ -2465,6 +2465,16 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private void hideFocusedCategory() {
         if (zone != Z_ROW || rows.isEmpty() || rowIndex >= rows.size()) return;
         Row row = rows.get(rowIndex);
+        if (row.title.equals("Ma liste")) {   // INFO on a card puts the title out of the list
+            if (colIndex < 0 || colIndex >= row.items.size()) return;
+            Tile t = row.items.get(colIndex);
+            boolean series = t.url.isEmpty() && !t.seriesId.isEmpty();
+            String id = series ? t.seriesId : vodId(t.url);
+            Prefs.removeFromList(Prefs.listKey(series, id));
+            showToast(t.title + " retiré de « Ma liste »");
+            rebuild();
+            return;
+        }
         if (row.catId.isEmpty()) {
             showToast(row.restore ? "OK sur une catégorie pour la remettre" : "Seules les catégories se masquent");
             return;

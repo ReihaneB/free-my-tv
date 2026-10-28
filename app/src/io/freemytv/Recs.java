@@ -55,7 +55,7 @@ final class Recs {
     private static final String IMAGES = "https://image.tmdb.org/t/p/original";
     private static final long LIST_EVERY = 6 * 3600_000L;
     /** Bump when what is saved for each title changes (the saved list is discarded and fetched again). */
-    private static final int CACHE_VERSION = 3;
+    private static final int CACHE_VERSION = 4;
     private static final int MANHA = 0, TARDE = 1, NOITE = 2;
     static final String[] PERIOD_LABEL = {"PARA ESTA MANHÃ", "PARA ESTA TARDE", "PARA ESTA NOITE"};
     static final String[] PERIOD_LABEL_EN = {"THIS MORNING", "THIS AFTERNOON", "TONIGHT"};
@@ -232,6 +232,7 @@ final class Recs {
             p.meta = names.containsKey(it.group) ? names.get(it.group) : "";
             p.url = it.url;
             p.backdrop = null;
+            p.detailed = true;   // an IPTV title has no TMDB id: nothing to ask about it
             out.add(p);
         }
         return out;
@@ -302,7 +303,7 @@ final class Recs {
                 for (Pick pick : wanted()) {
                     tried++;
                     try {
-                        if (!pick.detailed) fetchDetails(pick);
+                        if (!pick.detailed && pick.id > 0) fetchDetails(pick);   // an IPTV pick has no id: skip
                         if (pick.pkg != null) download(pick);
                     } catch (Exception e) {
                         failures++;
@@ -605,7 +606,7 @@ final class Recs {
         try {
             int code = c.getResponseCode();
             if (code == 401) throw new IOException("TMDB rejected the key");
-            if (code != 200) throw new IOException("TMDB returned HTTP " + code);
+            if (code != 200) throw new IOException("TMDB returned HTTP " + code + " for " + path);
             return new JSONObject(read(c.getInputStream()));
         } finally {
             c.disconnect();

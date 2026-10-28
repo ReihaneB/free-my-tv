@@ -118,7 +118,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
 
     // animation (all eased toward their target in doFrame)
     private float primaryOn, scroll, scrollTo, slide, slideTo, enter, infoA = 1, infoTo = 1;
-    private float[] actionOn = new float[3], tabOn = new float[0], epOn = new float[0];
+    private float[] actionOn = new float[0], tabOn = new float[0], epOn = new float[0];
     private boolean framePosted;
     private long lastFrame;
 
@@ -506,6 +506,8 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
         if (!req.series && !listKey().isEmpty()) actions.add(A_WATCHED);   // a film: seen, by hand
         if (watching()) actions.add(A_FORGET);   // last, like Apple's "Supprimer de À suivre"
         if (action >= actions.size()) action = Math.max(0, actions.size() - 1);
+        // one slot per round button: a fixed table lit the last two at once once a fifth button appeared
+        if (actionOn.length != actions.size()) actionOn = new float[Math.max(1, actions.size())];
         if (zone == Z_ICONS && actions.isEmpty()) zone = Z_PRIMARY;
         buildMeta();
         if (req.series) buildSeason();
@@ -1169,7 +1171,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
 
         // the round buttons, and the name of the one with the focus under it
         for (int i = 0; i < actions.size(); i++) {
-            float a = actionOn[Math.min(actionOn.length - 1, i)];
+            float a = i < actionOn.length ? actionOn[i] : 0f;
             float d = ICON_D * k * (1 + 0.08f * a), icx = MARGIN * k + ICON_D * k / 2 + i * (ICON_D + ICON_GAP) * k;
             float icy = iconsTop + ICON_D * k / 2;
             box.set(icx - d / 2, icy - d / 2, icx + d / 2, icy + d / 2);

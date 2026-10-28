@@ -72,7 +72,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
 
     // what is playing
     private String title = "", titleShown = "", meta = "", note = "";
-    private boolean ready, live, buffering, failed;
+    private boolean ready, live, buffering, failed, refused;
     private String error = "";
     private long duration;
 
@@ -441,6 +441,7 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
         this.meta = meta;
         ready = false;
         failed = false;
+        refused = false;
         // a new stream (or the same one built again): nothing of the last one stays
         live = false;
         duration = 0;
@@ -536,8 +537,23 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
 
     void fail(String why) {
         failed = true;
+        refused = false;
         error = why == null ? "" : why;
         errorDetail = "";
+        buffering = false;
+        hudTo = 0;
+        reveal(errorView);
+        errorView.invalidate();
+        kick();
+    }
+
+    /**
+     * The panel answered with an empty page: the account is already at its simultaneous-connection limit (2). No
+     * stream will open until another device lets go, so say it plainly and offer to try again.
+     */
+    void refused() {
+        failed = true;
+        refused = true;
         buffering = false;
         hudTo = 0;
         reveal(errorView);
@@ -593,6 +609,15 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     }
 
     boolean key(int code, KeyEvent e) {
+        // the panel refused a third connection: OK asks again, Back leaves — nothing else means anything
+        if (failed && refused) {
+            if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
+                    || code == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                if (e.getRepeatCount() == 0) host.retry();
+                return true;
+            }
+            return false;
+        }
         if (failed && channel == null) return false;   // a channel that fails can still be zapped away from
         int repeat = e.getRepeatCount();
         // the episode is ending and its successor is on screen: OK skips the credits and plays it now
@@ -1584,6 +1609,17 @@ final class PlayerHud extends ViewGroup implements Choreographer.FrameCallback {
     }
 
     private void paintError(Canvas c) {
+        if (refused) {
+            float cw = 1080 * k, ch = 290 * k;
+            box.set(w / 2f - cw / 2, h / 2f - ch / 2, w / 2f + cw / 2, h / 2f + ch / 2);
+            fill.setColor(0xD91A1F24);
+            c.drawRoundRect(box, 34 * k, 34 * k, fill);
+            c.drawText("Deux connexions sont déjà ouvertes.", w / 2f, box.top + 92 * k, errP);
+            c.drawText("Ton abonnement en autorise 2. Ferme l'autre appareil,", w / 2f, box.top + 150 * k, errSmallP);
+            c.drawText("puis appuie sur OK.", w / 2f, box.top + 190 * k, errSmallP);
+            c.drawText("OK réessayer  ·  Retour quitter", w / 2f, box.top + 246 * k, errSmallP);
+            return;
+        }
         float cw = 900 * k, ch = 220 * k;
         box.set(w / 2f - cw / 2, h / 2f - ch / 2, w / 2f + cw / 2, h / 2f + ch / 2);
         fill.setColor(0xD91A1F24);

@@ -374,11 +374,12 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         startNote = note;
         hud.loading(name, kind());
 
-        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("FreeMyTV/1.0")
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(10_000)
-                .setReadTimeoutMs(15_000);
+        androidx.media3.datasource.DefaultHttpDataSource.Factory http =
+                new androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                        .setUserAgent("FreeMyTV/1.0")
+                        .setAllowCrossProtocolRedirects(true)
+                        .setConnectTimeoutMs(10_000)
+                        .setReadTimeoutMs(15_000);
         DefaultExtractorsFactory extractors = new DefaultExtractorsFactory()
                 .setConstantBitrateSeekingEnabled(true)
                 .setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES
@@ -558,9 +559,47 @@ public final class Player extends Activity implements androidx.media3.common.Pla
             return;
         }
         AppLog.w("player: " + e.getErrorCodeName() + " " + e.getMessage());
-        if (nextStream()) return;
-        failed = true;
-        hud.fail(e.getErrorCodeName().replace("ERROR_CODE_", "").toLowerCase(Locale.ROOT).replace('_', ' '));
+        // the panel refuses a stream past the account's two connections with an empty text/html page: ask it plainly
+        final String why = e.getErrorCodeName().replace("ERROR_CODE_", "").toLowerCase(Locale.ROOT).replace('_', ' ');
+        final String probed = url;
+        new Thread(() -> {
+            boolean refused = looksRefused(probed);
+            main.post(() -> {
+                if (refused) {
+                    failed = true;
+                    hud.refused();
+                    return;
+                }
+                if (nextStream()) return;
+                failed = true;
+                hud.fail(why);
+            });
+        }, "panel-probe").start();
+        return;
+    }
+
+    /**
+     * The panel's answer when the account's two connections are already in use: HTTP 200 with a text/html page and no
+     * body, where a stream is video/mp2t (measured 28/10). One short request tells them apart from a real failure.
+     */
+    private static boolean looksRefused(String u) {
+        if (u == null || u.isEmpty()) return false;
+        java.net.HttpURLConnection c = null;
+        try {
+            c = (java.net.HttpURLConnection) new java.net.URL(u).openConnection();
+            c.setInstanceFollowRedirects(true);
+            c.setConnectTimeout(6000);
+            c.setReadTimeout(6000);
+            c.setRequestProperty("User-Agent", "FreeMyTV/1.0");
+            c.setRequestProperty("Range", "bytes=0-1");
+            int code = c.getResponseCode();
+            String type = c.getContentType();
+            return code == 200 && type != null && type.toLowerCase(Locale.ROOT).contains("text/html");
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.disconnect();
+        }
     }
 
     @Override public void onVideoSizeChanged(VideoSize size) {
@@ -829,6 +868,18 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         if (hud != null && hud.back()) return;
         if (backToLive()) return;
         super.onBackPressed();
+    }
+
+    /** OK on the refusal screen: ask the panel again for the same stream, without leaving the player. */
+    void retry() {
+        if (player == null) return;
+        failed = false;
+        ready = false;
+        hud.loading(name, kind());
+        hud.channel(channel, replaying);
+        player.setMediaItem(MediaItem.fromUri(url));
+        player.prepare();
+        player.setPlayWhenReady(true);
     }
 
     /** Remembers where this stream stopped, so the film or episode comes back where it was left. */

@@ -69,6 +69,9 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         String title = "";
         int kind, seeTab = -1;
         boolean captions;           // "En cours": title and time left under each card
+        String catId = "";          // a Direct category: INFO puts it away
+        String catName = "";
+        boolean restore;            // the row of the categories put away: OK brings one back
         final List<Tile> items = new ArrayList<>();
         float y, h;
         int col, win;
@@ -654,13 +657,21 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
     private void liveRows() {
         Iptv iptv = Iptv.get(getContext());
         Channels lineup = Channels.get(getContext());
-        for (Channels.Section s : lineup.sections) channelShelf(s.title.equals("TNT") ? "TNT" : s.title, s.channels, -1);
+        for (Channels.Section s : lineup.sections) {
+            String key = "section:" + s.title;
+            if (Prefs.hiddenCategory(key)) continue;
+            channelShelf(s.title.equals("TNT") ? "TNT" : s.title, s.channels, -1);
+            Row made = rows.get(rows.size() - 1);
+            made.catId = key;   // INFO puts a whole section away too
+            made.catName = s.title;
+        }
         if (lineup.sections.isEmpty()) shelf("Chaînes françaises", frenchChannels(iptv, 24), false, -1, R_CARD);
         List<Iptv.Item> all = iptv.live();
         int built = 0;
         for (Iptv.Category c : iptv.liveCategories()) {
             if (built >= 10) break;
             if (c.name.toUpperCase(Locale.ROOT).contains("FRANCE")) continue;
+            if (Prefs.hiddenCategory(c.id)) continue;   // put away with INFO on its row
             List<Iptv.Item> items = new ArrayList<>();
             Set<String> seen = new HashSet<>();
             for (Iptv.Item i : all) {
@@ -672,7 +683,27 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             }
             if (items.size() < 4) continue;
             shelf(clean(c.name), items, false, -1, R_CARD);
+            Row made = rows.get(rows.size() - 1);
+            made.catId = c.id;
+            made.catName = clean(c.name);
             built++;
+        }
+        // the categories put away, so they can come back without a hidden setting somewhere
+        List<String[]> away = Prefs.hiddenCategories();
+        if (!away.isEmpty()) {
+            Row row = new Row();
+            row.title = "Catégories masquées";
+            row.kind = R_CARD;
+            row.restore = true;
+            for (String[] f : away) {
+                Tile t = new Tile();
+                t.title = f[1];
+                t.url = "hidden:" + f[0];
+                t.meta = "Catégorie";   // the spotlight says what it is, not « Film »
+                t.symbol = "chevron_right";
+                row.items.add(t);
+            }
+            rows.add(row);
         }
     }
 
@@ -2263,6 +2294,10 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
                     ((HomeActivity) getContext()).openGuide();
                 }
                 return true;
+            case KeyEvent.KEYCODE_INFO:
+                // on the Direct tab, INFO puts the focused category away (it comes back from « Catégories masquées »)
+                if (down && e.getRepeatCount() == 0) hideFocusedCategory();
+                return true;
             default:
                 if (code >= KeyEvent.KEYCODE_0 && code <= KeyEvent.KEYCODE_9 && !searchOpen) {
                     if (down && e.getRepeatCount() == 0) typeDigit(code - KeyEvent.KEYCODE_0);
@@ -2398,6 +2433,17 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         }
         if (rows.isEmpty()) return;
         Row row = rows.get(rowIndex);
+        if (row.restore) {   // « Catégories masquées »: OK brings the category back
+            if (colIndex >= 0 && colIndex < row.items.size()) {
+                String u = row.items.get(colIndex).url;
+                if (u.startsWith("hidden:")) {
+                    Prefs.showCategory(u.substring(7));
+                    showToast("Catégorie rétablie");
+                    rebuild();
+                }
+            }
+            return;
+        }
         if (colIndex == SEE_ALL) {
             if (row.seeTab >= 0) selectTab(row.seeTab);
             return;
@@ -2409,6 +2455,23 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
         boolean page = t.series || t.url.contains("/movie/") || (t.url.contains("/series/") && !t.seriesId.isEmpty());
         if (searchOpen && !page) closeSearch();
         open(t, row);
+    }
+
+    /**
+     * INFO on the Direct tab puts the focused category away: its row goes, and a « Catégories masquées » row at the end
+     * of the tab lists what was put away (OK brings one back). Only the panel's categories: the TNT and the lineup's own
+     * sections stay.
+     */
+    private void hideFocusedCategory() {
+        if (zone != Z_ROW || rows.isEmpty() || rowIndex >= rows.size()) return;
+        Row row = rows.get(rowIndex);
+        if (row.catId.isEmpty()) {
+            showToast(row.restore ? "OK sur une catégorie pour la remettre" : "Seules les catégories se masquent");
+            return;
+        }
+        Prefs.hideCategory(row.catId, row.catName);
+        showToast("Masquée : " + row.catName + "  ·  en fin de liste pour la remettre");
+        rebuild();
     }
 
     private void activateChrome() {

@@ -171,6 +171,46 @@ final class Prefs {
         return Integer.toHexString(url.hashCode());
     }
 
+    // MARK: - Catégories du Direct masquées
+
+    private static final String HIDDEN = "hiddenCats";
+
+    /** The Direct categories put away, as {id, name} pairs. */
+    static List<String[]> hiddenCategories() {
+        List<String[]> out = new ArrayList<>();
+        String v = sp().getString(HIDDEN, "");
+        if (v.isEmpty()) return out;
+        for (String line : v.split("\n")) {
+            if (line.isEmpty()) continue;
+            String[] f = line.split("\t", 2);
+            if (f.length == 2) out.add(f);
+        }
+        return out;
+    }
+
+    static boolean hiddenCategory(String id) {
+        if (id == null || id.isEmpty()) return false;
+        for (String[] f : hiddenCategories()) if (f[0].equals(id)) return true;
+        return false;
+    }
+
+    static void hideCategory(String id, String name) {
+        if (id == null || id.isEmpty() || hiddenCategory(id)) return;
+        StringBuilder b = new StringBuilder(sp().getString(HIDDEN, ""));
+        if (b.length() > 0) b.append('\n');
+        b.append(id).append('\t').append(name == null ? "" : name.replace('\t', ' ').replace('\n', ' '));
+        put(HIDDEN, b.toString());
+    }
+
+    static void showCategory(String id) {
+        StringBuilder b = new StringBuilder();
+        for (String[] f : hiddenCategories()) {
+            if (f[0].equals(id)) continue;
+            b.append(b.length() == 0 ? "" : "\n").append(f[0]).append('\t').append(f[1]);
+        }
+        put(HIDDEN, b.toString());
+    }
+
     // MARK: - Chaînes favorites
 
     /** The channels that go first on the home screen, by number; the TNT until the user picks (null = never picked). */

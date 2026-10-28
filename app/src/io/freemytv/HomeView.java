@@ -2237,9 +2237,14 @@ final class HomeView extends View implements Choreographer.FrameCallback, Iptv.L
             case KeyEvent.KEYCODE_CHANNEL_UP:
             case KeyEvent.KEYCODE_CHANNEL_DOWN:
             case KeyEvent.KEYCODE_LAST_CHANNEL:
-            case KeyEvent.KEYCODE_GUIDE:
                 // as on a box: P+ / P− from the home screen goes back to the channel last watched
                 if (down && e.getRepeatCount() == 0 && !openChannel(Prefs.lastChannel())) openChannel(1);
+                return true;
+            case KeyEvent.KEYCODE_GUIDE:
+                // GUIDE opens the guide: the channels, three hours across, and the three days of replay behind
+                if (down && e.getRepeatCount() == 0 && getContext() instanceof HomeActivity) {
+                    ((HomeActivity) getContext()).openGuide();
+                }
                 return true;
             default:
                 if (code >= KeyEvent.KEYCODE_0 && code <= KeyEvent.KEYCODE_9 && !searchOpen) {

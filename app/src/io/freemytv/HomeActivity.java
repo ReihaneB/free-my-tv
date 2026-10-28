@@ -28,6 +28,7 @@ public class HomeActivity extends Activity {
     private EditText search;
     private FrameLayout root;
     private DetailView detail;      // a film's or a series' page, over the home screen
+    private GuideView guide;        // le guide, over the home screen (GUIDE)
     private boolean resumed, searchHidden;
     private int prefsVersion = Prefs.version;   // settings changed while we were away: start over
 
@@ -97,6 +98,21 @@ public class HomeActivity extends Activity {
         root.addView(detail, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
+        guide = new GuideView(this, new GuideView.Host() {
+            @Override public void covered() {
+                home.pause();
+                home.setVisibility(View.INVISIBLE);
+                if (search.getVisibility() == View.VISIBLE) search.setVisibility(View.INVISIBLE);
+            }
+
+            @Override public void uncovered() {
+                home.setVisibility(View.VISIBLE);
+                if (resumed) home.resume();
+            }
+        });
+        root.addView(guide, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
         setContentView(root);
         getWindow().setBackgroundDrawable(null);
     }
@@ -146,6 +162,7 @@ public class HomeActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (guideOpen() && guide.onKey(event)) return true;     // the guide owns the arrows, OK and Back
         if (detailOpen() && detail.onKey(event)) return true;   // the page owns the arrows, OK and Back
         // While the search field is up it owns the keyboard: the home screen must not steal the arrows. Back closes
         // the search in one press — otherwise the first Back only hides the keyboard and the screen stays on results.
@@ -163,6 +180,16 @@ public class HomeActivity extends Activity {
 
     private boolean detailOpen() {
         return detail != null && detail.isOpen();
+    }
+
+    private boolean guideOpen() {
+        return guide != null && guide.isOpen();
+    }
+
+    /** GUIDE was pressed on the home screen: the guide covers it. */
+    void openGuide() {
+        if (guide == null || guideOpen() || detailOpen()) return;
+        guide.show();
     }
 
     /** A film's or a series' card was pressed: its page fades in over the home screen, which then rests. */

@@ -56,8 +56,8 @@ final class Epg {
     interface Listener { void onGuide(); }
 
     private static final long EVERY = 12 * 3600_000L;
-    /** What is kept in memory for a channel: from a day back (replay) to a day and a half ahead. */
-    private static final long BACK = 26 * 3600_000L, AHEAD = 36 * 3600_000L;
+    /** What is kept in memory for a channel: the panel's three days of replay, and a day and a half ahead. */
+    private static final long BACK = 74 * 3600_000L, AHEAD = 36 * 3600_000L;
 
     private static Epg instance;
 
@@ -131,6 +131,13 @@ final class Epg {
         return out;
     }
 
+    /** When this channel's guide starts and ends (ms), from memory; null when nothing is loaded. */
+    long[] extent(String channel) {
+        Show[] a = shows(channel, System.currentTimeMillis());
+        if (a == null || a.length == 0) return null;
+        return new long[]{a[0].start, a[a.length - 1].stop};
+    }
+
     /** Loads these channels' programmes into memory on the worker (one indexed read each), then tells the screens. */
     void warm(Collection<String> channels) {
         final List<String> want = new ArrayList<>();
@@ -186,6 +193,13 @@ final class Epg {
             db.execSQL("CREATE TABLE IF NOT EXISTS p (ch TEXT NOT NULL, start INTEGER NOT NULL, stop INTEGER NOT NULL,"
                     + " title TEXT, info TEXT)");
             db.execSQL("CREATE INDEX IF NOT EXISTS p_ch ON p (ch, start)");
+            // one row per programme, so a new fetch replaces it instead of piling up: what the panel forgets stays
+            try {
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS p_key ON p (ch, start)");
+            } catch (RuntimeException e) {
+                db.execSQL("DELETE FROM p WHERE rowid NOT IN (SELECT MIN(rowid) FROM p GROUP BY ch, start)");
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS p_key ON p (ch, start)");
+            }
         }
         return db;
     }
@@ -261,15 +275,18 @@ final class Epg {
 
     private int read(File xml) throws Exception {
         SQLiteDatabase d = db();
-        long from = System.currentTimeMillis() - 3 * 24 * 3600_000L;
+        long now = System.currentTimeMillis();
+        long from = now - 3 * 24 * 3600_000L;
         int n = 0;
         try (InputStream in = new BufferedInputStream(new FileInputStream(xml), 1 << 16)) {
             XmlPullParser p = Xml.newPullParser();
             p.setInput(in, "UTF-8");
             d.beginTransaction();
             try {
-                d.delete("p", null, null);
-                SQLiteStatement ins = d.compileStatement("INSERT INTO p (ch, start, stop, title, info) VALUES (?,?,?,?,?)");
+                // what the panel no longer sends is kept (days of history), the rest of the base is replaced
+                d.delete("p", "stop < ?", new String[]{String.valueOf(now - 4 * 24 * 3600_000L)});
+                SQLiteStatement ins = d.compileStatement(
+                        "INSERT OR REPLACE INTO p (ch, start, stop, title, info) VALUES (?,?,?,?,?)");
                 String ch = null, title = null, info = null;
                 long start = 0, stop = 0;
                 for (int ev = p.getEventType(); ev != XmlPullParser.END_DOCUMENT; ev = p.next()) {

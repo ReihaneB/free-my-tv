@@ -53,6 +53,9 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     static final String EXTRA_CHANNEL = "channel";
     /** From the film's page: "Reprendre au début" (the saved place is ignored), and an episode's series. */
     static final String EXTRA_FROM_START = "fromStart", EXTRA_SERIES = "series";
+    /** From the guide: a past programme, played through the channel's replay (its own hours and title). */
+    static final String EXTRA_REPLAY_START = "replayStart", EXTRA_REPLAY_STOP = "replayStop",
+            EXTRA_REPLAY_TITLE = "replayTitle";
 
     private FrameLayout root;
     private SurfaceView surface;
@@ -69,6 +72,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
     private Channels.Channel channel, previous;
     private int stream;
     private Epg.Show replaying;          // "Depuis le début": the programme played from the panel's replay
+    private long replayStart;            // from the guide: the past programme to open, in ms (0: none)
     private long segmentAt;              // where the replay's current piece starts (the panel cuts at the minute)
     private long seekAfterReady = -1;
     private Channels.Channel pendingZap;
@@ -103,6 +107,14 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         fromStart = intent.getBooleanExtra(EXTRA_FROM_START, false);
         if (url == null || url.isEmpty()) { finish(); return; }
         channel = channelOf(intent, url);
+        // from the guide, a programme of yesterday evening: the channel's replay, from its first second
+        long replayAt = intent.getLongExtra(EXTRA_REPLAY_START, 0);
+        if (replayAt > 0 && channel != null && channel.replay != null) {
+            long stop = intent.getLongExtra(EXTRA_REPLAY_STOP, replayAt + 3 * 3600_000L);
+            String title = intent.getStringExtra(EXTRA_REPLAY_TITLE);
+            replaying = new Epg.Show(replayAt, stop, title == null ? name : title, "");
+            replayStart = replayAt;
+        }
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -155,6 +167,7 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         resumeMs = -1;
         videoW = videoH = 0;
         replaying = null;
+        replayStart = 0;
         channel = channelOf(intent, url);
         java.util.Arrays.fill(rowsOf, null);
         hud.subtitle(null);
@@ -341,6 +354,12 @@ public final class Player extends Activity implements androidx.media3.common.Pla
         super.onStart();
         started = true;
         if (url == null || url.isEmpty() || player != null) return;
+        if (replayStart > 0) {   // a programme picked in the guide: its replay, not the live stream
+            long at = replayStart;
+            replayStart = 0;
+            replayFrom(at);
+            return;
+        }
         long at = resumeMs >= 0 ? resumeMs : isLive() || fromStart ? 0 : Prefs.positionOf(url);
         fromStart = false;   // once: back from standby, it goes on from where it is
         String note = at > 0 && resumeMs < 0 ? "Reprise à " + PlayerHud.clock(at / 1000) : "";

@@ -826,7 +826,7 @@ final class DetailView extends FrameLayout implements Choreographer.FrameCallbac
 
     private String nameOf(int a) {
         if (a == A_LIST) return inList() ? "Dans ma liste" : "Ma liste";
-        if (a == A_FORGET && req.series) return zone == Z_EPISODES ? "Retirer cet épisode" : "Retirer de « En cours »";
+        if (a == A_FORGET && req.series) return zone == Z_EPISODES ? "Retirer cet épisode" : "Retirer l'épisode en cours";
         if (a == A_WATCHED) return Prefs.isWatched(playUrl) ? "Vu — décocher" : "Marquer comme vu";
         return ACTION_NAME[a];
     }

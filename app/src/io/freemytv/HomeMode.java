@@ -64,6 +64,10 @@ final class HomeMode {
         // Philips / TP Vision
         "org.droidtv.nettv.market", "org.droidtv.nettvregistration",                  // app store, registration nags
         "fusion.android.tv.demo",                                                    // store demo
+        // The MediaTek "Live TV" app: the TV starts it by itself ~26 s after boot (it takes the top of the screen,
+        // above our home) and it is what draws the HDMI inputs. Cut, the TV boots straight to the home screen; the
+        // HDMI inputs go dark with it (HomeApps hides them when nothing can open them). Back with Original mode.
+        "com.mediatek.wwtv.tvcenter",
     };
 
     /** The voice assistant, only with disable_assistant=true in config.properties (the mic button stops working). */

@@ -2,6 +2,35 @@
 
 Relevé du 20/10/2026 · **149 paquets** · APK 1164 Mo dont 417 Mo en /system · /data 2,9 Go / 4,0 Go (1,0 Go libre).
 
+## 0. Lot du 29/10 — « ce qui n'est plus utilisé » (état actuel)
+
+Relevé d'usage sur 6 semaines (`dumpsys usagestats`, section *yearly* : lancements, temps, dernière utilisation).
+**99 paquets** · `/data` 1,96 Go / 4,0 Go → **2,13 Go libres (50 %)**.
+
+| Paquet | Nom | Poids | Preuve d'inusage | Sort |
+|---|---|---|---|---|
+| `com.google.android.tts` | Synthèse vocale Google | 322 Mo (dont 230 de voix) | 0 lancement | retiré du profil (`install-existing` testé) |
+| `fr.m6.m6replay` | M6+ | 137 Mo | 0 lancement depuis le 23/05 | désinstallé (splits sauvegardés) |
+| `com.android.vending` | Play Store | 113 Mo | 3 min en 6 semaines | retiré du profil |
+| `com.google.android.apps.mediashell` | Coquille recherche/Assistant | 115 Mo | 0 lancement | **gardé** : la recherche vocale en dépend |
+| `com.valvesoftware.steamlink` | Steam Link | 90 Mo | 0 lancement, mis à jour tout seul le 28/10 | désinstallé (splits sauvegardés) |
+| `com.amazon.amazonvideo.livingroom` | Prime Video | 68 Mo | 0 lancement | retiré du profil |
+| `com.esaba.downloader` | Downloader | 51 Mo | 0 lancement | désinstallé (splits sauvegardés) |
+| `com.wolf.google.lm` | Launcher Manager | 3 Mo | 0 lancement | désinstallé |
+
+Sauvegardes : `/Volumes/Quick-Storage/Backup/free-my-tv/apps/{m6-5.118.0,steamlink-1.4.5,downloader-2.0.4,sdcard-downloader-folder}/`
+(la dernière = les 4 APK que Downloader avait téléchargés dans `/sdcard/Download/Downloader`, 159 Mo).
+Retour d'un paquet préinstallé : `adb shell cmd package install-existing --user 0 <pkg>` ; d'un paquet tiers :
+`adb install-multiple base.apk split_config.*.apk`.
+
+Ménage fait en même temps : `/sdcard` nettoyé des captures de test (`fmt_*.png`, `x.png`, `r.raw`, `*.xml`…) et du
+dossier de Downloader (159 Mo) ; `pm trim-caches` a rendu 360 Mo de caches (Gboard, affiches Free My TV, SmartTube).
+
+**Gardés exprès** : `mediashell` (recherche vocale), `flar2.homebutton` (Button Mapper, service d'accessibilité
+actif — remap des touches de la télécommande), `com.google.android.tv.remote.service` (pilotage Home Assistant),
+`com.mediatek.wwtv.tvcenter` (chaînes/HDMI), `org.droidtv.eum` + `com.android.tv.ota` (mises à jour), GMS/WebView/Gboard,
+`tvlauncher` + `backdrop` (gelés, filet du mode Original).
+
 ## 1. Ce qui peut partir — promo, démos, doublons
 
 | Paquet | Nom | APK | Version | État |
@@ -46,16 +75,16 @@ Relevé du 20/10/2026 · **149 paquets** · APK 1164 Mo dont 417 Mo en /system �
 | Paquet | Nom | APK | Version | État |
 |---|---|---|---|---|
 | `tv.twitch.android.app` | Twitch | 56.0 Mo | 13.0.0.2 | active |
-| `fr.m6.m6replay` | M6+ | 29.0 Mo | 5.118.0 | active |
+| `fr.m6.m6replay` | M6+ | 29.0 Mo | 5.118.0 | supprimée le 29/10 |
 | `org.smarttube.stable` | SmartTube | 25.0 Mo | 32.10 | active |
-| `com.esaba.downloader` | Downloader | 11.9 Mo | 2.0.4-ForGoogleAndroidDe | active |
+| `com.esaba.downloader` | Downloader | 11.9 Mo | 2.0.4-ForGoogleAndroidDe | supprimée le 29/10 |
 | `flar2.homebutton` | Button Mapper | 11.5 Mo | 4.12 | active |
-| `app.zeniptv.mobile` | ZEN IPTV | 9.1 Mo | 2.1.0 | active |
-| `com.overdevs.at4k` | Lanceur AT4K (ton home actuel) | 9.1 Mo | 1.2 | désactivée |
+| `app.zeniptv.mobile` | ZEN IPTV | 9.1 Mo | 2.1.0 | supprimée (remplacée par Free My TV) |
+| `com.overdevs.at4k` | Lanceur AT4K | 9.1 Mo | 1.2 | supprimée (APK sauvegardés) |
 | `com.limelight` | Moonlight | 5.3 Mo | 12.2 | active |
-| `com.wolf.google.lm` | — | 1.5 Mo | 1.0.4 | active |
+| `com.wolf.google.lm` | Launcher Manager | 1.5 Mo | 1.0.4 | supprimée le 29/10 |
 | `io.freemytv` | — | 1.2 Mo | v2026.10.20-1208 | active |
-| `com.valvesoftware.steamlink` | Steam Link | 0.5 Mo | 1.4.2 | active |
+| `com.valvesoftware.steamlink` | Steam Link | 90 Mo | 1.4.5 | supprimée le 29/10 |
 
 ## 3. Système — à ne jamais supprimer
 

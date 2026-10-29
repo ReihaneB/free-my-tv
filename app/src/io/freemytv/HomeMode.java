@@ -1,7 +1,12 @@
 package io.freemytv;
 
+import android.app.AppOpsManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.os.Build;
+import android.os.Process;
 import android.os.SystemClock;
 
 import org.json.JSONArray;
@@ -569,6 +574,49 @@ final class HomeMode {
     }
 
     // MARK: - State (a file shared by the two processes; atomic writes)
+
+    /**
+     * Ramène l'accueil au premier plan juste après le démarrage. Sur cette TV, c'est l'app du tuner
+     * (« Live TV », com.mediatek.wwtv.tvcenter) que le service MediaTek fait remonter ~25 s après le boot, par-dessus
+     * nous (START ACTION_REQUEST_TOP_RESUME, uid 1000). Démarrer une activity depuis l'arrière-plan n'est permis
+     * qu'avec SYSTEM_ALERT_WINDOW accordé (une fois, en adb : cmd appops set io.freemytv SYSTEM_ALERT_WINDOW allow) :
+     * sans lui le système bloque et le log dit « démarrage en arrière-plan non autorisé ».
+     */
+    static void takeFrontNow(Context app) {
+        if (!FREE.equals(state(app).optString("mode"))) return;   // mode Original : ne pas se battre avec le lanceur
+        if (!isHome(app)) return;
+        if (!canStartFromBackground(app)) {
+            AppLog.w("boot : démarrage en arrière-plan refusé (SYSTEM_ALERT_WINDOW manquant)");
+            return;
+        }
+        try {
+            Intent i = new Intent(app, HomeActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            app.startActivity(i);
+            AppLog.w("boot : accueil ramené au premier plan");
+        } catch (Throwable t) {
+            AppLog.w("boot : accueil non ramené (" + t + ")");
+        }
+    }
+
+    /** Vrai si c'est bien nous que la touche Home ouvre (resolve-activity, le rôle HOME ne répond pas en API 30). */
+    static boolean isHome(Context c) {
+        try {
+            ResolveInfo ri = c.getPackageManager().resolveActivity(
+                    new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+                    PackageManager.MATCH_DEFAULT_ONLY);
+            return ri != null && ri.activityInfo != null && PKG.equals(ri.activityInfo.packageName);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** Le droit de lancer une activity depuis l'arrière-plan (l'exemption est l'appop SYSTEM_ALERT_WINDOW). */
+    private static boolean canStartFromBackground(Context c) {
+        AppOpsManager ops = c.getSystemService(AppOpsManager.class);
+        return ops != null && ops.checkOpNoThrow(AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW,
+                Process.myUid(), c.getPackageName()) == AppOpsManager.MODE_ALLOWED;
+    }
 
     static JSONObject state(Context c) {
         synchronized (FILE_LOCK) {

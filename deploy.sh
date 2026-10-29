@@ -27,6 +27,9 @@ connect() {
 install_apk() {   # $1 = apk, $2 = extra adb install flags
   connect
   adb install -r ${2:-} "$1" | tail -1
+  # Remettre l'appop qui autorise l'accueil a reprendre l'ecran apres le boot (il tombe parfois a la reinstal).
+  adb shell cmd appops set io.freemytv SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1
+  adb shell cmd appops get io.freemytv SYSTEM_ALERT_WINDOW | tr -d '\r'
   adb shell settings get secure screensaver_components | tr -d '\r'
 }
 

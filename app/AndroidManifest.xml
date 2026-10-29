@@ -145,10 +145,13 @@
 
         <receiver
             android:name=".HomeReceiver"
-            android:exported="false">
+            android:exported="false"
+            android:directBootAware="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="io.freemytv.action.FRONT" />
             </intent-filter>
         </receiver>
     </application>

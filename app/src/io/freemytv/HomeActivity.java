@@ -4,6 +4,9 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -31,6 +34,8 @@ public class HomeActivity extends Activity {
     private GuideView guide;        // le guide, over the home screen (GUIDE)
     private boolean resumed, searchHidden;
     private int prefsVersion = Prefs.version;   // settings changed while we were away: start over
+    private long lastKeyAt;                     // dernier appui sur la télécommande
+    private int bootRecoveries;                 // l'accueil repris au tuner après le boot (2 au maximum)
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -142,6 +147,24 @@ public class HomeActivity extends Activity {
         if (home != null) home.pause();
         if (detail != null) detail.pause();
         super.onPause();
+        recoverAfterBoot();
+    }
+
+    /**
+     * Sur cette TV, le service MediaTek remet l'app du tuner (« Live TV ») au premier plan ~25 s après le démarrage,
+     * par-dessus l'accueil. On reprend l'écran 1,5 s plus tard — mais seulement dans les quatre minutes qui suivent le
+     * boot, sans touche pressée juste avant (sinon c'est l'utilisateur qui a ouvert une appli, on ne le dérange pas) et
+     * écran allumé (sinon c'est la veille ou l'écran de veille qui prend la main).
+     */
+    private void recoverAfterBoot() {
+        final long now = SystemClock.elapsedRealtime();
+        if (bootRecoveries >= 2 || now > 240_000 || now - lastKeyAt <= 3_000) return;
+        final PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        if (pm == null || !pm.isInteractive()) return;
+        bootRecoveries++;
+        new Handler(getMainLooper()).postDelayed(() -> {
+            if (!isFinishing() && !hasWindowFocus()) HomeMode.takeFrontNow(this);
+        }, 1_500);
     }
 
     /** Home button pressed on the home screen: back to the entry state (focus on the first app, sheet closed). */
@@ -162,6 +185,7 @@ public class HomeActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN) lastKeyAt = SystemClock.elapsedRealtime();
         if (guideOpen() && guide.onKey(event)) return true;     // the guide owns the arrows, OK and Back
         if (detailOpen() && detail.onKey(event)) return true;   // the page owns the arrows, OK and Back
         // While the search field is up it owns the keyboard: the home screen must not steal the arrows. Back closes

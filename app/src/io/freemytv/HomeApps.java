@@ -285,6 +285,7 @@ final class HomeApps {
             } catch (RuntimeException ignored) {
             }
             if (!all && state != TvInputManager.INPUT_STATE_CONNECTED) continue;
+            if (!canOpen(c, info.getId())) continue;
             CharSequence custom = null;
             try {
                 custom = info.loadCustomLabel(c);
@@ -303,6 +304,19 @@ final class HomeApps {
         }
         Collections.sort(out, (a, b) -> a.number.compareTo(b.number));
         return out;
+    }
+
+    /**
+     * Une entrée HDMI n'est proposée que si quelque chose sait l'afficher. Sur ce Philips c'est l'app « Live TV »
+     * (com.mediatek.wwtv.tvcenter) qui dessine les prises : coupée, la tuile ne mènerait qu'à une erreur.
+     */
+    private static boolean canOpen(Context c, String inputId) {
+        try {
+            Intent view = new Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(inputId));
+            return c.getPackageManager().resolveActivity(view, 0) != null;
+        } catch (Throwable t) {
+            return true;    // dans le doute, ne pas cacher l'entrée
+        }
     }
 
     /** Words in a device's name, by the icon they pick: a game console, a streaming box, a sound system, a TV box. */

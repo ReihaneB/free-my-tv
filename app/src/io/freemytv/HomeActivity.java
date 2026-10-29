@@ -129,6 +129,7 @@ public class HomeActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        NetGuard.check(this);       // le Wi-Fi s'accroche parfois à une cellule lointaine : le lien est vérifié ici
         if (prefsVersion != Prefs.version) {
             prefsVersion = Prefs.version;
             HomeData.get(this).settingsChanged();

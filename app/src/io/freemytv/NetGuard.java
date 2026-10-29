@@ -49,8 +49,10 @@ final class NetGuard {
     private static final Pattern SSID = Pattern.compile("SSID: ([^,]*),");
     private static final Pattern RSSI = Pattern.compile("RSSI: (-?\\d+)");
     private static final Pattern SPEED = Pattern.compile("Link speed: (\\d+)Mbps");
-    /** Une ligne de `cmd wifi list-scan-results` : BSSID  fréquence  RSSI  âge  SSID  drapeaux. */
-    private static final Pattern CELL = Pattern.compile("^\\s*([0-9a-f:]{17})\\s+(\\d+)\\s+(-?\\d+)\\s+(\\d+)\\s+(\\S.*?)\\s{2,}\\[");
+    /** Une ligne de `cmd wifi list-scan-results` : BSSID  fréquence  RSSI  âge  SSID  drapeaux. L'âge s'écrit avec
+     *  une virgule décimale (« 462,802 ») selon la locale de la TV. */
+    private static final Pattern CELL = Pattern.compile(
+            "^\\s*([0-9a-f:]{17})\\s+(\\d+)\\s+(-?\\d+)\\s+[\\d,.]+\\s+(\\S.*?)\\s{2,}\\[");
 
     private static void run(Context app) throws IOException {
         if (!HomeMode.FREE.equals(HomeMode.state(app).optString("mode"))) return;
@@ -64,6 +66,7 @@ final class NetGuard {
         String ssid = s.group(1).trim();
         int rssi = Integer.parseInt(r.group(1));
         int speed = Integer.parseInt(v.group(1));
+        AppLog.w("wifi : " + ssid + " à " + speed + " Mbps (" + rssi + " dBm)");
         if (speed >= SLOW) return;                       // lien correct : on ne touche à rien
 
         try (Adb adb = Adb.connect(app, 8_000, null)) {
@@ -75,7 +78,7 @@ final class NetGuard {
         for (String line : scan.split("\n")) {
             Matcher m = CELL.matcher(line);
             if (!m.find()) continue;
-            if (!m.group(5).trim().equals(ssid)) continue;    // même réseau seulement
+            if (!m.group(4).trim().equals(ssid)) continue;    // même réseau seulement
             int cellRssi = Integer.parseInt(m.group(3));
             if (cellRssi > best) {
                 best = cellRssi;

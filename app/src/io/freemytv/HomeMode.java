@@ -68,6 +68,9 @@ final class HomeMode {
         // above our home) and it is what draws the HDMI inputs. Cut, the TV boots straight to the home screen; the
         // HDMI inputs go dark with it (HomeApps hides them when nothing can open them). Back with Original mode.
         "com.mediatek.wwtv.tvcenter",
+        // Google Play services and its Assistant/search shell: ~200 Mo of RAM for casting, voice search and the
+        // Google account — none of which is used here (Netflix reads its own DRM, no GMS needed). Back with Original.
+        "com.google.android.gms", "com.google.android.apps.mediashell",
     };
 
     /** The voice assistant, only with disable_assistant=true in config.properties (the mic button stops working). */

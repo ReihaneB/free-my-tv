@@ -83,7 +83,8 @@ final class HomeApps {
         {"netflix", "Netflix", "com.netflix.ninja", "E50914", "", "1"},
         // SmartTube in the YouTube slot: Reihane does not use the YouTube TV app.
         {"smartube", "SmartTube", "org.smarttube.stable", "E50914", "", "1"},
-        {"twitch", "Twitch", "tv.twitch.android.app", "9146FF", "", "1"},
+        // Twitch via S0undTV (client open source sans pub) : Reihane ne veut pas des pubs de l'app officielle.
+        {"s0und", "Twitch", "com.s0und.s0undtv", "9146FF", "", "1"},
         {"prime", "Prime Video", "com.amazon.amazonvideo.livingroom", "1A98FF", "tint", "0.96"},
         {"m6", "M6+", "fr.m6.m6replay", "1E1E1E", "", "1"},
         {"steam", "Steam Link", "com.valvesoftware.steamlink", "1B2838", "", "1"},
